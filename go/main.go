@@ -4,7 +4,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"math"
@@ -14,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bytedance/sonic"
 )
 
 const version = "go/0.1.0"
@@ -189,7 +190,7 @@ func walkGroup(paths []string, periodCutoff, winStart float64) groupResult {
 			}
 
 			var e entry
-			if err := json.Unmarshal([]byte(line), &e); err != nil {
+			if err := sonic.Unmarshal([]byte(line), &e); err != nil {
 				continue
 			}
 

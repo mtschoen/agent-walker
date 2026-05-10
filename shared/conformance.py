@@ -12,14 +12,21 @@ Discovers binaries via:
     cpp   -> cpp/build/walker(.exe)  or  cpp/build/Release/walker.exe
     zig   -> zig/zig-out/bin/walker(.exe)
 
+For each implementation we run:
+    1. Aggregate: full corpus root, expect totals to match expected.json::_aggregate
+    2. Per-fixture: each fixture isolated in a temp root, expect totals to match
+       expected.json::fixtures[name]. Catches over/under-counting that cancels
+       in the aggregate.
+
 Tolerance: ±$0.01 on trailing_usd and window_usd per fixture and aggregate.
 """
 from __future__ import annotations
 
 import json
-import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -55,14 +62,14 @@ def find_binary(lang: str) -> Path | None:
     return None
 
 
-def run_aggregate(binary: Path, meta: dict) -> dict:
-    """Run binary against the whole corpus, return parsed JSON output."""
+def run_walker(binary: Path, meta: dict, projects_root: Path) -> dict:
+    """Run the walker binary against `projects_root`, return parsed JSON output."""
     cmd = [
         str(binary),
         "--period", str(meta["period_seconds"]),
         "--win-start", repr(meta["win_start_unix"]),
         "--now", repr(meta["now_unix"]),
-        "--projects-root", str(CORPUS),
+        "--projects-root", str(projects_root),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
     if result.returncode != 0:
@@ -70,31 +77,67 @@ def run_aggregate(binary: Path, meta: dict) -> dict:
             f"{binary.name} exited {result.returncode}\n"
             f"stderr:\n{result.stderr}"
         )
-    line = result.stdout.strip().splitlines()[-1]  # last non-empty line
+    line = result.stdout.strip().splitlines()[-1]
     return json.loads(line)
+
+
+def within_tolerance(got: dict, target: dict) -> tuple[bool, float, float]:
+    dt = got.get("trailing_usd", 0) - target["trailing_usd"]
+    dw = got.get("window_usd", 0) - target["window_usd"]
+    ok = abs(dt) <= TOLERANCE and abs(dw) <= TOLERANCE
+    return ok, dt, dw
 
 
 def check_aggregate(lang: str, binary: Path, expected: dict) -> bool:
     meta = expected["_meta"]
     target = expected["_aggregate"]
     try:
-        got = run_aggregate(binary, meta)
+        got = run_walker(binary, meta, CORPUS)
     except Exception as e:
-        print(f"  [{lang:>4s}] FAIL  {e}")
+        print(f"  [{lang:>4s}] aggregate    FAIL  {e}")
         return False
-    dt = got.get("trailing_usd", 0) - target["trailing_usd"]
-    dw = got.get("window_usd", 0) - target["window_usd"]
-    ok = abs(dt) <= TOLERANCE and abs(dw) <= TOLERANCE
+    ok, dt, dw = within_tolerance(got, target)
     badge = " OK " if ok else "FAIL"
     print(
-        f"  [{lang:>4s}] {badge}  "
-        f"trailing=${got.get('trailing_usd', 0):.6f} (target ${target['trailing_usd']:.6f}, "
-        f"d=${dt:+.6f})  "
-        f"window=${got.get('window_usd', 0):.6f} (target ${target['window_usd']:.6f}, "
-        f"d=${dw:+.6f})  "
+        f"  [{lang:>4s}] aggregate    {badge}  "
+        f"trailing=${got.get('trailing_usd', 0):.6f} (d=${dt:+.6f})  "
+        f"window=${got.get('window_usd', 0):.6f} (d=${dw:+.6f})  "
         f"{got.get('elapsed_ms', '?')}ms"
     )
     return ok
+
+
+def check_fixture(
+    lang: str, binary: Path, meta: dict, fixture_name: str, target: dict
+) -> bool:
+    """Run the binary against just one fixture in an isolated temp root."""
+    with tempfile.TemporaryDirectory(prefix="walker-fixture-") as tmp:
+        # Recreate <tmp>/<fixture_name>/... from <CORPUS>/<fixture_name>/...
+        # Walker's discovery expects <root>/<slug>/<session>.jsonl, with the
+        # fixture directory acting as the slug.
+        shutil.copytree(CORPUS / fixture_name, Path(tmp) / fixture_name)
+        try:
+            got = run_walker(binary, meta, Path(tmp))
+        except Exception as e:
+            print(f"  [{lang:>4s}] {fixture_name:20s} FAIL  {e}")
+            return False
+    ok, dt, dw = within_tolerance(got, target)
+    badge = " OK " if ok else "FAIL"
+    print(
+        f"  [{lang:>4s}] {fixture_name:20s} {badge}  "
+        f"trailing=${got.get('trailing_usd', 0):.6f} (d=${dt:+.6f})  "
+        f"window=${got.get('window_usd', 0):.6f} (d=${dw:+.6f})"
+    )
+    return ok
+
+
+def check_implementation(lang: str, binary: Path, expected: dict) -> bool:
+    aggregate_ok = check_aggregate(lang, binary, expected)
+    fixtures_ok = True
+    for name, target in expected["fixtures"].items():
+        if not check_fixture(lang, binary, expected["_meta"], name, target):
+            fixtures_ok = False
+    return aggregate_ok and fixtures_ok
 
 
 def main():
@@ -108,7 +151,8 @@ def main():
     print(f"Conformance corpus: {CORPUS}")
     print(f"Pinned now={expected['_meta']['now_unix']}  "
           f"period={expected['_meta']['period_seconds']}  "
-          f"win_start={expected['_meta']['win_start_unix']}\n")
+          f"win_start={expected['_meta']['win_start_unix']}")
+    print(f"Fixtures: {len(expected['fixtures'])}\n")
 
     for lang in requested:
         binary = find_binary(lang)
@@ -116,8 +160,9 @@ def main():
             print(f"  [{lang:>4s}] SKIP  no built binary "
                   f"(checked {[str(p) for p in CANDIDATES.get(lang, [])]})")
             continue
-        if not check_aggregate(lang, binary, expected):
+        if not check_implementation(lang, binary, expected):
             overall_ok = False
+        print()
 
     sys.exit(0 if overall_ok else 1)
 

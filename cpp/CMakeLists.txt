@@ -1,22 +1,24 @@
 cmake_minimum_required(VERSION 3.20)
-project(walker VERSION 0.1.0 LANGUAGES CXX)
+project(walker VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
-# nlohmann/json — header-only, single-include variant
+# simdjson — built from source via FetchContent. The on-demand API
+# eliminates per-line allocation that nlohmann/json incurred.
+set(SIMDJSON_DEVELOPER_MODE OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
-    nlohmann_json
-    URL https://github.com/nlohmann/json/releases/download/v3.11.3/include.zip
-    URL_HASH SHA256=a22461d13119ac5c78f205d3df1db13403e58ce1bb1794edc9313677313f4a9d
+    simdjson
+    GIT_REPOSITORY https://github.com/simdjson/simdjson.git
+    GIT_TAG v4.6.4
+    GIT_SHALLOW TRUE
 )
-FetchContent_MakeAvailable(nlohmann_json)
+FetchContent_MakeAvailable(simdjson)
 
 add_executable(walker main.cpp)
-
-target_include_directories(walker PRIVATE ${nlohmann_json_SOURCE_DIR}/single_include)
+target_link_libraries(walker PRIVATE simdjson::simdjson)
 
 if(MSVC)
     target_compile_options(walker PRIVATE /W3 $<$<CONFIG:Release>:/O2 /GL>)

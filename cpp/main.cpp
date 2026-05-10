@@ -19,11 +19,11 @@
 #include <unordered_set>
 #include <vector>
 
-// nlohmann/json (header-only, fetched by CMake)
-#include "nlohmann/json.hpp"
+// simdjson on-demand (built from source by CMake)
+#include <simdjson.h>
 
 namespace fs = std::filesystem;
-using json = nlohmann::json;
+namespace sj = simdjson;
 
 // ---------------------------------------------------------------------------
 // Argument parsing
@@ -213,6 +213,15 @@ struct GroupResult {
     double window = 0.0;
 };
 
+// Per-line walk via simdjson on-demand. We iterate the top-level object
+// once and dispatch on key name — the on-demand API rewards forward-only
+// access, so we extract every needed field in one pass without backing up.
+//
+// Why per-line iterate() and not iterate_many(): iterate_many bails the
+// entire document_stream on the first malformed line and can't resume,
+// so we'd lose every line after a bad one. Per-line iterate skips bad
+// lines naturally. Cost: one padded_string allocation per line — same
+// shape as the previous std::getline + std::string_view code path.
 static GroupResult walk_group(
     const std::vector<fs::path>& paths,
     double period_cutoff,
@@ -222,73 +231,118 @@ static GroupResult walk_group(
     GroupResult result;
     std::unordered_set<std::string> seen_ids;
 
+    sj::ondemand::parser parser;
+
     for (const auto& path : paths) {
-        std::ifstream file(path);
-        if (!file.is_open()) continue;
+        sj::padded_string data;
+        if (sj::padded_string::load(path.string()).get(data) != sj::SUCCESS) continue;
 
-        std::string line;
-        while (std::getline(file, line)) {
-            // Skip empty lines
-            if (line.empty()) continue;
-            bool all_ws = true;
-            for (char c : line) if (!std::isspace(static_cast<unsigned char>(c))) { all_ws = false; break; }
-            if (all_ws) continue;
+        std::string_view buffer(data);
+        size_t pos = 0;
+        while (pos < buffer.size()) {
+            size_t newline = buffer.find('\n', pos);
+            size_t end = (newline == std::string_view::npos) ? buffer.size() : newline;
+            size_t line_end = end;
+            if (line_end > pos && buffer[line_end - 1] == '\r') --line_end;
+            std::string_view line = buffer.substr(pos, line_end - pos);
+            pos = (newline == std::string_view::npos) ? buffer.size() : newline + 1;
 
-            // Parse JSON
-            json entry;
-            try {
-                entry = json::parse(line);
-            } catch (...) {
-                continue;
+            // Skip empty / whitespace-only lines
+            bool blank = true;
+            for (char c : line) {
+                if (!std::isspace(static_cast<unsigned char>(c))) { blank = false; break; }
             }
+            if (blank) continue;
 
-            // Must have message
-            if (!entry.contains("message") || !entry["message"].is_object()) continue;
-            const auto& msg = entry["message"];
+            sj::padded_string padded(line);
+            sj::ondemand::document doc;
+            if (parser.iterate(padded).get(doc) != sj::SUCCESS) continue;
 
-            // Role must be assistant
-            if (!msg.contains("role") || msg["role"] != "assistant") continue;
+            sj::ondemand::object root;
+            if (doc.get_object().get(root) != sj::SUCCESS) continue;
 
-            // Dedup by message id
-            if (msg.contains("id") && msg["id"].is_string()) {
-                std::string mid = msg["id"].get<std::string>();
-                if (!mid.empty()) {
-                    if (!seen_ids.insert(mid).second) continue; // already seen
+            std::string_view timestamp_view;
+            bool has_timestamp = false;
+
+            bool is_assistant = false;
+            std::string_view message_id_view;
+            bool has_message_id = false;
+            std::string model;
+            uint64_t input_tokens = 0, output_tokens = 0,
+                     cache_read_tokens = 0, cache_write_tokens = 0;
+            bool message_seen = false;
+
+            for (auto root_field : root) {
+                std::string_view key;
+                if (root_field.unescaped_key().get(key) != sj::SUCCESS) continue;
+
+                if (key == "timestamp") {
+                    if (root_field.value().get_string().get(timestamp_view) == sj::SUCCESS) {
+                        has_timestamp = !timestamp_view.empty();
+                    }
+                } else if (key == "message") {
+                    sj::ondemand::object msg_obj;
+                    if (root_field.value().get_object().get(msg_obj) != sj::SUCCESS) continue;
+                    message_seen = true;
+
+                    for (auto msg_field : msg_obj) {
+                        std::string_view msg_key;
+                        if (msg_field.unescaped_key().get(msg_key) != sj::SUCCESS) continue;
+
+                        if (msg_key == "role") {
+                            std::string_view role_view;
+                            if (msg_field.value().get_string().get(role_view) == sj::SUCCESS) {
+                                is_assistant = (role_view == "assistant");
+                            }
+                        } else if (msg_key == "id") {
+                            std::string_view id_view;
+                            if (msg_field.value().get_string().get(id_view) == sj::SUCCESS) {
+                                if (!id_view.empty()) {
+                                    message_id_view = id_view;
+                                    has_message_id = true;
+                                }
+                            }
+                        } else if (msg_key == "model") {
+                            std::string_view model_view;
+                            if (msg_field.value().get_string().get(model_view) == sj::SUCCESS) {
+                                model.assign(model_view.data(), model_view.size());
+                            }
+                        } else if (msg_key == "usage") {
+                            sj::ondemand::object usage_obj;
+                            if (msg_field.value().get_object().get(usage_obj) != sj::SUCCESS) continue;
+
+                            for (auto usage_field : usage_obj) {
+                                std::string_view usage_key;
+                                if (usage_field.unescaped_key().get(usage_key) != sj::SUCCESS) continue;
+
+                                uint64_t value = 0;
+                                if (usage_field.value().get_uint64().get(value) != sj::SUCCESS) continue;
+
+                                if (usage_key == "input_tokens") input_tokens = value;
+                                else if (usage_key == "output_tokens") output_tokens = value;
+                                else if (usage_key == "cache_read_input_tokens") cache_read_tokens = value;
+                                else if (usage_key == "cache_creation_input_tokens") cache_write_tokens = value;
+                            }
+                        }
+                    }
                 }
             }
 
-            // Parse timestamp
-            if (!entry.contains("timestamp") || !entry["timestamp"].is_string()) continue;
-            std::string ts_str = entry["timestamp"].get<std::string>();
-            if (ts_str.empty()) continue;
-            auto ts_opt = parse_iso8601(ts_str);
-            if (!ts_opt) continue;
-            double ts = *ts_opt;
+            if (!message_seen || !is_assistant) continue;
 
-            // Time filter
-            if (ts < earliest) continue;
-
-            // Extract usage
-            uint64_t input_tokens = 0, output_tokens = 0,
-                     cache_read_tokens = 0, cache_write_tokens = 0;
-            std::string model;
-
-            if (msg.contains("usage") && msg["usage"].is_object()) {
-                const auto& usage = msg["usage"];
-                if (usage.contains("input_tokens") && usage["input_tokens"].is_number())
-                    input_tokens = usage["input_tokens"].get<uint64_t>();
-                if (usage.contains("output_tokens") && usage["output_tokens"].is_number())
-                    output_tokens = usage["output_tokens"].get<uint64_t>();
-                if (usage.contains("cache_read_input_tokens") && usage["cache_read_input_tokens"].is_number())
-                    cache_read_tokens = usage["cache_read_input_tokens"].get<uint64_t>();
-                if (usage.contains("cache_creation_input_tokens") && usage["cache_creation_input_tokens"].is_number())
-                    cache_write_tokens = usage["cache_creation_input_tokens"].get<uint64_t>();
+            if (has_message_id) {
+                std::string mid(message_id_view);
+                if (!seen_ids.insert(std::move(mid)).second) continue;
             }
 
-            if (msg.contains("model") && msg["model"].is_string())
-                model = msg["model"].get<std::string>();
+            if (!has_timestamp) continue;
+            auto ts_opt = parse_iso8601(timestamp_view);
+            if (!ts_opt) continue;
+            double ts = *ts_opt;
+            if (ts < earliest) continue;
 
-            double cost = cost_for(input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, model);
+            double cost = cost_for(input_tokens, output_tokens,
+                                   cache_read_tokens, cache_write_tokens, model);
 
             if (ts >= period_cutoff) result.trailing += cost;
             if (ts >= win_start_unix) result.window += cost;

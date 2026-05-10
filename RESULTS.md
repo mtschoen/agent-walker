@@ -7,59 +7,97 @@ totals on the live fleet.
 
 ## Setup
 
-- Live fleet: 1462 JSONL files (~500 MB on disk); 295 survive the weekly
-  mtime filter (~143 MB); 129 distinct session groups.
+- Live fleet: ~1500 JSONL files; ~300 survive the weekly mtime filter;
+  ~130 distinct session groups.
 - 32-core box (Windows 11). 5 warm runs each via `shared/bench.py
   --runs 5`; reporting median wall-clock.
 
 ## Headline numbers
 
-| Lang   | Median    | Range       | vs Rust | vs slowest | LoC | Binary  |
-| ------ | --------: | ----------- | ------: | ---------: | --: | ------: |
-| Rust   | **115ms** | 108-128     | 1.00x   | 3.50x      | 230 |  423 KB |
-| Zig    |  142ms    | 133-167     | 1.23x   | 2.83x      | 601 |  916 KB |
-| Python |  356ms    | 325-372     | 3.10x   | 1.13x      | ~80 |     n/a |
-| Go     |  373ms    | 365-380     | 3.24x   | 1.08x      | 409 |  3.3 MB |
-| C++    |  402ms    | 382-473     | 3.50x   | 1.00x      | 545 | **175 KB** |
+| Lang   | Median    | Range       | vs winner | vs slowest | LoC | Binary  |
+| ------ | --------: | ----------- | --------: | ---------: | --: | ------: |
+| C++    |  **88ms** |  85-94      | 1.00x     | 3.92x      | 599 |  267 KB |
+| Rust   |   115ms   | 112-135     | 1.31x     | 3.00x      | 230 |  423 KB |
+| Zig    |   135ms   | 129-142     | 1.53x     | 2.56x      | 601 |  916 KB |
+| Go     |   141ms   | 136-148     | 1.60x     | 2.45x      | 410 |  8.0 MB |
+| Python |   345ms   | 324-362     | 3.92x     | 1.00x      | ~80 |     n/a |
 
 Python reference is the orjson + 8-worker `ProcessPoolExecutor` walker
 that ships in [schoen-claude-status](https://github.com/mtschoen/schoen-claude-status).
 Original single-thread `json.loads` baseline (not in this table) was
 ~750ms.
 
+All five implementations agree to the cent on the live fleet:
+trailing=$1563.41, window=$1557.26.
+
+## What changed since the first pass
+
+The first pass had C++ at 402ms (slowest) and Go at 373ms because both
+were on convenience JSON parsers (`nlohmann/json` DOM, stdlib
+`encoding/json` reflection). Swapping each to a hot-path parser flipped
+the ranking:
+
+- **C++ (`nlohmann/json` → `simdjson` v4.6.4 on-demand): 402ms → 88ms** (4.6x).
+  Now the fastest implementation, beating Rust by 25%.
+- **Go (`encoding/json` → `bytedance/sonic` v1.15.1): 373ms → 141ms** (2.6x).
+  Now between Zig and Python.
+
+Rust and Zig were unchanged across the two passes — they were already on
+parsers with no per-line allocation in the hot path.
+
 ## Surprises
 
-**The fastest language is Rust, but the slowest isn't Python — it's C++.**
-And the gap isn't subtle: C++ comes in 3.5x slower than Rust, behind
-Python's parallel walker. The cause isn't C++ the language; it's
-`nlohmann/json`'s DOM-parse cost. Every line allocates a full JSON tree
-then we throw 99% of it away. Swapping to `simdjson`'s on-demand API
-would close most of the gap, at the cost of build complexity that the
-agent author judged not worth it for the comparison's first pass.
+**The fastest implementation is C++ on simdjson, by a wide margin.** 88ms
+median vs. Rust's 115ms — the absolute scan rate of simdjson on-demand
+plus C++'s lack of any iterator-safety overhead is the difference. Rust's
+`serde_json` with typed structs is excellent but has more checks per
+field access.
 
-**Zig is essentially tied with Rust** despite Zig 0.16 having just
-landed with a complete I/O subsystem rewrite. The agent had to bypass
-`std.io` entirely and call Win32 externs directly because the new
-`std.Io` context-passing pattern wasn't viable mid-port. Lesson: pick
-your Zig version carefully right now.
+**The C++ → simdjson rewrite is more code, not less.** 545 LoC →
+599 LoC. simdjson's on-demand API is forward-only, so each field has
+explicit error-checked extraction — no `if (msg.contains("usage") &&
+msg["usage"].is_object())` ergonomics. The verbosity is worth 4.6x; the
+benchmarks don't lie.
 
-**Go's stdlib `encoding/json` is the bottleneck for Go**, not goroutines
-or anything Go-specific. The author flagged that `bytedance/sonic` or
-`json-iterator/go` would close the 3x gap to ~1.2x. Pure stdlib was a
-deliberate constraint.
+**Sonic adds ~4.7 MB to the Go binary.** 3.3 MB → 8.0 MB. That's the JIT
+assembler, decoder generators, and CPU feature detection. Worth it if
+JSON parse cost is on the hot path; not worth it if you only deserialize
+config files at startup.
 
-**JSON parser choice dominates language choice.** The two fast
-implementations both use parsers with no per-line allocation in the hot
-path (`serde_json` with typed structs in Rust; `std.json` with manual
-field extraction in Zig). The two slow ones use convenient DOM parsers
-(`encoding/json` reflection, `nlohmann/json` allocation). Rebuilding C++
-on simdjson and Go on sonic-go would likely re-rank everything.
+**Per-line `simdjson::iterate` is the right call, not `iterate_many`.**
+The handoff doc suggested `iterate_many` for the perf win of single-allocation
+batched parsing. In practice `iterate_many` aborts the entire stream on
+the first malformed line and can't resume, which kills the
+`03-malformed-lines` conformance fixture. Per-line `parser.iterate(padded_string(line))`
+is structurally identical to the original nlohmann code and lands at 88ms
+anyway — the on-demand parse skipping 99% of fields by name is what we
+were paying for, not the batching.
 
-**Python is the third-fastest implementation here**, beating both Go and
-C++. Process-pool parallelism + `orjson`'s SIMD parser scales well on a
-32-core box; the GIL never bites because work is split across processes.
+**JSON parser choice still dominates language choice.** With every
+implementation now on a non-allocating hot path (serde_json typed structs,
+simdjson on-demand, sonic, std.json manual extraction), the spread
+narrows from 3.5x to 1.6x. The remaining gap reflects real differences
+between parsers, not language quality.
+
+**Python is now the slowest.** 345ms — three full implementations
+(C++, Rust, Zig) are 2.5-4x faster. Process-pool overhead and per-line
+orjson cost finally show through against single-process native walkers
+that don't pay startup or IPC costs.
 
 ## Per-implementation notes
+
+### C++ (`cpp/`)
+
+- C++20, MSVC via `cmake -G "Visual Studio 17 2022"` (auto-discovers
+  `cl.exe`, no PATH manipulation)
+- `simdjson` v4.6.4 via FetchContent, built from source (~20s clean build)
+- Per-line `parser.iterate(padded_string(line))` — switched from `iterate_many`
+  after that path lost the `03-malformed-lines` fixture
+- Custom `std::thread` pool (no rayon-equivalent in the stdlib)
+- 267 KB binary — still the smallest by far; simdjson static lib adds ~92 KB
+- Author's note: the on-demand top-level field iteration with `unescaped_key()`
+  + dispatch was less ergonomic than expected, but it's the right shape
+  for forward-only access
 
 ### Rust (`rust/`)
 
@@ -69,6 +107,7 @@ C++. Process-pool parallelism + `orjson`'s SIMD parser scales well on a
 - Clean cold build, ~21 deps, full LTO + `codegen-units=1`
 - One-line `par_iter().reduce()` is the most concise parallel pattern
   of any of the four
+- 423 KB binary
 
 ### Zig (`zig/`)
 
@@ -79,42 +118,33 @@ C++. Process-pool parallelism + `orjson`'s SIMD parser scales well on a
 - 601 LoC reflects the Win32 binding surface; without that it'd be
   closer to Rust's count
 - Compiler error messages were excellent throughout the port
+- 916 KB binary
+
+### Go (`go/`)
+
+- `bytedance/sonic` v1.15.1 (drop-in replacement for `encoding/json`)
+- `filepath.Glob` doesn't support `**` so subagent discovery is two
+  manual `ReadDir` walks
+- 8.0 MB binary (Go runtime + sonic JIT + 7 transitive deps)
+- The sonic swap was a 2-line diff (1 import, 1 function call); cleanest
+  upgrade of the four
 
 ### Python parallel reference (in schoen-claude-status)
 
 - `orjson` for parse, falling back to stdlib `json`
 - 8-worker `ProcessPoolExecutor`, work-unit = one session group
 - Per-session-group dedup catches the parent ↔ acompact-subagent
-  collision pattern (146 real instances in this corpus)
-- Reduced from 750ms → 248ms by this refactor; the bench above re-measured
-  at 356ms because it ran with C++/Go/Zig benches sharing CPU
-
-### Go (`go/`)
-
-- Stdlib only: `encoding/json`, `flag`, `sync.WaitGroup`, `filepath`
-- `filepath.Glob` doesn't support `**` so subagent discovery is two
-  manual `ReadDir` walks
-- 3.3 MB binary (Go runtime baseline)
-- Code feels clean — closest to "obvious" stdlib code of the four
-
-### C++ (`cpp/`)
-
-- C++20, MSVC via `cmake -G "Visual Studio 17 2022"` (auto-discovers
-  `cl.exe`, no PATH manipulation)
-- `nlohmann/json` v3.11.3 via FetchContent (single-include zip)
-- Custom `std::thread` pool (no rayon-equivalent in the stdlib)
-- 175 KB binary — the smallest by far
-- Author flagged `nlohmann` as the perf bottleneck and `simdjson` as
-  the obvious fix
+  collision pattern
+- Reduced from 750ms → 248ms by the recent refactor; bench above shows
+  ~345ms because it shared CPU with concurrent native benches
 
 ## What's next
 
-- [ ] Rebuild C++ on `simdjson` and Go on `sonic-go` — does the ranking
-      change? My guess: C++ overtakes Rust by 10-30%; Go closes to
-      ~150ms.
+- [x] ~~Rebuild C++ on `simdjson` and Go on `sonic-go` — does the ranking
+      change?~~ Yes: C++ overtakes Rust by 25%; Go closes to ~141ms.
 - [ ] Tune Rust further: try `simd-json` instead of `serde_json` (the
       tradeoff for small per-line objects is mixed; worth measuring).
-- [ ] Wire whichever wins (probably Rust as-is) back into
+- [ ] Wire the winner (C++ now, was Rust) back into
       schoen-claude-status's `_walk_pace_buckets` as an optional
       detection: if `~/.claude/walker` exists and is executable, use
       it; otherwise the existing Python parallel walker stands.
