@@ -1,0 +1,14 @@
+# Per-language build outputs
+rust/target/
+go/walker
+go/walker.exe
+cpp/build/
+zig/zig-out/
+zig/zig-cache/
+zig/.zig-cache/
+
+# Editor / OS junk
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

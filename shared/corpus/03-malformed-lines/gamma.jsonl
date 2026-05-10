@@ -1,0 +1,7 @@
+this is not JSON
+{"unclosed":
+{"type": "user", "message": {"role": "user"}}
+{"type": "assistant", "message": {"role": "user"}}
+{"type": "assistant", "message": {"role": "assistant", "id": "no-ts", "model": "claude-opus-4-7", "usage": {"input_tokens": 100}}}
+{"type": "assistant", "timestamp": "2026-05-10T11:30:00.000Z", "message": {"role": "assistant", "id": "ok", "model": "claude-opus-4-7", "usage": {"input_tokens": 1000, "output_tokens": 500, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}
+{"type": "assistant", "message": {"role": "assistant", "model": "claude-opus-4-7", "usage": {}, "id": "bad-ts"}, "timestamp": "not-a-timestamp"}
