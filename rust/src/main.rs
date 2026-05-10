@@ -10,6 +10,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+mod beacons;
+
 #[derive(Default)]
 struct Args {
     period_seconds: u64,
@@ -18,27 +20,27 @@ struct Args {
     projects_root: Option<PathBuf>,
 }
 
-fn parse_args() -> Result<Args, String> {
-    let mut args = Args::default();
-    let mut iter = std::env::args().skip(1);
+fn parse_cost_args(args: &[String]) -> Result<Args, String> {
+    let mut result = Args::default();
+    let mut iter = args.iter();
     while let Some(flag) = iter.next() {
         match flag.as_str() {
             "--period" => {
-                args.period_seconds = iter
+                result.period_seconds = iter
                     .next()
                     .ok_or("--period needs a value")?
                     .parse()
                     .map_err(|e| format!("--period: {e}"))?
             }
             "--win-start" => {
-                args.win_start_unix = iter
+                result.win_start_unix = iter
                     .next()
                     .ok_or("--win-start needs a value")?
                     .parse()
                     .map_err(|e| format!("--win-start: {e}"))?
             }
             "--now" => {
-                args.now_unix = Some(
+                result.now_unix = Some(
                     iter.next()
                         .ok_or("--now needs a value")?
                         .parse()
@@ -46,8 +48,9 @@ fn parse_args() -> Result<Args, String> {
                 )
             }
             "--projects-root" => {
-                args.projects_root =
-                    Some(PathBuf::from(iter.next().ok_or("--projects-root needs a value")?))
+                result.projects_root = Some(PathBuf::from(
+                    iter.next().ok_or("--projects-root needs a value")?,
+                ))
             }
             "--version" => {
                 println!("rust/{}", env!("CARGO_PKG_VERSION"));
@@ -56,10 +59,10 @@ fn parse_args() -> Result<Args, String> {
             _ => return Err(format!("unknown flag: {flag}")),
         }
     }
-    if args.period_seconds == 0 {
+    if result.period_seconds == 0 {
         return Err("--period is required".into());
     }
-    Ok(args)
+    Ok(result)
 }
 
 #[derive(Deserialize)]
@@ -111,7 +114,7 @@ fn cost_for(usage: &Usage, model: &str) -> f64 {
         / 1_000_000.0
 }
 
-fn parse_iso8601(ts: &str) -> Option<f64> {
+pub(crate) fn parse_iso8601(ts: &str) -> Option<f64> {
     // Accept "...Z" or any RFC3339 variant.
     DateTime::parse_from_rfc3339(&ts.replace('Z', "+00:00"))
         .ok()
@@ -242,7 +245,7 @@ fn discover_groups(root: &Path, earliest: f64) -> HashMap<(String, String), Vec<
     groups
 }
 
-fn default_projects_root() -> PathBuf {
+pub(crate) fn default_projects_root() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
         PathBuf::from(home).join(".claude").join("projects")
     } else if let Some(up) = std::env::var_os("USERPROFILE") {
@@ -252,9 +255,40 @@ fn default_projects_root() -> PathBuf {
     }
 }
 
+pub(crate) fn current_unix() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
 fn main() {
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let first = raw.first().map(|s| s.as_str());
+    let (subcommand, rest): (&str, &[String]) = match first {
+        Some("cost") => ("cost", &raw[1..]),
+        Some("beacons-latest") => ("beacons-latest", &raw[1..]),
+        Some("beacons-history") => ("beacons-history", &raw[1..]),
+        // Bare flag invocation = cost mode (back-compat).
+        Some(s) if s.starts_with('-') => ("cost", &raw[..]),
+        Some(s) => {
+            eprintln!("walker: unknown subcommand: {}", s);
+            std::process::exit(2);
+        }
+        None => ("cost", &raw[..]),
+    };
+
+    match subcommand {
+        "cost" => run_cost(rest),
+        "beacons-latest" => beacons::run_latest(rest),
+        "beacons-history" => beacons::run_history(rest),
+        _ => unreachable!(),
+    }
+}
+
+fn run_cost(args: &[String]) {
     let started = Instant::now();
-    let args = match parse_args() {
+    let parsed = match parse_cost_args(args) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("walker: {e}");
@@ -262,15 +296,10 @@ fn main() {
         }
     };
 
-    let now_unix = args.now_unix.unwrap_or_else(|| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0)
-    });
-    let period_cutoff = now_unix - args.period_seconds as f64;
-    let earliest = period_cutoff.min(args.win_start_unix);
-    let root = args.projects_root.unwrap_or_else(default_projects_root);
+    let now_unix = parsed.now_unix.unwrap_or_else(current_unix);
+    let period_cutoff = now_unix - parsed.period_seconds as f64;
+    let earliest = period_cutoff.min(parsed.win_start_unix);
+    let root = parsed.projects_root.unwrap_or_else(default_projects_root);
 
     let groups = discover_groups(&root, earliest);
     let total_files: usize = groups.values().map(|v| v.len()).sum();
@@ -288,7 +317,7 @@ fn main() {
     let (trailing, window) = pool.install(|| {
         group_paths
             .par_iter()
-            .map(|paths| walk_group(paths, period_cutoff, args.win_start_unix))
+            .map(|paths| walk_group(paths, period_cutoff, parsed.win_start_unix))
             .reduce(
                 || GroupResult { trailing: 0.0, window: 0.0 },
                 |a, b| GroupResult {
