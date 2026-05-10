@@ -143,12 +143,62 @@ deterministic (sequential walk inside a group); cross-group sums use
 fully-associative addition over a small set so reordering is acceptable
 within float epsilon (±$0.01 budget covers it).
 
+## Subcommands
+
+The bare `walker --period ... --win-start ...` invocation maps to the
+`cost` subcommand and stays the back-compat shape for existing callers.
+A subcommand is introduced when the first positional argument matches
+a known name; otherwise the bare-flag invocation is treated as `cost`.
+
+### `beacons-latest --session-id <id> [--projects-root <path>] [--now <unix>]`
+
+Walks the matching transcript (parent or `subagents/agent-<id>.jsonl`)
+backwards, finds the most recent assistant message containing a
+`<progress-beacon>...</progress-beacon>` block. The JSON inside must
+parse and contain `kind`, `eta_seconds`, `summary`, and `drift` (plus
+optional `beats_left`).
+
+Output:
+
+```json
+{"beacon": {...} | null, "emitted_at": <unix> | null, "age_seconds": <num> | null, "elapsed_ms": <u64>}
+```
+
+If multiple beacons exist in the matching transcript, return the one
+with the highest `timestamp`. Malformed JSON or missing required
+fields → silently skip (treated as no beacon).
+
+`--now` exists for conformance determinism (otherwise `age_seconds`
+varies per wall clock); production callers omit it.
+
+### `beacons-history --period <seconds> [--win-start <unix>] [--projects-root <path>] [--now <unix>]`
+
+Walks the full fleet under the time window. For each session group
+(same grouping as `cost` mode) that contains both a `kind: "begin"`
+AND a `kind: "end"` beacon within the window, emits a
+`(begin_eta, actual_elapsed)` pair where
+`actual_elapsed = end_timestamp - begin_timestamp`.
+
+Computes `bias_factor = median(actual_elapsed / begin_eta)` across all
+pairs. Even-count median is the mean of the two middle values.
+
+Output:
+
+```json
+{"pairs": [{"begin_eta": <num>, "actual_elapsed": <num>}, ...], "session_count": <num>, "n_pairs": <num>, "bias_factor": <f64> | null, "elapsed_ms": <u64>}
+```
+
+If `n_pairs == 0`, `bias_factor` is `null`.
+
 ## Conformance fixtures
 
-`shared/corpus/<NN>-<name>.jsonl` (and optional `<NN>-<name>/subagents/`)
+`shared/corpus/<NN>-<name>/<sid>.jsonl` (and optional `<NN>-<name>/subagents/`)
 plus `shared/corpus/expected.json` mapping fixture name → expected
-output. The harness invokes each binary against the corpus and asserts
-agreement to ±$0.01.
+output for cost mode. Beacon fixtures live under
+`shared/corpus/beacons/<scenario>/<sid>.jsonl` with sibling
+`expected_latest.json` and `expected_history.json`. The harness
+invokes each binary against the corpus and asserts agreement to
+±$0.01 for cost and ±0.001 for `bias_factor`.
 
 ## Versioning
 
