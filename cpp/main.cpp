@@ -1,5 +1,11 @@
 // Native pace-walker -- C++ implementation.
 // See ../SPEC.md for the contract every implementation must honor.
+//
+// Entry point + cost-mode walker. Beacon-mode subcommands live in
+// beacons.cpp and shared helpers (ISO 8601, default root) in common.hpp.
+
+#include "beacons.hpp"
+#include "common.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -41,30 +47,30 @@ struct Args {
     std::exit(2);
 }
 
-static Args parse_args(int argc, char* argv[]) {
+static Args parse_args(const std::vector<std::string>& argv) {
     Args args;
-    for (int i = 1; i < argc; ++i) {
-        std::string_view flag = argv[i];
-        auto next = [&]() -> std::string_view {
-            if (i + 1 >= argc) die(std::string(flag) + " needs a value");
+    for (size_t i = 0; i < argv.size(); ++i) {
+        const std::string& flag = argv[i];
+        auto next = [&]() -> const std::string& {
+            if (i + 1 >= argv.size()) die(flag + " needs a value");
             return argv[++i];
         };
         if (flag == "--period") {
-            try { args.period_seconds = std::stoull(std::string(next())); }
+            try { args.period_seconds = std::stoull(next()); }
             catch (...) { die("--period: invalid integer"); }
         } else if (flag == "--win-start") {
-            try { args.win_start_unix = std::stod(std::string(next())); }
+            try { args.win_start_unix = std::stod(next()); }
             catch (...) { die("--win-start: invalid number"); }
         } else if (flag == "--now") {
-            try { args.now_unix = std::stod(std::string(next())); }
+            try { args.now_unix = std::stod(next()); }
             catch (...) { die("--now: invalid number"); }
         } else if (flag == "--projects-root") {
             args.projects_root = fs::path(next());
         } else if (flag == "--version") {
-            std::cout << "cpp/0.1.0\n";
+            std::cout << "cpp/0.3.0\n";
             std::exit(0);
         } else {
-            die(std::string("unknown flag: ") + std::string(flag));
+            die(std::string("unknown flag: ") + flag);
         }
     }
     if (args.period_seconds == 0) {
@@ -73,12 +79,8 @@ static Args parse_args(int argc, char* argv[]) {
     return args;
 }
 
-static fs::path default_projects_root() {
-    const char* home = std::getenv("HOME");
-    if (!home) home = std::getenv("USERPROFILE");
-    if (home) return fs::path(home) / ".claude" / "projects";
-    return fs::path(".claude/projects");
-}
+// Use the shared default_projects_root from common.hpp.
+using walker::default_projects_root;
 
 // ---------------------------------------------------------------------------
 // Pricing
@@ -115,94 +117,8 @@ static double cost_for(
     ) / 1'000'000.0;
 }
 
-// ---------------------------------------------------------------------------
-// ISO 8601 timestamp parsing
-// Accepts "YYYY-MM-DDTHH:MM:SS[.fff]Z" or "+HH:MM" offset.
-// Returns seconds since Unix epoch, or nullopt on failure.
-// ---------------------------------------------------------------------------
-
-static std::optional<double> parse_iso8601(std::string_view ts_view) {
-    // Work with a local copy so we can mangle it
-    std::string ts(ts_view);
-
-    // Replace trailing Z with +00:00 to unify handling
-    bool had_z = (!ts.empty() && ts.back() == 'Z');
-    if (had_z) {
-        ts.back() = '+';
-        ts += "00:00";
-    }
-
-    // Expected minimum: "YYYY-MM-DDTHH:MM:SS" = 19 chars
-    if (ts.size() < 19) return std::nullopt;
-
-    // Parse components
-    auto parse_int = [](const char* p, int len) -> int {
-        int v = 0;
-        for (int i = 0; i < len; ++i) {
-            if (p[i] < '0' || p[i] > '9') return -1;
-            v = v * 10 + (p[i] - '0');
-        }
-        return v;
-    };
-
-    int year   = parse_int(ts.c_str() + 0, 4);
-    int month  = parse_int(ts.c_str() + 5, 2);
-    int day    = parse_int(ts.c_str() + 8, 2);
-    int hour   = parse_int(ts.c_str() + 11, 2);
-    int minute = parse_int(ts.c_str() + 14, 2);
-    int sec    = parse_int(ts.c_str() + 17, 2);
-
-    if (year < 0 || month < 0 || day < 0 || hour < 0 || minute < 0 || sec < 0)
-        return std::nullopt;
-    if (month < 1 || month > 12 || day < 1 || day > 31) return std::nullopt;
-    if (hour > 23 || minute > 59 || sec > 60) return std::nullopt;
-
-    // Fractional seconds
-    double frac = 0.0;
-    size_t pos = 19;
-    if (pos < ts.size() && ts[pos] == '.') {
-        ++pos;
-        double mult = 0.1;
-        while (pos < ts.size() && ts[pos] >= '0' && ts[pos] <= '9') {
-            frac += (ts[pos] - '0') * mult;
-            mult *= 0.1;
-            ++pos;
-        }
-    }
-
-    // Timezone offset
-    int tz_offset_sec = 0;
-    if (pos < ts.size()) {
-        char sign = ts[pos];
-        if (sign == '+' || sign == '-') {
-            if (pos + 5 < ts.size() + 1) {
-                int tz_h = parse_int(ts.c_str() + pos + 1, 2);
-                int tz_m = parse_int(ts.c_str() + pos + 4, 2);
-                if (tz_h < 0 || tz_m < 0) return std::nullopt;
-                tz_offset_sec = (tz_h * 3600 + tz_m * 60) * (sign == '-' ? -1 : 1);
-            }
-        }
-    }
-
-    // Convert to Unix epoch using Julian Day / proleptic Gregorian formula
-    // Days from epoch 1970-01-01 using a well-known formula:
-    //   JDN for date (y, m, d):
-    int a = (14 - month) / 12;
-    int y = year + 4800 - a;
-    int m = month + 12 * a - 3;
-    int jdn = day + (153 * m + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 - 32045;
-    // Unix epoch JDN
-    static const int unix_epoch_jdn = 2440588; // 1970-01-01
-    int64_t day_diff = static_cast<int64_t>(jdn) - unix_epoch_jdn;
-
-    int64_t epoch_sec = day_diff * 86400LL
-        + static_cast<int64_t>(hour) * 3600
-        + static_cast<int64_t>(minute) * 60
-        + static_cast<int64_t>(sec)
-        - tz_offset_sec;
-
-    return static_cast<double>(epoch_sec) + frac;
-}
+// ISO 8601 timestamp parsing is in common.hpp (walker::parse_iso8601).
+using walker::parse_iso8601;
 
 // ---------------------------------------------------------------------------
 // Group walking
@@ -515,23 +431,15 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// main
+// Subcommand: cost (the original, default-shape walker behavior)
 // ---------------------------------------------------------------------------
 
-int main(int argc, char* argv[]) {
+static int run_cost(const std::vector<std::string>& argv) {
     auto started = std::chrono::steady_clock::now();
 
-    Args args = parse_args(argc, argv);
+    Args args = parse_args(argv);
 
-    double now_unix;
-    if (args.now_unix) {
-        now_unix = *args.now_unix;
-    } else {
-        auto tp = std::chrono::system_clock::now();
-        now_unix = static_cast<double>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(tp.time_since_epoch()).count()
-        ) / 1000.0;
-    }
+    double now_unix = args.now_unix.value_or(walker::current_unix());
 
     double period_cutoff = now_unix - static_cast<double>(args.period_seconds);
     double earliest = std::min(period_cutoff, args.win_start_unix);
@@ -596,4 +504,36 @@ int main(int argc, char* argv[]) {
         << "}\n";
 
     return 0;
+}
+
+// ---------------------------------------------------------------------------
+// main — subcommand dispatch
+// ---------------------------------------------------------------------------
+
+int main(int argc, char* argv[]) {
+    std::vector<std::string> raw;
+    raw.reserve(argc > 1 ? argc - 1 : 0);
+    for (int i = 1; i < argc; ++i) raw.emplace_back(argv[i]);
+
+    // Subcommand routing. Bare flag invocations (first arg starts with '-')
+    // route to cost mode for back-compat.
+    std::string subcommand = "cost";
+    std::vector<std::string> rest;
+    if (!raw.empty()) {
+        const std::string& first = raw.front();
+        if (first == "cost" || first == "beacons-latest" || first == "beacons-history") {
+            subcommand = first;
+            rest.assign(raw.begin() + 1, raw.end());
+        } else if (!first.empty() && first.front() == '-') {
+            rest = raw;  // bare-flag -> cost mode
+        } else {
+            std::cerr << "walker: unknown subcommand: " << first << "\n";
+            return 2;
+        }
+    }
+
+    if (subcommand == "cost") return run_cost(rest);
+    if (subcommand == "beacons-latest") return walker::beacons::run_latest(rest);
+    if (subcommand == "beacons-history") return walker::beacons::run_history(rest);
+    return 2;  // unreachable
 }

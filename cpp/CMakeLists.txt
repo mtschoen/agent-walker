@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(walker VERSION 0.2.0 LANGUAGES CXX)
+project(walker VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,7 +17,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(simdjson)
 
-add_executable(walker main.cpp)
+add_executable(walker main.cpp beacons.cpp)
 target_link_libraries(walker PRIVATE simdjson::simdjson)
 
 if(MSVC)
