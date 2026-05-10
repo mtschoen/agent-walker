@@ -14,13 +14,13 @@ totals on the live fleet.
 
 ## Headline numbers
 
-| Lang   | Median | Range       | vs Rust | vs slowest | LoC | Binary | Build  |
-| ------ | -----: | ----------- | ------: | ---------: | --: | -----: | -----: |
-| Rust   | **115ms** | 108-128  | 1.00x   | 3.50x      | 230 | TBD    | 12s    |
-| Zig    |  142ms | 133-167     | 1.23x   | 2.83x      | 601 | 917 KB | TBD    |
-| Python |  356ms | 325-372     | 3.10x   | 1.13x      |  ~80| n/a    | n/a    |
-| Go     |  373ms | 365-380     | 3.24x   | 1.08x      | 409 | 3.3 MB | TBD    |
-| C++    |  402ms | 382-473     | 3.50x   | 1.00x      | 545 | 175 KB | TBD    |
+| Lang   | Median    | Range       | vs Rust | vs slowest | LoC | Binary  |
+| ------ | --------: | ----------- | ------: | ---------: | --: | ------: |
+| Rust   | **115ms** | 108-128     | 1.00x   | 3.50x      | 230 |  423 KB |
+| Zig    |  142ms    | 133-167     | 1.23x   | 2.83x      | 601 |  916 KB |
+| Python |  356ms    | 325-372     | 3.10x   | 1.13x      | ~80 |     n/a |
+| Go     |  373ms    | 365-380     | 3.24x   | 1.08x      | 409 |  3.3 MB |
+| C++    |  402ms    | 382-473     | 3.50x   | 1.00x      | 545 | **175 KB** |
 
 Python reference is the orjson + 8-worker `ProcessPoolExecutor` walker
 that ships in [schoen-claude-status](https://github.com/mtschoen/schoen-claude-status).
