@@ -4,22 +4,23 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
+const beacons = @import("beacons.zig");
 
 const VERSION = "zig/0.1.0";
-const is_windows = builtin.os.tag == .windows;
+pub const is_windows = builtin.os.tag == .windows;
 
 // ─── Platform abstraction ────────────────────────────────────────────────────
 
 const PlatformFd = if (is_windows) *anyopaque else i32;
 
-const platform = if (is_windows) struct {
-    const HANDLE = *anyopaque;
+pub const platform = if (is_windows) struct {
+    pub const HANDLE = *anyopaque;
     const DWORD = u32;
     const BOOL = i32;
     const WCHAR = u16;
-    const LARGE_INTEGER = extern union { parts: extern struct { lo: u32, hi: i32 }, quad: i64 };
-    const INVALID_HANDLE_VALUE: HANDLE = @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))));
-    const FILETIME = extern struct {
+    pub const LARGE_INTEGER = extern union { parts: extern struct { lo: u32, hi: i32 }, quad: i64 };
+    pub const INVALID_HANDLE_VALUE: HANDLE = @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))));
+    pub const FILETIME = extern struct {
         lo: u32 = 0,
         hi: u32 = 0,
         fn toUnix(ft: FILETIME) f64 {
@@ -27,7 +28,7 @@ const platform = if (is_windows) struct {
             return @as(f64, @floatFromInt(hns - 116_444_736_000_000_000)) / 10_000_000.0;
         }
     };
-    const WIN32_FILE_ATTRIBUTE_DATA = extern struct {
+    pub const WIN32_FILE_ATTRIBUTE_DATA = extern struct {
         dwFileAttributes: u32,
         ftCreationTime: FILETIME,
         ftLastAccessTime: FILETIME,
@@ -35,7 +36,7 @@ const platform = if (is_windows) struct {
         nFileSizeHigh: u32,
         nFileSizeLow: u32,
     };
-    const WIN32_FIND_DATAW = extern struct {
+    pub const WIN32_FIND_DATAW = extern struct {
         dwFileAttributes: u32,
         ftCreationTime: FILETIME,
         ftLastAccessTime: FILETIME,
@@ -52,17 +53,17 @@ const platform = if (is_windows) struct {
         lpSecurityDescriptor: ?*anyopaque,
         bInheritHandle: i32,
     };
-    const GENERIC_READ = 0x80000000;
-    const FILE_SHARE_READ = 0x00000001;
-    const OPEN_EXISTING = 3;
-    const FILE_ATTRIBUTE_NORMAL = 0x80;
-    const FILE_ATTRIBUTE_DIRECTORY = 0x10;
-    const STD_OUTPUT_HANDLE: u32 = @bitCast(@as(i32, -11));
+    pub const GENERIC_READ = 0x80000000;
+    pub const FILE_SHARE_READ = 0x00000001;
+    pub const OPEN_EXISTING = 3;
+    pub const FILE_ATTRIBUTE_NORMAL = 0x80;
+    pub const FILE_ATTRIBUTE_DIRECTORY = 0x10;
+    pub const STD_OUTPUT_HANDLE: u32 = @bitCast(@as(i32, -11));
 
     extern "kernel32" fn GetSystemTimeAsFileTime(*FILETIME) callconv(.winapi) void;
     extern "kernel32" fn QueryPerformanceCounter(*LARGE_INTEGER) callconv(.winapi) BOOL;
     extern "kernel32" fn QueryPerformanceFrequency(*LARGE_INTEGER) callconv(.winapi) BOOL;
-    extern "kernel32" fn GetFileAttributesExW([*:0]const u16, u32, *WIN32_FILE_ATTRIBUTE_DATA) callconv(.winapi) BOOL;
+    pub extern "kernel32" fn GetFileAttributesExW([*:0]const u16, u32, *WIN32_FILE_ATTRIBUTE_DATA) callconv(.winapi) BOOL;
     extern "kernel32" fn GetCommandLineW() callconv(.winapi) [*:0]const u16;
     extern "kernel32" fn GetEnvironmentVariableW([*:0]const u16, [*]u16, u32) callconv(.winapi) u32;
     extern "kernel32" fn GetStdHandle(nStdHandle: u32) callconv(.winapi) ?HANDLE;
@@ -70,14 +71,14 @@ const platform = if (is_windows) struct {
     extern "kernel32" fn ReadFile(hFile: HANDLE, lpBuffer: *anyopaque, nNumberOfBytesToRead: u32, lpNumberOfBytesRead: *u32, lpOverlapped: ?*anyopaque) callconv(.winapi) BOOL;
     extern "kernel32" fn CreateFileW(lpFileName: [*:0]const u16, dwDesiredAccess: u32, dwShareMode: u32, lpSecurityAttributes: ?*const SECURITY_ATTRIBUTES, dwCreationDisposition: u32, dwFlagsAndAttributes: u32, hTemplateFile: ?HANDLE) callconv(.winapi) ?HANDLE;
     extern "kernel32" fn CloseHandle(hObject: HANDLE) callconv(.winapi) BOOL;
-    extern "kernel32" fn FindFirstFileW(lpFileName: [*:0]const u16, lpFindFileData: *WIN32_FIND_DATAW) callconv(.winapi) ?HANDLE;
-    extern "kernel32" fn FindNextFileW(hFindFile: HANDLE, lpFindFileData: *WIN32_FIND_DATAW) callconv(.winapi) BOOL;
-    extern "kernel32" fn FindClose(hFindFile: HANDLE) callconv(.winapi) BOOL;
+    pub extern "kernel32" fn FindFirstFileW(lpFileName: [*:0]const u16, lpFindFileData: *WIN32_FIND_DATAW) callconv(.winapi) ?HANDLE;
+    pub extern "kernel32" fn FindNextFileW(hFindFile: HANDLE, lpFindFileData: *WIN32_FIND_DATAW) callconv(.winapi) BOOL;
+    pub extern "kernel32" fn FindClose(hFindFile: HANDLE) callconv(.winapi) BOOL;
 } else struct {
-    const linux = std.os.linux;
+    pub const linux = std.os.linux;
 };
 
-fn nowUnix() f64 {
+pub fn nowUnix() f64 {
     if (is_windows) {
         var ft: platform.FILETIME = .{};
         platform.GetSystemTimeAsFileTime(&ft);
@@ -89,7 +90,7 @@ fn nowUnix() f64 {
     }
 }
 
-fn perfNow() i64 {
+pub fn perfNow() i64 {
     if (is_windows) {
         var v: platform.LARGE_INTEGER = undefined;
         _ = platform.QueryPerformanceCounter(&v);
@@ -101,7 +102,7 @@ fn perfNow() i64 {
     }
 }
 
-fn perfFreq() i64 {
+pub fn perfFreq() i64 {
     if (is_windows) {
         var v: platform.LARGE_INTEGER = undefined;
         _ = platform.QueryPerformanceFrequency(&v);
@@ -111,7 +112,7 @@ fn perfFreq() i64 {
     }
 }
 
-fn writeStdout(bytes: []const u8) void {
+pub fn writeStdout(bytes: []const u8) void {
     if (is_windows) {
         const h = platform.GetStdHandle(platform.STD_OUTPUT_HANDLE).?;
         var written: u32 = 0;
@@ -134,7 +135,7 @@ fn writeStdout(bytes: []const u8) void {
     }
 }
 
-fn writeStderr(bytes: []const u8) void {
+pub fn writeStderr(bytes: []const u8) void {
     if (is_windows) {
         const h = platform.GetStdHandle(@bitCast(@as(i32, -12))).?;
         var written: u32 = 0;
@@ -196,7 +197,7 @@ fn fileRead(fd: PlatformFd, buf: []u8) !usize {
     }
 }
 
-fn readEntireFile(alloc: Allocator, path: []const u8) ![]u8 {
+pub fn readEntireFile(alloc: Allocator, path: []const u8) ![]u8 {
     const fd = try fileOpen(alloc, path);
     defer fileClose(fd);
     var buf: std.ArrayList(u8) = .empty;
@@ -238,7 +239,7 @@ fn mtimeOk(alloc: Allocator, path: []const u8, earliest: f64) bool {
 
 // ─── Command-line parsing ────────────────────────────────────────────────────
 
-fn getArgs(alloc: Allocator) ![][]const u8 {
+pub fn getArgs(alloc: Allocator) ![][]const u8 {
     if (is_windows) {
         return getArgsWindows(alloc);
     } else {
@@ -316,7 +317,7 @@ fn getArgsWindows(alloc: Allocator) ![][]const u8 {
     return out.toOwnedSlice(alloc);
 }
 
-fn getEnvVar(alloc: Allocator, name: []const u8) ?[]const u8 {
+pub fn getEnvVar(alloc: Allocator, name: []const u8) ?[]const u8 {
     if (is_windows) {
         var wn: [256:0]u16 = undefined;
         const n = std.unicode.utf8ToUtf16Le(wn[0..255], name) catch return null;
@@ -371,8 +372,7 @@ const Cli = struct {
     root: ?[]const u8 = null,
 };
 
-fn parseCli(alloc: Allocator) !Cli {
-    const argv = try getArgs(alloc);
+fn parseCli(argv: [][]const u8) !Cli {
     var cli = Cli{};
     var i: usize = 0;
     while (i < argv.len) {
@@ -398,7 +398,7 @@ fn parseCli(alloc: Allocator) !Cli {
     return cli;
 }
 
-fn grab(argv: [][]const u8, i: *usize, flag: []const u8) []const u8 {
+pub fn grab(argv: [][]const u8, i: *usize, flag: []const u8) []const u8 {
     if (i.* >= argv.len) {
         std.debug.print("walker: {s} needs a value\n", .{flag});
         std.process.exit(2);
@@ -407,7 +407,7 @@ fn grab(argv: [][]const u8, i: *usize, flag: []const u8) []const u8 {
     return argv[i.*];
 }
 
-fn die(msg: []const u8) noreturn {
+pub fn die(msg: []const u8) noreturn {
     std.debug.print("walker: {s}\n", .{msg});
     std.process.exit(2);
 }
@@ -432,7 +432,7 @@ fn modelCost(inp: u64, out_: u64, cr: u64, cw: u64, model: []const u8) f64 {
 
 // ─── ISO 8601 ────────────────────────────────────────────────────────────────
 
-fn parseTs(s: []const u8) !f64 {
+pub fn parseTs(s: []const u8) !f64 {
     if (s.len < 20 or s[s.len - 1] != 'Z') return error.Bad;
     if (s[4] != '-' or s[7] != '-' or s[10] != 'T' or s[13] != ':' or s[16] != ':')
         return error.Bad;
@@ -580,8 +580,8 @@ fn processLine(
 
 // ─── Directory discovery ─────────────────────────────────────────────────────
 
-const FileMap = std.StringHashMap(std.ArrayList([]const u8));
-const PATH_SEP = if (is_windows) '\\' else '/';
+pub const FileMap = std.StringHashMap(std.ArrayList([]const u8));
+pub const PATH_SEP = if (is_windows) '\\' else '/';
 
 fn addFile(alloc: Allocator, map: *FileMap, slug: []const u8, sid: []const u8, path: []const u8) !void {
     const key = try std.fmt.allocPrint(alloc, "{s}\x00{s}", .{ slug, sid });
@@ -592,7 +592,7 @@ fn addFile(alloc: Allocator, map: *FileMap, slug: []const u8, sid: []const u8, p
     try gop.value_ptr.*.append(alloc, path);
 }
 
-fn defaultRoot(alloc: Allocator) ![]const u8 {
+pub fn defaultRoot(alloc: Allocator) ![]const u8 {
     const home_var = if (is_windows) "USERPROFILE" else "HOME";
     if (getEnvVar(alloc, home_var)) |home| {
         defer alloc.free(home);
@@ -601,7 +601,7 @@ fn defaultRoot(alloc: Allocator) ![]const u8 {
     return alloc.dupe(u8, ".claude/projects");
 }
 
-fn discover(alloc: Allocator, root_path: []const u8, earliest: f64) !FileMap {
+pub fn discover(alloc: Allocator, root_path: []const u8, earliest: f64) !FileMap {
     if (is_windows) {
         return discoverWindows(alloc, root_path, earliest);
     } else {
@@ -855,15 +855,48 @@ fn doWork(ctx: Wctx) void {
 // ─── main ────────────────────────────────────────────────────────────────────
 
 pub fn main() !void {
+    const gpa = std.heap.smp_allocator;
+    var dispatch_arena = std.heap.ArenaAllocator.init(gpa);
+    defer dispatch_arena.deinit();
+    const dispatch_alloc = dispatch_arena.allocator();
+
+    const argv = try getArgs(dispatch_alloc);
+    // Subcommand routing: "cost", "beacons-latest", "beacons-history" route
+    // to the matching impl. Bare flag invocation (first arg starts with "-")
+    // or no args at all routes to cost mode for back-compat.
+    const subcommand: []const u8 = blk: {
+        if (argv.len == 0) break :blk "cost";
+        const first = argv[0];
+        if (std.mem.eql(u8, first, "cost")) break :blk "cost";
+        if (std.mem.eql(u8, first, "beacons-latest")) break :blk "beacons-latest";
+        if (std.mem.eql(u8, first, "beacons-history")) break :blk "beacons-history";
+        if (first.len > 0 and first[0] == '-') break :blk "cost";
+        std.debug.print("walker: unknown subcommand: {s}\n", .{first});
+        std.process.exit(2);
+    };
+    const rest: [][]const u8 = if (std.mem.eql(u8, subcommand, "cost") and (argv.len == 0 or argv[0].len == 0 or argv[0][0] == '-'))
+        argv
+    else
+        argv[1..];
+
+    if (std.mem.eql(u8, subcommand, "beacons-latest")) {
+        return beacons.runLatest(gpa, rest);
+    }
+    if (std.mem.eql(u8, subcommand, "beacons-history")) {
+        return beacons.runHistory(gpa, rest);
+    }
+    return runCost(gpa, rest);
+}
+
+fn runCost(gpa: Allocator, args: [][]const u8) !void {
     const t0 = perfNow();
     const frq = perfFreq();
 
-    const gpa = std.heap.smp_allocator;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const cli = try parseCli(alloc);
+    const cli = try parseCli(args);
     const now: f64 = cli.now orelse nowUnix();
     const pc = now - @as(f64, @floatFromInt(cli.period));
     const earliest = @min(pc, cli.win_start);
