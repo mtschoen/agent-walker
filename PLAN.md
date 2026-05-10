@@ -115,6 +115,26 @@ the goroutine fan-out — `runtime.GOMAXPROCS` and the worker count cap.
 Author's pool was 8 workers (matching Rust); that should be right but
 worth confirming with `--workers N` flag if added.
 
+### Rainy-day: roll our own JSON parser in each language
+
+The current 4-language comparison is contaminated by JSON-library
+choice — `serde_json` vs `nlohmann/json` is more of a perf gap than
+Rust vs C++ is. The fair comparison would have each implementation use
+a hand-rolled, purpose-built parser that knows it only needs to extract
+five fields from each line (`message.role`, `message.id`,
+`message.model`, `message.usage.{...}`, `timestamp`).
+
+A purpose-built parser that scans for those five field names and skips
+the rest of the line could be much faster than any general parser
+(serde_json or simdjson). It would also normalize the comparison: every
+language is then judged on its primitives (string scanning, integer
+parse, conditional dispatch) rather than on which JSON library was
+fashionable when its ecosystem was built.
+
+Lots of work for "fairness," and the practical answer (use the fastest
+JSON lib in each language) is what production code would do anyway.
+File this under "fun exercise for a rainy day."
+
 ### Standing item
 
 - [ ] Wire optional native-walker detection into
