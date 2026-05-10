@@ -27,7 +27,7 @@ type arguments struct {
 	projectsRoot  string
 }
 
-func parseArguments() (arguments, error) {
+func parseArguments(rawArgs []string) (arguments, error) {
 	var (
 		period   uint64
 		winStart float64
@@ -44,7 +44,7 @@ func parseArguments() (arguments, error) {
 	flags.StringVar(&root, "projects-root", "", "path to Claude projects root")
 	flags.BoolVar(&ver, "version", false, "print version and exit")
 
-	if err := flags.Parse(os.Args[1:]); err != nil {
+	if err := flags.Parse(rawArgs); err != nil {
 		return arguments{}, err
 	}
 	if ver {
@@ -318,9 +318,36 @@ type output struct {
 }
 
 func main() {
+	raw := os.Args[1:]
+	// Subcommand dispatch. Bare flag invocation (or no args) routes to cost
+	// mode for back-compat with the original CLI shape.
+	if len(raw) > 0 {
+		switch raw[0] {
+		case "cost":
+			runCost(raw[1:])
+			return
+		case "beacons-latest":
+			runBeaconsLatest(raw[1:])
+			return
+		case "beacons-history":
+			runBeaconsHistory(raw[1:])
+			return
+		}
+		first := raw[0]
+		// Any non-flag first positional that didn't match a subcommand is
+		// an error; bare flag invocation falls through to cost.
+		if !strings.HasPrefix(first, "-") {
+			fmt.Fprintf(os.Stderr, "walker: unknown subcommand: %s\n", first)
+			os.Exit(2)
+		}
+	}
+	runCost(raw)
+}
+
+func runCost(rawArgs []string) {
 	started := time.Now()
 
-	args, err := parseArguments()
+	args, err := parseArguments(rawArgs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "walker: %v\n", err)
 		os.Exit(2)
