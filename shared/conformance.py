@@ -39,6 +39,12 @@ EXPECTED_HISTORY = BEACON_CORPUS / "expected_history.json"
 TOLERANCE = 0.01  # $
 BIAS_TOLERANCE = 0.001
 
+# Flags only some impls accept. --no-config and --extra-projects-root were
+# introduced cpp-only (walker-roots.json discovery is a cpp feature today);
+# passing them to rust/go/zig errors with "unknown flag".
+IMPLS_WITH_NO_CONFIG = {"cpp"}
+IMPLS_WITH_EXTRA_ROOTS = {"cpp"}
+
 CANDIDATES = {
     "rust": [
         ROOT / "rust" / "target" / "release" / "walker.exe",
@@ -67,7 +73,7 @@ def find_binary(lang: str) -> Path | None:
     return None
 
 
-def run_walker(binary: Path, meta: dict, projects_root: Path, extras: list[Path] | None = None) -> dict:
+def run_walker(lang: str, binary: Path, meta: dict, projects_root: Path, extras: list[Path] | None = None) -> dict:
     """Run the walker binary against `projects_root`, return parsed JSON output."""
     cmd = [
         str(binary),
@@ -75,10 +81,12 @@ def run_walker(binary: Path, meta: dict, projects_root: Path, extras: list[Path]
         "--win-start", repr(meta["win_start_unix"]),
         "--now", repr(meta["now_unix"]),
         "--projects-root", str(projects_root),
-        "--no-config",
     ]
-    for extra in extras or []:
-        cmd.extend(["--extra-projects-root", str(extra)])
+    if lang in IMPLS_WITH_NO_CONFIG:
+        cmd.append("--no-config")
+    if lang in IMPLS_WITH_EXTRA_ROOTS:
+        for extra in extras or []:
+            cmd.extend(["--extra-projects-root", str(extra)])
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
     if result.returncode != 0:
         raise RuntimeError(
@@ -100,7 +108,7 @@ def check_aggregate(lang: str, binary: Path, expected: dict) -> bool:
     meta = expected["_meta"]
     target = expected["_aggregate"]
     try:
-        got = run_walker(binary, meta, CORPUS)
+        got = run_walker(lang, binary, meta, CORPUS)
     except Exception as e:
         print(f"  [{lang:>4s}] aggregate    FAIL  {e}")
         return False
@@ -125,7 +133,7 @@ def check_fixture(
         # fixture directory acting as the slug.
         shutil.copytree(CORPUS / fixture_name, Path(tmp) / fixture_name)
         try:
-            got = run_walker(binary, meta, Path(tmp))
+            got = run_walker(lang, binary, meta, Path(tmp))
         except Exception as e:
             print(f"  [{lang:>4s}] {fixture_name:20s} FAIL  {e}")
             return False
@@ -148,9 +156,11 @@ def check_implementation(lang: str, binary: Path, expected: dict) -> bool:
     return aggregate_ok and fixtures_ok
 
 
-def run_walker_subcommand(binary: Path, subcommand: str, args: list[str]) -> dict:
+def run_walker_subcommand(lang: str, binary: Path, subcommand: str, args: list[str]) -> dict:
     """Invoke a walker subcommand, return parsed JSON of last stdout line."""
     cmd = [str(binary), subcommand, *args]
+    if lang in IMPLS_WITH_NO_CONFIG:
+        cmd.append("--no-config")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
     if result.returncode != 0:
         raise RuntimeError(
@@ -170,10 +180,9 @@ def assert_beacons_latest(lang: str, binary: Path, expected: dict) -> bool:
             shutil.copytree(BEACON_CORPUS / scenario, Path(tmp) / scenario)
             label = f"beacons-latest:{scenario}"
             try:
-                got = run_walker_subcommand(binary, "beacons-latest", [
+                got = run_walker_subcommand(lang, binary, "beacons-latest", [
                     "--session-id", target["session_id"],
                     "--projects-root", str(tmp),
-                    "--no-config",
                     "--now", repr(meta["now_unix"]),
                 ])
             except Exception as e:
@@ -211,12 +220,11 @@ def assert_beacons_history(lang: str, binary: Path, expected: dict) -> bool:
         tree = Path(tmp) / "tree"
         shutil.copytree(BEACON_CORPUS / "cross_session_pairs", tree)
         try:
-            got = run_walker_subcommand(binary, "beacons-history", [
+            got = run_walker_subcommand(lang, binary, "beacons-history", [
                 "--period", "604800",  # 7 days, generous
                 "--win-start", "0",
                 "--projects-root", str(tree),
                 "--now", repr(meta["now_unix"]),
-                "--no-config",
             ])
         except Exception as e:
             print(f"  [{lang:>4s}] {label:38s} FAIL  {e}")
@@ -268,6 +276,9 @@ def check_multi_root(lang: str, binary: Path) -> bool:
     """Run each multi-root scenario; assert binary sums match expected.json."""
     if not MULTI_ROOT_CORPUS.is_dir():
         return True  # no scenarios — skip cleanly
+    if lang not in IMPLS_WITH_EXTRA_ROOTS:
+        print(f"  [{lang:>4s}] multi-root scenarios -- skipping (impl lacks --extra-projects-root)")
+        return True
     all_ok = True
     for scenario_dir in sorted(MULTI_ROOT_CORPUS.iterdir()):
         if not scenario_dir.is_dir():
@@ -280,7 +291,7 @@ def check_multi_root(lang: str, binary: Path) -> bool:
         primary = scenario_dir / data["primary_root"]
         extras = [scenario_dir / r for r in data["extra_roots"]]
         try:
-            got = run_walker(binary, meta, primary, extras=extras)
+            got = run_walker(lang, binary, meta, primary, extras=extras)
         except Exception as e:
             print(f"  [{lang:>4s}] {scenario_dir.name:<22s} FAIL  {e}")
             all_ok = False
