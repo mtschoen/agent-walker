@@ -49,6 +49,48 @@ to caller's reference path." Stderr is for diagnostics. The walker MUST
 NOT panic, hang, or write partial output. Bad input means clean error +
 non-zero exit.
 
+## Roots
+
+Every subcommand walks an effective set of project roots assembled as:
+
+1. **Primary root.** From `--projects-root <path>` if given, else
+   `~/.claude/projects`.
+2. **CLI extras.** Zero or more `--extra-projects-root <path>` flags.
+3. **Config extras.** Read from `~/.claude/walker-roots.json` unless
+   `--no-config` is passed.
+
+### Config file shape
+
+`~/.claude/walker-roots.json`:
+
+```json
+{
+  "extra_roots": [
+    "/mnt/chonkers/Users/mtsch/.claude/projects"
+  ]
+}
+```
+
+Single key `extra_roots`: array of absolute paths. Per-host; NOT
+synced via memory-sync. Missing file → no extras. Malformed JSON →
+stderr diagnostic, treat as no extras (must NOT error).
+
+### Resolution
+
+The combined list is:
+
+- Deduplicated by `fs::canonical` (realpath); if `canonical` fails for
+  an entry, fall back to its lexically-normalized form.
+- Filtered to existing directories. Non-existent extras are skipped
+  silently with a stderr diagnostic. (This is the SMB-mount-unreachable
+  case — walker must keep going.)
+- Order: primary first, CLI extras in order, config extras in order.
+  Order is informational; results are aggregated and must not depend on
+  it within float epsilon.
+
+Per-group dedup (`seen_ids` on `message.id`) is unchanged. Per-file
+mtime filter is unchanged. All applied uniformly across roots.
+
 ## Discovery
 
 Glob `<projects-root>/*/*.jsonl` for parents and

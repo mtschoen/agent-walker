@@ -70,7 +70,7 @@ static Args parse_args(const std::vector<std::string>& argv) {
         } else if (flag == "--projects-root") {
             args.projects_root = fs::path(next());
         } else if (flag == "--version") {
-            std::cout << "cpp/0.3.0\n";
+            std::cout << "cpp/0.4.0\n";
             std::exit(0);
         } else if (flag == "--extra-projects-root") {
             args.extra_projects_roots.emplace_back(next());
