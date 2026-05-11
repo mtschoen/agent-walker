@@ -1,0 +1,272 @@
+name: CI
+
+# Build all four impls (Rust, C++, Go, Zig) on Linux + Windows and run
+# `python shared/conformance.py` against the corpus. Triggers on push to
+# main, pull_request to main, and workflow_dispatch (for iteration on a
+# feature branch without opening a PR).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NO_COLOR: '1'
+  FORCE_COLOR: '0'
+
+jobs:
+  test-linux:
+    name: Build + Conformance (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Probe toolchain
+        run: |
+          set +e
+          uname -a
+          for t in cmake g++ make python3 curl tar xz cargo rustc go zig; do
+            p="$(command -v "$t" 2>/dev/null)"
+            if [ -n "$p" ]; then echo "  $t -> $p"; else echo "  $t -> MISSING"; fi
+          done
+
+      - name: Install cmake
+        # The gitea/runner-images:ubuntu-latest container ships g++/make
+        # but not cmake.
+        run: |
+          set -e
+          if command -v sudo >/dev/null 2>&1; then SUDO=sudo; else SUDO=; fi
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends cmake
+          cmake --version
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Zig 0.16.0
+        # Asset name changed in 0.16.0 from `zig-{os}-{arch}-{ver}` to
+        # `zig-{arch}-{os}-{ver}`.
+        run: |
+          set -e
+          ZIG_VERSION=0.16.0
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
+          mkdir -p "$HOME/.local/zig"
+          tar -xf /tmp/zig.tar.xz -C "$HOME/.local/zig" --strip-components=1
+          echo "$HOME/.local/zig" >> "$GITHUB_PATH"
+          "$HOME/.local/zig/zig" version
+
+      - name: Build Rust
+        working-directory: rust
+        run: cargo build --release
+
+      - name: Build C++
+        run: |
+          cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build cpp/build --config Release -j
+
+      - name: Build Go
+        working-directory: go
+        run: go build -o walker .
+
+      - name: Build Zig
+        working-directory: zig
+        run: zig build
+
+      - name: Verify all binaries built
+        # conformance.py silently SKIPs (and exits 0) when a binary
+        # is missing — gate explicitly so a misnamed output path
+        # doesn't masquerade as a green run.
+        run: |
+          set -e
+          missing=0
+          for bin in rust/target/release/walker cpp/build/walker go/walker zig/zig-out/bin/walker; do
+            if [ -x "$bin" ]; then
+              echo "  ok: $bin"
+            else
+              echo "  MISSING: $bin"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ]
+
+      - name: Run conformance
+        run: python shared/conformance.py rust cpp go zig
+
+  test-windows:
+    name: Build + Conformance (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      # Node-based actions (upload-artifact, cache, etc.) on the
+      # Windows runner can't verify the mkcert root; bypass per
+      # project-ci-setup.md "Self-signed cert" gotcha.
+      NODE_TLS_REJECT_UNAUTHORIZED: '0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Probe toolchain
+        shell: pwsh
+        run: |
+          Write-Host "=== Tools ==="
+          foreach ($t in @('cmake','cl','rustup','cargo','go','zig','python','python3','pwsh','tar','curl')) {
+            $c = Get-Command $t -ErrorAction SilentlyContinue
+            if ($c) { Write-Host "  $t -> $($c.Source)" } else { Write-Host "  $t -> MISSING" }
+          }
+          $vsw = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vsw) {
+            Write-Host "=== VS install ==="
+            & $vsw -latest -products * -property installationPath
+          } else {
+            Write-Host "=== vswhere: MISSING ==="
+          }
+
+      - name: Install Python 3.11 (python-build-standalone)
+        # actions/setup-python@v5 + python.org MSI both fail under
+        # the SYSTEM-account runner; portable tarball works.
+        shell: pwsh
+        run: |
+          $pyDir = "C:\hostedtoolcache\Python311"
+          if (-not (Test-Path "$pyDir\python.exe")) {
+            $url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260414/cpython-3.11.15+20260414-x86_64-pc-windows-msvc-install_only.tar.gz"
+            $tar = Join-Path $env:RUNNER_TEMP "python-3.11.tar.gz"
+            Invoke-WebRequest -Uri $url -OutFile $tar -UseBasicParsing
+            New-Item -ItemType Directory -Force -Path $pyDir | Out-Null
+            tar -xzf $tar -C $pyDir --strip-components=1
+            if (-not (Test-Path "$pyDir\python.exe")) {
+              throw "tar extracted but python.exe not at $pyDir\python.exe"
+            }
+          }
+          & "$pyDir\python.exe" --version
+          "$pyDir"         | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "$pyDir\Scripts" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+
+      - name: Install Kitware CMake
+        # VS-bundled cmake under BuildTools is 32-bit and hits WOW64
+        # redirection on the System32\config\systemprofile workspace
+        # paths used by the SYSTEM-account runner ("CMake Error: source
+        # directory does not exist" on a path that clearly does).
+        # Use the official 64-bit Kitware build instead.
+        shell: pwsh
+        run: |
+          $CMAKE_VERSION = "3.31.4"
+          $destDir = "C:\hostedtoolcache\cmake-$CMAKE_VERSION"
+          if (-not (Test-Path "$destDir\bin\cmake.exe")) {
+            $url = "https://github.com/Kitware/CMake/releases/download/v$CMAKE_VERSION/cmake-$CMAKE_VERSION-windows-x86_64.zip"
+            $zip = Join-Path $env:RUNNER_TEMP "cmake.zip"
+            Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+            $stage = Join-Path $env:RUNNER_TEMP "cmake-extract"
+            if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+            Expand-Archive -Path $zip -DestinationPath $stage -Force
+            $inner = Get-ChildItem $stage -Directory | Select-Object -First 1
+            if (Test-Path $destDir) { Remove-Item $destDir -Recurse -Force }
+            Move-Item $inner.FullName $destDir
+          }
+          "$destDir\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          & "$destDir\bin\cmake.exe" --version
+
+      - name: Install Rust (rustup-init)
+        # dtolnay/rust-toolchain@stable needs bash, which isn't on the
+        # Windows runner's PATH ("Cannot find: bash in PATH"). Install
+        # manually instead. CARGO_HOME under hostedtoolcache so it
+        # persists across runs.
+        shell: pwsh
+        run: |
+          $cargoHome  = "C:\hostedtoolcache\cargo"
+          $rustupHome = "C:\hostedtoolcache\rustup"
+          $env:CARGO_HOME  = $cargoHome
+          $env:RUSTUP_HOME = $rustupHome
+          if (-not (Test-Path "$cargoHome\bin\cargo.exe")) {
+            $init = Join-Path $env:RUNNER_TEMP "rustup-init.exe"
+            Invoke-WebRequest -Uri "https://win.rustup.rs/x86_64" -OutFile $init -UseBasicParsing
+            & $init -y --default-toolchain stable --profile minimal --no-modify-path
+            if ($LASTEXITCODE -ne 0) { throw "rustup-init exited $LASTEXITCODE" }
+          }
+          "CARGO_HOME=$cargoHome"   | Out-File -FilePath $env:GITHUB_ENV  -Append -Encoding utf8
+          "RUSTUP_HOME=$rustupHome" | Out-File -FilePath $env:GITHUB_ENV  -Append -Encoding utf8
+          "$cargoHome\bin"          | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          & "$cargoHome\bin\rustc.exe" --version
+          & "$cargoHome\bin\cargo.exe" --version
+
+      - name: Install Zig 0.16.0
+        # Asset name changed in 0.16.0 from `zig-{os}-{arch}-{ver}` to
+        # `zig-{arch}-{os}-{ver}`.
+        shell: pwsh
+        run: |
+          $ZIG_VERSION = "0.16.0"
+          $destDir = "C:\hostedtoolcache\zig-$ZIG_VERSION"
+          if (-not (Test-Path "$destDir\zig.exe")) {
+            $url = "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-windows-$ZIG_VERSION.zip"
+            $zip = Join-Path $env:RUNNER_TEMP "zig.zip"
+            Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+            $stage = Join-Path $env:RUNNER_TEMP "zig-extract"
+            if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+            Expand-Archive -Path $zip -DestinationPath $stage -Force
+            $inner = Get-ChildItem $stage -Directory | Select-Object -First 1
+            if (Test-Path $destDir) { Remove-Item $destDir -Recurse -Force }
+            Move-Item $inner.FullName $destDir
+          }
+          & "$destDir\zig.exe" version
+          "$destDir" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Build Rust
+        shell: pwsh
+        working-directory: rust
+        run: cargo build --release
+
+      - name: Build C++
+        shell: pwsh
+        run: |
+          cmake -S cpp -B cpp\build -DCMAKE_BUILD_TYPE=Release
+          cmake --build cpp\build --config Release -j
+
+      - name: Build Go
+        shell: pwsh
+        working-directory: go
+        run: go build -o walker.exe .
+
+      - name: Build Zig
+        shell: pwsh
+        working-directory: zig
+        run: zig build
+
+      - name: Verify all binaries built
+        shell: pwsh
+        run: |
+          $bins = @(
+            "rust\target\release\walker.exe",
+            "cpp\build\Release\walker.exe",
+            "go\walker.exe",
+            "zig\zig-out\bin\walker.exe"
+          )
+          $missing = $false
+          foreach ($b in $bins) {
+            if (Test-Path $b) {
+              Write-Host "  ok: $b"
+            } else {
+              Write-Host "  MISSING: $b"
+              $missing = $true
+            }
+          }
+          if ($missing) { exit 1 }
+
+      - name: Run conformance
+        shell: pwsh
+        run: python shared/conformance.py rust cpp go zig
