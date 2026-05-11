@@ -173,6 +173,7 @@ def assert_beacons_latest(lang: str, binary: Path, expected: dict) -> bool:
                 got = run_walker_subcommand(binary, "beacons-latest", [
                     "--session-id", target["session_id"],
                     "--projects-root", str(tmp),
+                    "--no-config",
                     "--now", repr(meta["now_unix"]),
                 ])
             except Exception as e:
@@ -215,6 +216,7 @@ def assert_beacons_history(lang: str, binary: Path, expected: dict) -> bool:
                 "--win-start", "0",
                 "--projects-root", str(tree),
                 "--now", repr(meta["now_unix"]),
+                "--no-config",
             ])
         except Exception as e:
             print(f"  [{lang:>4s}] {label:38s} FAIL  {e}")
