@@ -6,6 +6,7 @@
 
 #include "beacons.hpp"
 #include "common.hpp"
+#include "walker_roots.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -40,6 +41,8 @@ struct Args {
     double win_start_unix = 0.0;
     std::optional<double> now_unix;
     std::optional<fs::path> projects_root;
+    std::vector<fs::path> extra_projects_roots;
+    bool read_config = true;
 };
 
 [[noreturn]] static void die(std::string_view message) {
@@ -69,6 +72,10 @@ static Args parse_args(const std::vector<std::string>& argv) {
         } else if (flag == "--version") {
             std::cout << "cpp/0.3.0\n";
             std::exit(0);
+        } else if (flag == "--extra-projects-root") {
+            args.extra_projects_roots.emplace_back(next());
+        } else if (flag == "--no-config") {
+            args.read_config = false;
         } else {
             die(std::string("unknown flag: ") + flag);
         }
@@ -279,56 +286,28 @@ static std::string group_key(const std::string& slug, const std::string& sid) {
     return slug + '\0' + sid;
 }
 
-static GroupMap discover_groups(const fs::path& root, double earliest) {
+static GroupMap discover_groups(
+    const std::vector<fs::path>& roots,
+    double earliest)
+{
     GroupMap groups;
 
-    std::error_code ec;
-    if (!fs::exists(root, ec)) return groups;
+    for (const fs::path& root : roots) {
+        std::error_code ec;
+        if (!fs::exists(root, ec)) continue;
 
-    // Parents: <root>/<slug>/<session_id>.jsonl
-    for (auto& slug_entry : fs::directory_iterator(root, ec)) {
-        if (!slug_entry.is_directory()) continue;
-        std::string slug = slug_entry.path().filename().string();
+        // Parents: <root>/<slug>/<session_id>.jsonl
+        for (auto& slug_entry : fs::directory_iterator(root, ec)) {
+            if (!slug_entry.is_directory()) continue;
+            std::string slug = slug_entry.path().filename().string();
 
-        for (auto& file_entry : fs::directory_iterator(slug_entry.path(), ec)) {
-            const auto& path = file_entry.path();
+            for (auto& file_entry : fs::directory_iterator(slug_entry.path(), ec)) {
+                const auto& path = file_entry.path();
 
-            if (!file_entry.is_regular_file()) continue;
-            if (path.extension() != ".jsonl") continue;
+                if (!file_entry.is_regular_file()) continue;
+                if (path.extension() != ".jsonl") continue;
 
-            // Check mtime
-            auto mtime = fs::last_write_time(path, ec);
-            if (!ec) {
-                // Convert file_time_type to unix epoch
-                auto sys_time = std::chrono::time_point_cast<std::chrono::seconds>(
-                    std::chrono::clock_cast<std::chrono::system_clock>(mtime));
-                double mtime_unix = static_cast<double>(sys_time.time_since_epoch().count());
-                if (mtime_unix < earliest) continue;
-            }
-
-            std::string sid = path.stem().string();
-            groups[group_key(slug, sid)].push_back(path);
-        }
-
-        // Subagents: <root>/<slug>/<session_id>/subagents/agent-*.jsonl
-        for (auto& session_entry : fs::directory_iterator(slug_entry.path(), ec)) {
-            if (!session_entry.is_directory()) continue;
-            std::string sid = session_entry.path().filename().string();
-
-            fs::path subagents_dir = session_entry.path() / "subagents";
-            if (!fs::is_directory(subagents_dir, ec)) continue;
-
-            for (auto& agent_entry : fs::directory_iterator(subagents_dir, ec)) {
-                const auto& apath = agent_entry.path();
-                if (!agent_entry.is_regular_file()) continue;
-                if (apath.extension() != ".jsonl") continue;
-
-                // Check filename starts with "agent-"
-                std::string fname = apath.filename().string();
-                if (fname.substr(0, 6) != "agent-") continue;
-
-                // Check mtime
-                auto mtime = fs::last_write_time(apath, ec);
+                auto mtime = fs::last_write_time(path, ec);
                 if (!ec) {
                     auto sys_time = std::chrono::time_point_cast<std::chrono::seconds>(
                         std::chrono::clock_cast<std::chrono::system_clock>(mtime));
@@ -336,7 +315,36 @@ static GroupMap discover_groups(const fs::path& root, double earliest) {
                     if (mtime_unix < earliest) continue;
                 }
 
-                groups[group_key(slug, sid)].push_back(apath);
+                std::string sid = path.stem().string();
+                groups[group_key(slug, sid)].push_back(path);
+            }
+
+            // Subagents: <root>/<slug>/<session_id>/subagents/agent-*.jsonl
+            for (auto& session_entry : fs::directory_iterator(slug_entry.path(), ec)) {
+                if (!session_entry.is_directory()) continue;
+                std::string sid = session_entry.path().filename().string();
+
+                fs::path subagents_dir = session_entry.path() / "subagents";
+                if (!fs::is_directory(subagents_dir, ec)) continue;
+
+                for (auto& agent_entry : fs::directory_iterator(subagents_dir, ec)) {
+                    const auto& apath = agent_entry.path();
+                    if (!agent_entry.is_regular_file()) continue;
+                    if (apath.extension() != ".jsonl") continue;
+
+                    std::string fname = apath.filename().string();
+                    if (fname.substr(0, 6) != "agent-") continue;
+
+                    auto mtime = fs::last_write_time(apath, ec);
+                    if (!ec) {
+                        auto sys_time = std::chrono::time_point_cast<std::chrono::seconds>(
+                            std::chrono::clock_cast<std::chrono::system_clock>(mtime));
+                        double mtime_unix = static_cast<double>(sys_time.time_since_epoch().count());
+                        if (mtime_unix < earliest) continue;
+                    }
+
+                    groups[group_key(slug, sid)].push_back(apath);
+                }
             }
         }
     }
@@ -444,9 +452,11 @@ static int run_cost(const std::vector<std::string>& argv) {
     double period_cutoff = now_unix - static_cast<double>(args.period_seconds);
     double earliest = std::min(period_cutoff, args.win_start_unix);
 
-    fs::path root = args.projects_root.value_or(default_projects_root());
+    fs::path primary = args.projects_root.value_or(default_projects_root());
+    std::vector<fs::path> roots = walker::resolve_roots(
+        primary, args.extra_projects_roots, args.read_config);
 
-    GroupMap groups = discover_groups(root, earliest);
+    GroupMap groups = discover_groups(roots, earliest);
 
     size_t total_files = 0;
     for (auto& [key, paths] : groups) total_files += paths.size();
