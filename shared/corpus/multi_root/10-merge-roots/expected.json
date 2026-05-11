@@ -1,0 +1,14 @@
+{
+  "_meta": {
+    "now_unix": 1778414400.0,
+    "period_seconds": 604800,
+    "win_start_unix": 1778000000.0,
+    "note": "Multi-root conformance fixture."
+  },
+  "expected": {
+    "trailing_usd": 0.0385,
+    "window_usd": 0.0385
+  },
+  "primary_root": "primary",
+  "extra_roots": ["extra"]
+}

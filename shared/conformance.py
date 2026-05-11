@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CORPUS = ROOT / "shared" / "corpus"
 EXPECTED = ROOT / "shared" / "expected.json"
 BEACON_CORPUS = ROOT / "shared" / "corpus" / "beacons"
+MULTI_ROOT_CORPUS = ROOT / "shared" / "corpus" / "multi_root"
 EXPECTED_LATEST = BEACON_CORPUS / "expected_latest.json"
 EXPECTED_HISTORY = BEACON_CORPUS / "expected_history.json"
 TOLERANCE = 0.01  # $
@@ -261,6 +262,40 @@ def check_beacons(lang: str, binary: Path) -> bool:
     return latest_ok and history_ok
 
 
+def check_multi_root(lang: str, binary: Path) -> bool:
+    """Run each multi-root scenario; assert binary sums match expected.json."""
+    if not MULTI_ROOT_CORPUS.is_dir():
+        return True  # no scenarios — skip cleanly
+    all_ok = True
+    for scenario_dir in sorted(MULTI_ROOT_CORPUS.iterdir()):
+        if not scenario_dir.is_dir():
+            continue
+        expected_file = scenario_dir / "expected.json"
+        if not expected_file.is_file():
+            continue
+        data = json.loads(expected_file.read_text())
+        meta = data["_meta"]
+        primary = scenario_dir / data["primary_root"]
+        extras = [scenario_dir / r for r in data["extra_roots"]]
+        try:
+            got = run_walker(binary, meta, primary, extras=extras)
+        except Exception as e:
+            print(f"  [{lang:>4s}] {scenario_dir.name:<22s} FAIL  {e}")
+            all_ok = False
+            continue
+        target = data["expected"]
+        ok, dt, dw = within_tolerance(got, target)
+        badge = " OK " if ok else "FAIL"
+        print(
+            f"  [{lang:>4s}] {scenario_dir.name:<22s} {badge}  "
+            f"trailing=${got.get('trailing_usd', 0):.6f} (d=${dt:+.6f})  "
+            f"window=${got.get('window_usd', 0):.6f} (d=${dw:+.6f})"
+        )
+        if not ok:
+            all_ok = False
+    return all_ok
+
+
 def main():
     if not EXPECTED.is_file():
         print(f"missing {EXPECTED} -- run shared/generate_corpus.py first")
@@ -284,6 +319,8 @@ def main():
         if not check_implementation(lang, binary, expected):
             overall_ok = False
         if not check_beacons(lang, binary):
+            overall_ok = False
+        if not check_multi_root(lang, binary):
             overall_ok = False
         print()
 

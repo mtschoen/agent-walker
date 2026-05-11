@@ -1,0 +1,14 @@
+{
+  "_meta": {
+    "now_unix": 1778414400.0,
+    "period_seconds": 604800,
+    "win_start_unix": 1778000000.0,
+    "note": "Multi-root unreachable extra: walker must skip silently and return primary-only totals."
+  },
+  "expected": {
+    "trailing_usd": 0.0175,
+    "window_usd": 0.0175
+  },
+  "primary_root": "primary",
+  "extra_roots": ["__does_not_exist__"]
+}

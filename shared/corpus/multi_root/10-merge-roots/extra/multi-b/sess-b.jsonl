@@ -1,0 +1,1 @@
+{"timestamp":"2026-05-09T12:00:00Z","message":{"role":"assistant","id":"msg-b-1","model":"claude-sonnet-4-6","usage":{"input_tokens":2000,"output_tokens":1000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
