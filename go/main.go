@@ -17,7 +17,7 @@ import (
 	"github.com/bytedance/sonic"
 )
 
-const version = "go/0.1.0"
+const version = "go/0.1.1"
 
 // CLI arguments.
 type arguments struct {

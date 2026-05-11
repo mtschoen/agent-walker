@@ -4,7 +4,9 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,21 +18,22 @@ import (
 	"github.com/bytedance/sonic"
 )
 
-// beaconRegex matches <progress-beacon>...</progress-beacon> blocks.
-// (?s) makes `.` match newlines so a multi-line JSON body works.
-// Non-greedy `\{.*?\}` so two beacons in one text don't merge.
 var beaconRegex = regexp.MustCompile(`(?s)<progress-beacon>\s*(\{.*?\})\s*</progress-beacon>`)
 
-// Beacon JSON structures specific to beacon mode.
-
 type beaconEntry struct {
+	EntryType string         `json:"type"`
 	Timestamp string         `json:"timestamp"`
 	Message   *beaconMessage `json:"message"`
 }
 
+// beaconMessage uses json.RawMessage for Content because real-world
+// transcripts have message.content as either an array of content-blocks
+// OR a bare string. Strictly-typed []contentBlock silently fails to
+// deserialize the bare-string variants (sonic errors -> entry skipped),
+// which drops real user prompts from the idle calculation.
 type beaconMessage struct {
-	Role    string         `json:"role"`
-	Content []contentBlock `json:"content"`
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
 }
 
 type contentBlock struct {
@@ -38,8 +41,6 @@ type contentBlock struct {
 	Text string `json:"text"`
 }
 
-// beacon is the JSON payload extracted from a <progress-beacon> block.
-// BeatsLeft is optional; serialized with omitempty when nil.
 type beacon struct {
 	Kind       string  `json:"kind"`
 	EtaSeconds float64 `json:"eta_seconds"`
@@ -48,8 +49,6 @@ type beacon struct {
 	BeatsLeft  *int64  `json:"beats_left,omitempty"`
 }
 
-// rawBeacon mirrors beacon but tracks presence of required fields explicitly
-// so we can skip JSON missing any required key.
 type rawBeacon struct {
 	Kind       *string  `json:"kind"`
 	EtaSeconds *float64 `json:"eta_seconds"`
@@ -71,10 +70,32 @@ func (rb *rawBeacon) toBeacon() (*beacon, bool) {
 	}, true
 }
 
-// extractText concatenates `text` blocks from the message content array.
-func extractText(content []contentBlock) string {
-	parts := make([]string, 0, len(content))
-	for _, b := range content {
+// firstNonSpaceByte returns the first non-whitespace byte of raw or 0
+// when the payload is empty/whitespace. Used to dispatch on content shape.
+func firstNonSpaceByte(raw json.RawMessage) byte {
+	for _, b := range raw {
+		switch b {
+		case ' ', '\t', '\n', '\r':
+			continue
+		default:
+			return b
+		}
+	}
+	return 0
+}
+
+// extractText concatenates text blocks from an array-shaped content.
+// Returns empty string if content is a bare string or non-array.
+func extractText(content json.RawMessage) string {
+	if firstNonSpaceByte(content) != '[' {
+		return ""
+	}
+	var blocks []contentBlock
+	if err := sonic.Unmarshal(content, &blocks); err != nil {
+		return ""
+	}
+	parts := make([]string, 0, len(blocks))
+	for _, b := range blocks {
 		if b.Type == "text" {
 			parts = append(parts, b.Text)
 		}
@@ -82,15 +103,39 @@ func extractText(content []contentBlock) string {
 	return strings.Join(parts, "\n")
 }
 
-// beaconWithTimestamp pairs a beacon with the timestamp at which it was emitted.
+// userContentIsToolResult returns true iff content is a JSON array and
+// any block has type == "tool_result". Tool-result entries are tagged
+// type: "user" in JSONL but represent agent-active time, not user idle.
+func userContentIsToolResult(content json.RawMessage) bool {
+	if firstNonSpaceByte(content) != '[' {
+		return false
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+	}
+	if err := sonic.Unmarshal(content, &blocks); err != nil {
+		return false
+	}
+	for _, b := range blocks {
+		if b.Type == "tool_result" {
+			return true
+		}
+	}
+	return false
+}
+
 type beaconWithTimestamp struct {
 	beacon    beacon
 	timestamp float64
 }
 
-// findLatestInPath walks one transcript and returns the beacon from the
-// assistant entry with the highest timestamp. If multiple beacons appear
-// inside a single entry's text, the LAST regex match wins (matches Rust).
+// event is one entry in a session timeline. isRealUser is true only when
+// the entry has type: "user" AND content is NOT a tool_result array.
+type event struct {
+	timestamp  float64
+	isRealUser bool
+}
+
 func findLatestInPath(path string) (*beaconWithTimestamp, bool) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -115,7 +160,7 @@ func findLatestInPath(path string) (*beaconWithTimestamp, bool) {
 		if entry.Message == nil || entry.Message.Role != "assistant" {
 			continue
 		}
-		if entry.Message.Content == nil {
+		if len(entry.Message.Content) == 0 {
 			continue
 		}
 		if entry.Timestamp == "" {
@@ -126,7 +171,6 @@ func findLatestInPath(path string) (*beaconWithTimestamp, bool) {
 			continue
 		}
 		combined := extractText(entry.Message.Content)
-		// Pick the LAST well-formed beacon in this entry.
 		matches := beaconRegex.FindAllStringSubmatch(combined, -1)
 		var entryBeacon *beacon
 		for _, m := range matches {
@@ -154,10 +198,16 @@ func findLatestInPath(path string) (*beaconWithTimestamp, bool) {
 	return latest, true
 }
 
-// findAllInPath collects every well-formed beacon in the transcript with its
-// emit timestamp. Used by history mode.
-func findAllInPath(path string) []beaconWithTimestamp {
-	var out []beaconWithTimestamp
+type sessionEvents struct {
+	beacons []beaconWithTimestamp
+	events  []event
+}
+
+// collectSessionEventsInPath walks one transcript and collects beacons +
+// per-entry events for the idle-gap calc. Events are NOT sorted; callers
+// concatenate across the session group and sort once.
+func collectSessionEventsInPath(path string) sessionEvents {
+	var out sessionEvents
 	file, err := os.Open(path)
 	if err != nil {
 		return out
@@ -177,12 +227,6 @@ func findAllInPath(path string) []beaconWithTimestamp {
 		if err := sonic.Unmarshal([]byte(line), &entry); err != nil {
 			continue
 		}
-		if entry.Message == nil || entry.Message.Role != "assistant" {
-			continue
-		}
-		if entry.Message.Content == nil {
-			continue
-		}
 		if entry.Timestamp == "" {
 			continue
 		}
@@ -190,6 +234,22 @@ func findAllInPath(path string) []beaconWithTimestamp {
 		if !ok {
 			continue
 		}
+		if entry.EntryType == "user" {
+			var contentRaw json.RawMessage
+			if entry.Message != nil {
+				contentRaw = entry.Message.Content
+			}
+			isRealUser := !userContentIsToolResult(contentRaw)
+			out.events = append(out.events, event{timestamp: ts, isRealUser: isRealUser})
+			continue
+		}
+		if entry.Message == nil || entry.Message.Role != "assistant" {
+			continue
+		}
+		if len(entry.Message.Content) == 0 {
+			continue
+		}
+		out.events = append(out.events, event{timestamp: ts, isRealUser: false})
 		combined := extractText(entry.Message.Content)
 		matches := beaconRegex.FindAllStringSubmatch(combined, -1)
 		for _, m := range matches {
@@ -201,11 +261,33 @@ func findAllInPath(path string) []beaconWithTimestamp {
 				continue
 			}
 			if b, ok := rb.toBeacon(); ok {
-				out = append(out, beaconWithTimestamp{beacon: *b, timestamp: ts})
+				out.beacons = append(out.beacons, beaconWithTimestamp{
+					beacon: *b, timestamp: ts,
+				})
 			}
 		}
 	}
 	return out
+}
+
+// computeIdleInWindow sums the portion of [lo, hi] occupied by gaps that
+// immediately precede a real-user event. events MUST be sorted ascending.
+func computeIdleInWindow(events []event, lo, hi float64) float64 {
+	if len(events) < 2 {
+		return 0
+	}
+	var idle float64
+	for i := 1; i < len(events); i++ {
+		if !events[i].isRealUser {
+			continue
+		}
+		gapLo := math.Max(events[i-1].timestamp, lo)
+		gapHi := math.Min(events[i].timestamp, hi)
+		if gapHi > gapLo {
+			idle += gapHi - gapLo
+		}
+	}
+	return idle
 }
 
 // === beacons-latest ===
@@ -256,7 +338,6 @@ func parseLatestArguments(args []string) (latestArguments, error) {
 	return parsed, nil
 }
 
-// runBeaconsLatest finds the most recent beacon for one session.
 func runBeaconsLatest(args []string) {
 	started := time.Now()
 	parsed, err := parseLatestArguments(args)
@@ -273,7 +354,6 @@ func runBeaconsLatest(args []string) {
 		nowUnix = float64(time.Now().UnixNano()) / 1e9
 	}
 
-	// Try parent transcripts first, then any subagent transcript.
 	parentPattern := filepath.Join(root, "*", parsed.sessionID+".jsonl")
 	subPattern := filepath.Join(root, "*", "*", "subagents", "agent-"+parsed.sessionID+".jsonl")
 	var paths []string
@@ -317,9 +397,6 @@ func runBeaconsLatest(args []string) {
 	)
 }
 
-// formatFloat renders a float64 as a JSON number using the shortest
-// representation that round-trips. Conformance compares parsed numeric values,
-// so "100" vs "100.0" is fine -- both decode to the same float.
 func formatFloat(value float64) string {
 	return strconv.FormatFloat(value, 'f', -1, 64)
 }
@@ -389,8 +466,8 @@ func parseHistoryArguments(args []string) (historyArguments, error) {
 	return parsed, nil
 }
 
-// discoverHistoryGroups groups transcripts by (slug, session_id) without the
-// mtime filter -- beacon entries can sit deep inside a long-running transcript.
+// discoverHistoryGroups groups transcripts by (slug, session_id) without
+// the mtime filter -- beacon entries can sit deep in a long transcript.
 func discoverHistoryGroups(root string) map[groupKey][]string {
 	groups := make(map[groupKey][]string)
 
@@ -444,12 +521,15 @@ func discoverHistoryGroups(root string) map[groupKey][]string {
 	return groups
 }
 
+// historyPair carries the four elapsed values per begin/end pair.
 type historyPair struct {
 	beginEta      float64
 	actualElapsed float64
+	idleExcluded  float64
+	activeElapsed float64
 }
 
-// biasFactor returns the median of (actual/eta) ratios. Pairs with eta<=0
+// biasFactor returns the median of (active/eta) ratios. Pairs with eta<=0
 // are excluded. Returns (0, false) when no usable pairs exist.
 func biasFactor(pairs []historyPair) (float64, bool) {
 	if len(pairs) == 0 {
@@ -458,7 +538,7 @@ func biasFactor(pairs []historyPair) (float64, bool) {
 	ratios := make([]float64, 0, len(pairs))
 	for _, p := range pairs {
 		if p.beginEta > 0 {
-			ratios = append(ratios, p.actualElapsed/p.beginEta)
+			ratios = append(ratios, p.activeElapsed/p.beginEta)
 		}
 	}
 	if len(ratios) == 0 {
@@ -472,8 +552,6 @@ func biasFactor(pairs []historyPair) (float64, bool) {
 	return (ratios[n/2-1] + ratios[n/2]) / 2.0, true
 }
 
-// runBeaconsHistory walks the fleet, pairs begin/end beacons within the window,
-// and emits the median bias factor.
 func runBeaconsHistory(args []string) {
 	started := time.Now()
 	parsed, err := parseHistoryArguments(args)
@@ -486,8 +564,6 @@ func runBeaconsHistory(args []string) {
 		nowUnix = float64(time.Now().UnixNano()) / 1e9
 	}
 	periodCutoff := nowUnix - float64(parsed.periodSeconds)
-	// Beacons must fall within both the trailing period AND the explicit
-	// win-start; pairs are emitted only when both endpoints satisfy that.
 	windowLo := periodCutoff
 	if parsed.winStartUnix > windowLo {
 		windowLo = parsed.winStartUnix
@@ -502,19 +578,23 @@ func runBeaconsHistory(args []string) {
 
 	var pairs []historyPair
 	for _, paths := range groups {
-		var all []beaconWithTimestamp
+		var beaconsAll []beaconWithTimestamp
+		var eventsAll []event
 		for _, path := range paths {
-			all = append(all, findAllInPath(path)...)
+			se := collectSessionEventsInPath(path)
+			beaconsAll = append(beaconsAll, se.beacons...)
+			eventsAll = append(eventsAll, se.events...)
 		}
-		// Keep only beacons within the window.
+		sort.Slice(eventsAll, func(i, j int) bool {
+			return eventsAll[i].timestamp < eventsAll[j].timestamp
+		})
 		var inside []beaconWithTimestamp
-		for _, b := range all {
+		for _, b := range beaconsAll {
 			if b.timestamp >= windowLo {
 				inside = append(inside, b)
 			}
 		}
 
-		// Earliest "begin" and latest "end" inside the window.
 		var begin, end *beaconWithTimestamp
 		for index := range inside {
 			b := &inside[index]
@@ -530,9 +610,17 @@ func runBeaconsHistory(args []string) {
 			}
 		}
 		if begin != nil && end != nil && end.timestamp > begin.timestamp {
+			wall := end.timestamp - begin.timestamp
+			idle := computeIdleInWindow(eventsAll, begin.timestamp, end.timestamp)
+			active := wall - idle
+			if active < 0 {
+				active = 0
+			}
 			pairs = append(pairs, historyPair{
 				beginEta:      begin.beacon.EtaSeconds,
-				actualElapsed: end.timestamp - begin.timestamp,
+				actualElapsed: wall,
+				idleExcluded:  idle,
+				activeElapsed: active,
 			})
 		}
 	}
@@ -547,9 +635,11 @@ func runBeaconsHistory(args []string) {
 			pairsBuilder.WriteString(",")
 		}
 		fmt.Fprintf(&pairsBuilder,
-			"{\"begin_eta\":%s,\"actual_elapsed\":%s}",
+			"{\"begin_eta\":%s,\"actual_elapsed\":%s,\"idle_excluded\":%s,\"active_elapsed\":%s}",
 			formatFloat(p.beginEta),
 			formatFloat(p.actualElapsed),
+			formatFloat(p.idleExcluded),
+			formatFloat(p.activeElapsed),
 		)
 	}
 	pairsBuilder.WriteString("]")
