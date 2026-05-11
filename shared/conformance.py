@@ -66,7 +66,7 @@ def find_binary(lang: str) -> Path | None:
     return None
 
 
-def run_walker(binary: Path, meta: dict, projects_root: Path) -> dict:
+def run_walker(binary: Path, meta: dict, projects_root: Path, extras: list[Path] | None = None) -> dict:
     """Run the walker binary against `projects_root`, return parsed JSON output."""
     cmd = [
         str(binary),
@@ -74,7 +74,10 @@ def run_walker(binary: Path, meta: dict, projects_root: Path) -> dict:
         "--win-start", repr(meta["win_start_unix"]),
         "--now", repr(meta["now_unix"]),
         "--projects-root", str(projects_root),
+        "--no-config",
     ]
+    for extra in extras or []:
+        cmd.extend(["--extra-projects-root", str(extra)])
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
     if result.returncode != 0:
         raise RuntimeError(
