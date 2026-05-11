@@ -1,11 +1,14 @@
 """Time each available implementation against the live ~/.claude/projects fleet.
 
 Usage:
-    python shared/bench.py [--runs 5] [<lang> ...]
+    python shared/bench.py [--runs 5] [--mode cost|beacons-history] [<lang> ...]
 
 With no language args, runs every implementation it can find a binary for.
-Also benchmarks the Python parallel walker in schoen-claude-status (if found
-on PYTHONPATH or at the conventional path) for reference.
+In `cost` mode (the default) also benchmarks the Python parallel walker in
+schoen-claude-status (if found on PYTHONPATH or at the conventional path)
+for reference. `beacons-history` mode skips the Python reference because no
+pure-Python implementation exists — schoen-claude-status's statusline
+shells out to walker for that subcommand.
 
 Reports min / median / max wall-clock per implementation and a one-line
 summary table.
@@ -43,6 +46,13 @@ CANDIDATES = {
 
 PERIOD = 7 * 86400  # weekly window
 
+# Mirrors shared/conformance.py: --no-config is cpp-only today, so other
+# impls would error on it. Bench passes it for parity (every impl walks
+# the same primary root, no walker-roots.json extras).
+IMPLS_WITH_NO_CONFIG = {"cpp"}
+
+MODES = ("cost", "beacons-history")
+
 
 def find_binary(lang: str):
     for path in CANDIDATES.get(lang, []):
@@ -51,18 +61,36 @@ def find_binary(lang: str):
     return None
 
 
-def time_binary(binary: Path, period: int, win_start: float, now: float, runs: int):
-    cmd = [
-        str(binary),
-        "--period", str(period),
-        "--win-start", repr(win_start),
-        "--now", repr(now),
-    ]
+def build_cmd(lang: str, binary: Path, mode: str, period: int, win_start: float, now: float):
+    if mode == "cost":
+        cmd = [
+            str(binary),
+            "--period", str(period),
+            "--win-start", repr(win_start),
+            "--now", repr(now),
+        ]
+    elif mode == "beacons-history":
+        cmd = [
+            str(binary),
+            "beacons-history",
+            "--period", str(period),
+            "--win-start", repr(win_start),
+            "--now", repr(now),
+        ]
+    else:
+        raise ValueError(f"unknown mode: {mode}")
+    if lang in IMPLS_WITH_NO_CONFIG:
+        cmd.append("--no-config")
+    return cmd
+
+
+def time_binary(lang: str, binary: Path, mode: str, period: int, win_start: float, now: float, runs: int):
+    cmd = build_cmd(lang, binary, mode, period, win_start, now)
     elapsed = []
     last_output = None
     for _ in range(runs):
         t0 = time.perf_counter()
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         wall = time.perf_counter() - t0
         if result.returncode != 0:
             return None, None, result.stderr
@@ -89,20 +117,27 @@ def time_python_walker(period: int, win_start: float, now: float, runs: int):
     return elapsed, {"trailing_usd": trailing, "window_usd": window}, None
 
 
-def fmt_stats(label: str, elapsed: list, output: dict | None):
+def fmt_stats(label: str, elapsed: list, output: dict | None, mode: str):
     e = sorted(elapsed)
     median = e[len(e) // 2]
     line = (f"  {label:18s}  min={e[0]:>5.0f}ms  median={median:>5.0f}ms  "
             f"max={e[-1]:>5.0f}ms")
     if output:
-        line += (f"  trailing=${output.get('trailing_usd', 0):.2f}  "
-                 f"window=${output.get('window_usd', 0):.2f}")
+        if mode == "cost":
+            line += (f"  trailing=${output.get('trailing_usd', 0):.2f}  "
+                     f"window=${output.get('window_usd', 0):.2f}")
+        elif mode == "beacons-history":
+            bias = output.get("bias_factor")
+            bias_str = f"{bias:.4f}" if bias is not None else "n/a"
+            line += f"  n_pairs={output.get('n_pairs', 0)}  bias={bias_str}"
     return line, median
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs", type=int, default=5)
+    parser.add_argument("--mode", choices=MODES, default="cost",
+                        help="Which subcommand to bench (default: cost)")
     parser.add_argument("langs", nargs="*", default=None)
     parser.add_argument("--no-python", action="store_true",
                         help="Skip the Python reference bench")
@@ -112,20 +147,23 @@ def main():
     win_start = now - PERIOD + 3600  # 1h into a fresh weekly window
 
     requested = args.langs or list(CANDIDATES.keys())
-    print(f"Live fleet bench  --  {args.runs} runs each  --  weekly window\n")
+    print(f"Live fleet bench  --  mode={args.mode}  --  {args.runs} runs each  --  weekly window\n")
 
     medians: dict[str, float] = {}
 
-    if not args.no_python:
+    if args.mode == "cost" and not args.no_python:
         print("Python reference (orjson + 8-worker ProcessPool):")
         elapsed, output, err = time_python_walker(PERIOD, win_start, now, args.runs)
         if err:
             print(f"  python              SKIP  {err}")
         else:
-            line, m = fmt_stats("python (parallel)", elapsed, output)
+            line, m = fmt_stats("python (parallel)", elapsed, output, args.mode)
             print(line)
             medians["python"] = m
         print()
+    elif args.mode == "beacons-history" and not args.no_python:
+        print("No pure-Python beacons-history implementation; "
+              "schoen-claude-status shells out to walker. Skipping Python row.\n")
 
     print("Native implementations:")
     for lang in requested:
@@ -133,11 +171,11 @@ def main():
         if binary is None:
             print(f"  {lang:18s}  SKIP  no binary")
             continue
-        elapsed, output, err = time_binary(binary, PERIOD, win_start, now, args.runs)
+        elapsed, output, err = time_binary(lang, binary, args.mode, PERIOD, win_start, now, args.runs)
         if err:
             print(f"  {lang:18s}  FAIL  {err}")
             continue
-        line, m = fmt_stats(lang, elapsed, output)
+        line, m = fmt_stats(lang, elapsed, output, args.mode)
         print(line)
         medians[lang] = m
 
