@@ -13,7 +13,11 @@
 //     entry's text.
 //   - beacons-history: group by (slug, session_id), find earliest "begin"
 //     and latest "end" within window. Emit pair when end_ts > begin_ts.
-//     bias_factor = median over (actual/eta) ratios with eta > 0.
+//     bias_factor = median over (active_elapsed/eta) ratios with eta > 0,
+//     where active_elapsed = actual_elapsed - idle_excluded. idle_excluded
+//     is the sum of gaps preceding REAL user prompts (type=="user" entries
+//     whose message.content is NOT an array containing a tool_result block)
+//     inside the window. Bare-string content counts as a real user prompt.
 
 #include "beacons.hpp"
 #include "common.hpp"
@@ -29,6 +33,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -117,17 +122,9 @@ std::optional<Beacon> parse_beacon_body(std::string_view body) {
     return b;
 }
 
-// Concatenate text content blocks from message.content[]. Filters to entries
-// where type=="text". Joined with "\n" to mirror the Rust impl.
-struct EntryView {
-    std::string combined_text;
-    std::string timestamp;
-    bool is_assistant = false;
-};
-
 // Walk one transcript file and call `cb` for each parseable assistant entry
 // with its (combined_text, timestamp_string). Skips silently on JSON or
-// other errors.
+// other errors. Used by beacons-latest (no need for user events).
 template <typename Callback>
 void walk_assistant_entries(const fs::path& path, Callback&& cb) {
     sj::padded_string data;
@@ -229,6 +226,180 @@ void walk_assistant_entries(const fs::path& path, Callback&& cb) {
 
         if (!is_assistant || !has_ts || !has_content) continue;
         cb(combined_text, ts_str);
+    }
+}
+
+// === beacons-history walker ===
+//
+// History mode also needs USER events (for idle-gap detection), not just
+// assistant beacons. This walker classifies every entry by its top-level
+// `type` field and, for user entries, inspects message.content shape to
+// distinguish real user prompts from tool_result entries (which are
+// agent-active time, not idle).
+
+struct EventRow {
+    double timestamp = 0.0;
+    bool is_real_user = false;  // only true for genuine user prompts
+};
+
+// Walk a transcript file for beacons-history. Emits:
+//   - assistant_cb(combined_text, ts_str): called once per assistant entry
+//     that has both a timestamp and content; combined_text is the joined
+//     text-block payload (used to extract beacons).
+//   - event_cb(EventRow): called once per entry with a parseable timestamp,
+//     regardless of role. is_real_user = (top-level type == "user" AND
+//     content is NOT an array containing a tool_result block).
+//
+// GOTCHA: message.content can be EITHER a JSON array of blocks OR a bare
+// string (older user-prompt format). simdjson on-demand consumes a value
+// once, so we peek .type() first then dispatch. Bare-string content counts
+// as a real user prompt (no tool_result possible there).
+template <typename AssistantCb, typename EventCb>
+void walk_entries_for_history(const fs::path& path, AssistantCb&& assistant_cb, EventCb&& event_cb) {
+    sj::padded_string data;
+    if (sj::padded_string::load(path.string()).get(data) != sj::SUCCESS) return;
+    sj::ondemand::parser parser;
+
+    std::string_view buffer(data);
+    size_t pos = 0;
+    while (pos < buffer.size()) {
+        size_t newline = buffer.find('\n', pos);
+        size_t end = (newline == std::string_view::npos) ? buffer.size() : newline;
+        size_t line_end = end;
+        if (line_end > pos && buffer[line_end - 1] == '\r') --line_end;
+        std::string_view line = buffer.substr(pos, line_end - pos);
+        pos = (newline == std::string_view::npos) ? buffer.size() : newline + 1;
+
+        bool blank = true;
+        for (char c : line) {
+            if (!std::isspace(static_cast<unsigned char>(c))) { blank = false; break; }
+        }
+        if (blank) continue;
+
+        sj::padded_string padded(line);
+        sj::ondemand::document doc;
+        if (parser.iterate(padded).get(doc) != sj::SUCCESS) continue;
+        sj::ondemand::object root;
+        if (doc.get_object().get(root) != sj::SUCCESS) continue;
+
+        std::string ts_str;
+        bool has_ts = false;
+        std::string entry_type;       // top-level "type" field
+        bool is_assistant_role = false;
+        bool has_content = false;
+        bool content_was_array = false;
+        bool content_was_tool_result = false;
+        std::string combined_text;
+
+        for (auto root_field : root) {
+            std::string_view key;
+            if (root_field.unescaped_key().get(key) != sj::SUCCESS) continue;
+
+            if (key == "type") {
+                std::string_view tv;
+                if (root_field.value().get_string().get(tv) == sj::SUCCESS) {
+                    entry_type.assign(tv.data(), tv.size());
+                }
+            } else if (key == "timestamp") {
+                std::string_view v;
+                if (root_field.value().get_string().get(v) == sj::SUCCESS) {
+                    if (!v.empty()) {
+                        ts_str.assign(v.data(), v.size());
+                        has_ts = true;
+                    }
+                }
+            } else if (key == "message") {
+                sj::ondemand::object msg_obj;
+                if (root_field.value().get_object().get(msg_obj) != sj::SUCCESS) continue;
+
+                for (auto msg_field : msg_obj) {
+                    std::string_view msg_key;
+                    if (msg_field.unescaped_key().get(msg_key) != sj::SUCCESS) continue;
+
+                    if (msg_key == "role") {
+                        std::string_view role_view;
+                        if (msg_field.value().get_string().get(role_view) == sj::SUCCESS) {
+                            is_assistant_role = (role_view == "assistant");
+                        }
+                    } else if (msg_key == "content") {
+                        auto val = msg_field.value();
+                        sj::ondemand::json_type ct;
+                        if (val.type().get(ct) != sj::SUCCESS) continue;
+                        has_content = true;
+                        if (ct == sj::ondemand::json_type::array) {
+                            content_was_array = true;
+                            sj::ondemand::array arr;
+                            if (val.get_array().get(arr) != sj::SUCCESS) continue;
+                            bool first_text = true;
+                            for (auto block_val : arr) {
+                                sj::ondemand::object block;
+                                if (block_val.get_object().get(block) != sj::SUCCESS) continue;
+
+                                bool is_text_block = false;
+                                bool is_tool_result_block = false;
+                                std::string text_value;
+                                bool has_text = false;
+                                for (auto block_field : block) {
+                                    std::string_view bk;
+                                    if (block_field.unescaped_key().get(bk) != sj::SUCCESS) continue;
+                                    if (bk == "type") {
+                                        std::string_view tv;
+                                        if (block_field.value().get_string().get(tv) == sj::SUCCESS) {
+                                            if (tv == "text") is_text_block = true;
+                                            else if (tv == "tool_result") is_tool_result_block = true;
+                                        }
+                                    } else if (bk == "text") {
+                                        std::string_view tv;
+                                        if (block_field.value().get_string().get(tv) == sj::SUCCESS) {
+                                            text_value.assign(tv.data(), tv.size());
+                                            has_text = true;
+                                        }
+                                    }
+                                }
+                                if (is_tool_result_block) content_was_tool_result = true;
+                                if (is_text_block && has_text) {
+                                    if (!first_text) combined_text.push_back('\n');
+                                    combined_text.append(text_value);
+                                    first_text = false;
+                                }
+                            }
+                        } else if (ct == sj::ondemand::json_type::string) {
+                            // Bare-string content: real user prompt, no
+                            // text blocks (assistant entries never use this
+                            // shape). Consume so on-demand cursor advances.
+                            content_was_array = false;
+                            std::string_view sv;
+                            (void)val.get_string().get(sv);
+                        } else {
+                            content_was_array = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!has_ts) continue;
+        auto ts_opt = walker::parse_iso8601(ts_str);
+        if (!ts_opt) continue;
+
+        // Mirror rust collect_session_events_in_path: emit event ONLY for
+        // user-type entries OR assistant-role entries with content. Other
+        // entries (system, summary, etc.) are skipped so they don't
+        // pollute idle-gap detection. Without this filter, filler entries
+        // between an assistant turn and a real user prompt shrink the
+        // prev_ts -> user_ts gap and under-count idle.
+        if (entry_type == "user") {
+            EventRow row;
+            row.timestamp = *ts_opt;
+            row.is_real_user = !(content_was_array && content_was_tool_result);
+            event_cb(row);
+        } else if (is_assistant_role && has_content) {
+            EventRow row;
+            row.timestamp = *ts_opt;
+            row.is_real_user = false;
+            event_cb(row);
+            assistant_cb(combined_text, ts_str);
+        }
     }
 }
 
@@ -459,8 +630,6 @@ int run_latest(const std::vector<std::string>& args) {
         primary, parsed.extra_projects_roots, parsed.read_config);
     double now_unix = parsed.now_unix.value_or(walker::current_unix());
 
-    // Discover candidate paths: parent <root>/<slug>/<sid>.jsonl and
-    // subagent <root>/<slug>/<sid_parent>/subagents/agent-<sid>.jsonl.
     std::vector<fs::path> paths;
     std::string parent_filename = parsed.session_id + ".jsonl";
     std::string subagent_filename = "agent-" + parsed.session_id + ".jsonl";
@@ -471,11 +640,9 @@ int run_latest(const std::vector<std::string>& args) {
 
         for (auto& slug_entry : fs::directory_iterator(root, ec)) {
             if (!slug_entry.is_directory()) continue;
-            // Parent transcript
             fs::path candidate = slug_entry.path() / parent_filename;
             if (fs::is_regular_file(candidate, ec)) paths.push_back(candidate);
 
-            // Subagent transcripts under each session dir
             for (auto& session_entry : fs::directory_iterator(slug_entry.path(), ec)) {
                 if (!session_entry.is_directory()) continue;
                 fs::path subdir = session_entry.path() / "subagents";
@@ -538,7 +705,6 @@ HistoryGroups discover_history_groups(const std::vector<fs::path>& roots) {
             if (!slug_entry.is_directory()) continue;
             std::string slug = slug_entry.path().filename().string();
 
-            // Parents: <root>/<slug>/<sid>.jsonl
             for (auto& file_entry : fs::directory_iterator(slug_entry.path(), ec)) {
                 if (!file_entry.is_regular_file()) continue;
                 const auto& path = file_entry.path();
@@ -547,7 +713,6 @@ HistoryGroups discover_history_groups(const std::vector<fs::path>& roots) {
                 groups[{slug, sid}].push_back(path);
             }
 
-            // Subagents: <root>/<slug>/<sid>/subagents/agent-*.jsonl
             for (auto& session_entry : fs::directory_iterator(slug_entry.path(), ec)) {
                 if (!session_entry.is_directory()) continue;
                 std::string sid = session_entry.path().filename().string();
@@ -568,12 +733,26 @@ HistoryGroups discover_history_groups(const std::vector<fs::path>& roots) {
     return groups;
 }
 
+double compute_idle_in_window(const std::vector<EventRow>& events, double lo, double hi) {
+    if (events.size() < 2) return 0.0;
+    double idle = 0.0;
+    for (size_t i = 1; i < events.size(); ++i) {
+        if (!events[i].is_real_user) continue;
+        double prev_ts = events[i - 1].timestamp;
+        double ts = events[i].timestamp;
+        double gap_lo = std::max(prev_ts, lo);
+        double gap_hi = std::min(ts, hi);
+        if (gap_hi > gap_lo) idle += gap_hi - gap_lo;
+    }
+    return idle;
+}
+
 std::optional<double> compute_bias_factor(const std::vector<std::pair<double, double>>& pairs) {
     if (pairs.empty()) return std::nullopt;
     std::vector<double> ratios;
     ratios.reserve(pairs.size());
-    for (const auto& [eta, actual] : pairs) {
-        if (eta > 0.0) ratios.push_back(actual / eta);
+    for (const auto& [eta, active] : pairs) {
+        if (eta > 0.0) ratios.push_back(active / eta);
     }
     if (ratios.empty()) return std::nullopt;
     std::sort(ratios.begin(), ratios.end());
@@ -602,39 +781,53 @@ int run_history(const std::vector<std::string>& args) {
     HistoryGroups groups = discover_history_groups(roots);
     size_t session_count = groups.size();
 
-    std::vector<std::pair<double, double>> pairs;  // (begin_eta, actual_elapsed)
+    std::vector<std::pair<double, double>> pairs;
+    std::vector<std::tuple<double, double, double>> pair_meta;
 
     for (const auto& [key, paths] : groups) {
-        // Collect all (Beacon, ts) within this group, filtered to the window.
-        std::vector<std::pair<Beacon, double>> all;
+        std::vector<std::pair<Beacon, double>> all_beacons;
+        std::vector<EventRow> events;
         for (const auto& path : paths) {
-            walk_assistant_entries(path, [&](const std::string& text, const std::string& ts_str) {
-                auto ts_opt = walker::parse_iso8601(ts_str);
-                if (!ts_opt) return;
-                double ts = *ts_opt;
-                if (ts < window_lo) return;
-                for (auto& b : all_beacons_in(text)) {
-                    all.emplace_back(std::move(b), ts);
+            walk_entries_for_history(
+                path,
+                [&](const std::string& text, const std::string& ts_str) {
+                    auto ts_opt = walker::parse_iso8601(ts_str);
+                    if (!ts_opt) return;
+                    double ts = *ts_opt;
+                    if (ts < window_lo) return;
+                    for (auto& b : all_beacons_in(text)) {
+                        all_beacons.emplace_back(std::move(b), ts);
+                    }
+                },
+                [&](const EventRow& row) {
+                    events.push_back(row);
                 }
-            });
+            );
         }
+        std::sort(events.begin(), events.end(),
+                  [](const EventRow& a, const EventRow& b) {
+                      return a.timestamp < b.timestamp;
+                  });
 
-        // Earliest "begin"
         const std::pair<Beacon, double>* begin_ptr = nullptr;
-        for (const auto& bt : all) {
+        for (const auto& bt : all_beacons) {
             if (bt.first.kind != "begin") continue;
             if (!begin_ptr || bt.second < begin_ptr->second) begin_ptr = &bt;
         }
-        // Latest "end"
         const std::pair<Beacon, double>* end_ptr = nullptr;
-        for (const auto& bt : all) {
+        for (const auto& bt : all_beacons) {
             if (bt.first.kind != "end") continue;
             if (!end_ptr || bt.second > end_ptr->second) end_ptr = &bt;
         }
         if (!begin_ptr || !end_ptr) continue;
         if (end_ptr->second <= begin_ptr->second) continue;
-        double actual = end_ptr->second - begin_ptr->second;
-        pairs.emplace_back(begin_ptr->first.eta_seconds, actual);
+
+        double wall = end_ptr->second - begin_ptr->second;
+        double idle = compute_idle_in_window(events, begin_ptr->second, end_ptr->second);
+        double active = wall - idle;
+        if (active < 0.0) active = 0.0;
+        pairs.emplace_back(begin_ptr->first.eta_seconds, active);
+        pair_meta.emplace_back(wall, idle, active);
     }
 
     auto bias = compute_bias_factor(pairs);
@@ -645,8 +838,12 @@ int run_history(const std::vector<std::string>& args) {
     os << "{\"pairs\":[";
     for (size_t i = 0; i < pairs.size(); ++i) {
         if (i > 0) os << ",";
+        const auto& [wall, idle, active] = pair_meta[i];
         os << "{\"begin_eta\":" << format_number(pairs[i].first)
-           << ",\"actual_elapsed\":" << format_number(pairs[i].second) << "}";
+           << ",\"actual_elapsed\":" << format_number(wall)
+           << ",\"idle_excluded\":" << format_number(idle)
+           << ",\"active_elapsed\":" << format_number(active)
+           << "}";
     }
     os << "],\"session_count\":" << session_count
        << ",\"n_pairs\":" << pairs.size()
