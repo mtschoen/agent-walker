@@ -217,17 +217,27 @@ varies per wall clock); production callers omit it.
 
 Walks the full fleet under the time window. For each session group
 (same grouping as `cost` mode) that contains both a `kind: "begin"`
-AND a `kind: "end"` beacon within the window, emits a
-`(begin_eta, actual_elapsed)` pair where
-`actual_elapsed = end_timestamp - begin_timestamp`.
+AND a `kind: "end"` beacon within the window, emits a pair with three
+elapsed fields:
 
-Computes `bias_factor = median(actual_elapsed / begin_eta)` across all
-pairs. Even-count median is the mean of the two middle values.
+- `actual_elapsed = end_timestamp - begin_timestamp` (wall-clock)
+- `idle_excluded` = sum of gaps inside `[begin_ts, end_ts]` that
+  immediately precede a real user prompt (`type: "user"` entries with
+  non-`tool_result` content). Tool-result entries don't count as idle
+  because they're agent-active time waiting on tool execution.
+- `active_elapsed = max(0, actual_elapsed - idle_excluded)`
+
+Computes `bias_factor = median(active_elapsed / begin_eta)` across all
+pairs. Even-count median is the mean of the two middle values. The
+calculation excludes user-idle time because including it makes the
+bias unrepresentative of the agent's actual estimation accuracy — a
+session where the user walked away for an hour shouldn't punish the
+agent's ETA the same as one where the agent genuinely worked an hour.
 
 Output:
 
 ```json
-{"pairs": [{"begin_eta": <num>, "actual_elapsed": <num>}, ...], "session_count": <num>, "n_pairs": <num>, "bias_factor": <f64> | null, "elapsed_ms": <u64>}
+{"pairs": [{"begin_eta": <num>, "actual_elapsed": <num>, "idle_excluded": <num>, "active_elapsed": <num>}, ...], "session_count": <num>, "n_pairs": <num>, "bias_factor": <f64> | null, "elapsed_ms": <u64>}
 ```
 
 If `n_pairs == 0`, `bias_factor` is `null`.

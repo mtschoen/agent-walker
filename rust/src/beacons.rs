@@ -14,6 +14,8 @@ use crate::{current_unix, default_projects_root, parse_iso8601};
 
 #[derive(Deserialize)]
 struct Entry {
+    #[serde(rename = "type")]
+    entry_type: Option<String>,
     timestamp: Option<String>,
     message: Option<Message>,
 }
@@ -21,14 +23,10 @@ struct Entry {
 #[derive(Deserialize)]
 struct Message {
     role: Option<String>,
-    content: Option<Vec<ContentBlock>>,
-}
-
-#[derive(Deserialize)]
-struct ContentBlock {
-    #[serde(rename = "type")]
-    block_type: Option<String>,
-    text: Option<String>,
+    /// Untyped because real-world transcripts use either a Vec of content
+    /// blocks OR a bare string for the user role. A strictly-typed Vec<...>
+    /// silently skips the bare-string variants and miscounts user events.
+    content: Option<Value>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
@@ -48,13 +46,34 @@ fn beacon_re() -> Regex {
         .expect("static regex compiles")
 }
 
-fn extract_text(content: &[ContentBlock]) -> String {
-    content
-        .iter()
-        .filter(|b| b.block_type.as_deref() == Some("text"))
-        .filter_map(|b| b.text.as_deref())
-        .collect::<Vec<_>>()
-        .join("\n")
+fn extract_text(content: &Value) -> String {
+    let arr = match content.as_array() {
+        Some(a) => a,
+        None => return String::new(),
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    for block in arr {
+        if block.get("type").and_then(|v| v.as_str()) == Some("text") {
+            if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                parts.push(t);
+            }
+        }
+    }
+    parts.join("\n")
+}
+
+/// True when a `type: "user"` message's content contains tool_result blocks
+/// (tool output coming back from the agent's own tool calls), NOT a real
+/// user prompt. Tool-result entries are agent-active time waiting on tools,
+/// not user-idle time.
+fn user_content_is_tool_result(content: Option<&Value>) -> bool {
+    let arr = match content.and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return false,
+    };
+    arr.iter().any(|block| {
+        block.get("type").and_then(|v| v.as_str()) == Some("tool_result")
+    })
 }
 
 /// Walk one transcript file. For each assistant entry, parse the latest
@@ -114,14 +133,23 @@ fn find_latest_in_path(path: &Path, re: &Regex) -> Option<(Beacon, f64)> {
     latest
 }
 
-/// Walk one transcript file and collect ALL well-formed beacons together
-/// with the entry timestamp at which each was emitted. Used by history
-/// mode (we need begin and end events, not just the latest one).
-fn find_all_in_path(path: &Path, re: &Regex) -> Vec<(Beacon, f64)> {
-    let mut out = Vec::new();
+struct SessionEvents {
+    beacons: Vec<(Beacon, f64)>,
+    /// Sorted ascending by timestamp. `bool` is true for user-type entries,
+    /// false for assistant-type entries. Used to detect agent-waiting-on-user
+    /// idle gaps for bias-factor correction.
+    events: Vec<(f64, bool)>,
+}
+
+/// Walk one transcript file and collect both beacons (with entry timestamps)
+/// and the timestamp + user/assistant flag for every entry. The event list
+/// powers idle-gap detection in beacons-history.
+fn collect_session_events_in_path(path: &Path, re: &Regex) -> SessionEvents {
+    let mut beacons: Vec<(Beacon, f64)> = Vec::new();
+    let mut events: Vec<(f64, bool)> = Vec::new();
     let file = match File::open(path) {
         Ok(f) => f,
-        Err(_) => return out,
+        Err(_) => return SessionEvents { beacons, events },
     };
     for line in BufReader::new(file).lines() {
         let line = match line {
@@ -135,6 +163,24 @@ fn find_all_in_path(path: &Path, re: &Regex) -> Vec<(Beacon, f64)> {
             Ok(e) => e,
             Err(_) => continue,
         };
+        let ts_str = match &entry.timestamp {
+            Some(s) if !s.is_empty() => s.clone(),
+            _ => continue,
+        };
+        let ts = match parse_iso8601(&ts_str) {
+            Some(t) => t,
+            None => continue,
+        };
+        let is_user_entry = entry.entry_type.as_deref() == Some("user");
+        if is_user_entry {
+            // Distinguish real user prompts (text or bare string) from
+            // tool_result entries (which the JSONL also tags as `type: user`).
+            // Tool results are agent-active time; only real prompts mark idle.
+            let content_ref = entry.message.as_ref().and_then(|m| m.content.as_ref());
+            let is_real_user = !user_content_is_tool_result(content_ref);
+            events.push((ts, is_real_user));
+            continue;
+        }
         let msg = match entry.message {
             Some(m) => m,
             None => continue,
@@ -146,24 +192,42 @@ fn find_all_in_path(path: &Path, re: &Regex) -> Vec<(Beacon, f64)> {
             Some(c) => c,
             None => continue,
         };
-        let ts_str = match entry.timestamp {
-            Some(s) if !s.is_empty() => s,
-            _ => continue,
-        };
-        let ts = match parse_iso8601(&ts_str) {
-            Some(t) => t,
-            None => continue,
-        };
+        events.push((ts, false));
         let combined = extract_text(&content);
         for caps in re.captures_iter(&combined) {
             if let Some(m) = caps.get(1) {
                 if let Ok(b) = serde_json::from_str::<Beacon>(m.as_str()) {
-                    out.push((b, ts));
+                    beacons.push((b, ts));
                 }
             }
         }
     }
-    out
+    events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    SessionEvents { beacons, events }
+}
+
+/// Sum the portion of [lo, hi] occupied by gaps that precede a user entry.
+/// A gap "precedes a user entry" when events[i] is user-type and the gap is
+/// computed from events[i-1].timestamp to events[i].timestamp. Gaps are
+/// clipped to [lo, hi] so events outside the begin/end window don't leak in.
+fn compute_idle_in_window(events: &[(f64, bool)], lo: f64, hi: f64) -> f64 {
+    if events.len() < 2 {
+        return 0.0;
+    }
+    let mut idle = 0.0;
+    for i in 1..events.len() {
+        let (prev_ts, _) = events[i - 1];
+        let (ts, is_user) = events[i];
+        if !is_user {
+            continue;
+        }
+        let gap_lo = prev_ts.max(lo);
+        let gap_hi = ts.min(hi);
+        if gap_hi > gap_lo {
+            idle += gap_hi - gap_lo;
+        }
+    }
+    idle
 }
 
 // === beacons-latest ===
@@ -393,28 +457,38 @@ pub fn run_history(args: &[String]) {
     let session_count = groups.len();
     let re = beacon_re();
 
+    // Pairs feed bias_factor as (begin_eta, active_elapsed). pair_meta carries
+    // the (wall, idle, active) breakdown for the JSON output, parallel-indexed.
     let mut pairs: Vec<(f64, f64)> = Vec::new();
+    let mut pair_meta: Vec<(f64, f64, f64)> = Vec::new();
     for paths in groups.values() {
-        let mut all: Vec<(Beacon, f64)> = Vec::new();
+        let mut beacons_all: Vec<(Beacon, f64)> = Vec::new();
+        let mut events_all: Vec<(f64, bool)> = Vec::new();
         for path in paths {
-            all.extend(find_all_in_path(path, &re));
+            let se = collect_session_events_in_path(path, &re);
+            beacons_all.extend(se.beacons);
+            events_all.extend(se.events);
         }
+        events_all.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         // Filter to beacons inside the window.
-        all.retain(|(_, ts)| *ts >= window_lo);
+        beacons_all.retain(|(_, ts)| *ts >= window_lo);
 
         // Earliest "begin" and latest "end" in the window.
-        let begin = all
+        let begin = beacons_all
             .iter()
             .filter(|(b, _)| b.kind == "begin")
             .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
-        let end = all
+        let end = beacons_all
             .iter()
             .filter(|(b, _)| b.kind == "end")
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
         if let (Some((begin_b, begin_ts)), Some((_end_b, end_ts))) = (begin, end) {
             if *end_ts > *begin_ts {
-                let actual = *end_ts - *begin_ts;
-                pairs.push((begin_b.eta_seconds, actual));
+                let wall = *end_ts - *begin_ts;
+                let idle = compute_idle_in_window(&events_all, *begin_ts, *end_ts);
+                let active = (wall - idle).max(0.0);
+                pairs.push((begin_b.eta_seconds, active));
+                pair_meta.push((wall, idle, active));
             }
         }
     }
@@ -423,10 +497,13 @@ pub fn run_history(args: &[String]) {
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let pair_objs: Vec<Value> = pairs
         .iter()
-        .map(|(eta, actual)| {
+        .zip(pair_meta.iter())
+        .map(|((eta, _active), (wall, idle, active))| {
             json!({
                 "begin_eta": eta,
-                "actual_elapsed": actual,
+                "actual_elapsed": wall,
+                "idle_excluded": idle,
+                "active_elapsed": active,
             })
         })
         .collect();
