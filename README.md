@@ -10,9 +10,45 @@ Walks `~/.claude/projects/**/*.jsonl` (parent transcripts + their
 assistant turns by `message.id`, and prices each turn against the canonical
 Anthropic per-MTok rate table. Emits two dollar totals on stdout.
 
+The walker reads a configurable set of project roots (default
+`~/.claude/projects` plus any extras listed in `~/.claude/walker-roots.json`),
+so the same subscription used from multiple machines can be aggregated by
+the host that has filesystem access to all of them. See "Multi-host setup"
+below and the `## Roots` section in [`SPEC.md`](SPEC.md).
+
 Drop-in optional speedup for [schoen-claude-status](https://github.com/mtschoen/schoen-claude-status)
 (the Python statusline does this in ~250ms with an `orjson` +
 `ProcessPoolExecutor` walk; the goal here is **30-80ms**).
+
+## Multi-host setup
+
+The sliding-window pace projection only works correctly if the walker
+sees every transcript billed to the subscription. When the same plan is
+used from two machines, neither machine's `~/.claude/projects` is a
+complete picture on its own.
+
+Make the other machine's transcripts reachable via the filesystem
+(SMB/NFS mount, sync, whatever), then point the walker at the mounted
+path via `~/.claude/walker-roots.json`:
+
+```json
+{
+  "extra_roots": [
+    "/mnt/other-host/Users/mtsch/.claude/projects"
+  ]
+}
+```
+
+The file is per-host and lives outside any synced memory — chonkers'
+config points at llamabox's mount, llamabox's config points at chonkers'.
+
+**Latency caveat.** Walking JSONLs over a remote mount is slower than
+the local case. On a representative Windows-→-Linux SMB mount the
+cost-mode walk goes from ~200ms (local-only) to ~3s (with the SMB extra
+root). The statusline pace cache (15s TTL) absorbs the cost so the user
+sees one slow render per cache window, but if the remote host is asleep
+or the mount times out, the walker still exits 0 with primary-only
+totals — it never blocks the caller indefinitely.
 
 ## Why four languages
 
