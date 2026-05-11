@@ -61,6 +61,19 @@ If you change a fixture, regenerate the expected files via the matching
 6. After all four pass, merge each branch with `--no-ff` and rerun
    `python shared/conformance.py` against the merged tree.
 
+## CI
+
+`.gitea/workflows/ci.yml` builds all four impls on `ubuntu-latest` +
+`windows-latest` (the llamabox Gitea Actions runners) and runs
+`python shared/conformance.py rust cpp go zig` on each. Triggers on
+push to `main`, pull_request to `main`, and `workflow_dispatch`.
+
+**Footgun:** `conformance.py` silently prints SKIP and exits 0 when
+a binary is missing — a misnamed output path would masquerade as a
+green run. The workflow has an explicit "Verify all binaries built"
+step that `test -f` / `Test-Path`s every expected artifact before
+invoking the harness. Keep that step intact if you ever rework CI.
+
 ## Install
 
 `bash install.sh` (Linux/git-bash) or `install.bat` (cmd) builds the
