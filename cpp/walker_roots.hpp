@@ -25,7 +25,6 @@
 
 namespace walker {
 
-namespace fs = std::filesystem;
 namespace sj = simdjson;
 
 inline fs::path walker_config_path() {
