@@ -9,7 +9,7 @@ const main = @import("main.zig");
 const is_windows = main.is_windows;
 const PATH_SEP = main.PATH_SEP;
 
-// ─── Beacon shape ────────────────────────────────────────────────────────────
+// --- Beacon shape ----------------------------------------------------------
 
 const Beacon = struct {
     kind: []const u8,
@@ -88,14 +88,11 @@ fn writeJsonNumber(w: *Buf, v: f64) !void {
     }
 }
 
-// ─── progress-beacon matcher (bespoke, regex-free) ───────────────────────────
+// --- progress-beacon matcher (bespoke, regex-free) -------------------------
 //
 // Pattern: <progress-beacon>\s*({...})\s*</progress-beacon>
-// Returns the byte slice of the inner JSON (matched-brace based, NOT ".*?"
-// because the JSON body itself can contain '}' inside string literals).
-// The Rust impl uses a non-greedy `\{.*?\}` which works for current corpora
-// because the JSON body is a single flat object with no nested '{' or
-// inline-string-escaped '{'. We match that semantics.
+// Matches the FIRST '}' followed (after optional whitespace) by the close
+// tag -- the same semantics as the Rust regex `\{.*?\}` non-greedy match.
 
 const OPEN_TAG = "<progress-beacon>";
 const CLOSE_TAG = "</progress-beacon>";
@@ -113,16 +110,11 @@ const MatchIter = struct {
             const open_rel = std.mem.indexOf(u8, self.text[self.pos..], OPEN_TAG) orelse return null;
             const open_at = self.pos + open_rel;
             var inner_start = open_at + OPEN_TAG.len;
-            // Skip whitespace
             while (inner_start < self.text.len and std.ascii.isWhitespace(self.text[inner_start])) inner_start += 1;
             if (inner_start >= self.text.len or self.text[inner_start] != '{') {
                 self.pos = open_at + OPEN_TAG.len;
                 continue;
             }
-            // Find first '}' that is followed (after optional whitespace) by CLOSE_TAG.
-            // We use '}' not balanced-brace because the Rust regex `\{.*?\}` is
-            // non-greedy on the FIRST closing brace. For current beacon shapes
-            // (flat JSON, no nested objects, no string-escaped '}') this is OK.
             var scan: usize = inner_start + 1;
             var matched_close: ?usize = null;
             while (scan < self.text.len) : (scan += 1) {
@@ -139,7 +131,6 @@ const MatchIter = struct {
             if (matched_close) |c| {
                 return .{ .json = self.text[inner_start .. c + 1] };
             }
-            // No close found; bail.
             return null;
         }
         return null;
@@ -193,16 +184,22 @@ fn parseBeaconJson(alloc: Allocator, json_src: []const u8) ?Beacon {
     };
 }
 
-// ─── transcript scanning ─────────────────────────────────────────────────────
+// --- transcript scanning ---------------------------------------------------
 
 const Found = struct {
     beacon: Beacon,
     ts: f64,
 };
 
-/// Walk one transcript file. For each assistant entry, parse the LAST
-/// well-formed beacon embedded in its text content. Track the entry with
-/// the highest timestamp.
+/// `is_real_user` is true iff this entry is `type: "user"` AND its
+/// `message.content` is NOT a tool_result array (bare-string content counts
+/// as a real user prompt). Used to detect agent-waiting-on-user idle gaps
+/// for bias-factor correction in beacons-history.
+const Event = struct {
+    ts: f64,
+    is_real_user: bool,
+};
+
 fn findLatestInPath(alloc: Allocator, path: []const u8) ?Found {
     const data = main.readEntireFile(alloc, path) catch return null;
     defer alloc.free(data);
@@ -210,7 +207,7 @@ fn findLatestInPath(alloc: Allocator, path: []const u8) ?Found {
     var latest: ?Found = null;
     var iter = std.mem.splitScalar(u8, data, '\n');
     while (iter.next()) |raw| {
-        if (parseEntryBeacon(alloc, raw, .last)) |found| {
+        if (parseEntryBeacon(alloc, raw)) |found| {
             if (latest == null or found.ts >= latest.?.ts) {
                 latest = found;
             }
@@ -219,67 +216,30 @@ fn findLatestInPath(alloc: Allocator, path: []const u8) ?Found {
     return latest;
 }
 
-/// Walk one transcript file and append ALL well-formed beacons paired
-/// with their entry timestamp.
-fn findAllInPath(alloc: Allocator, path: []const u8, out: *std.ArrayList(Found)) void {
+/// Walk one transcript file and append:
+///   - ALL well-formed beacons paired with their assistant-entry timestamp
+///   - one Event per entry (assistant OR user) with `is_real_user` flag
+/// Events are appended in encounter order -- caller must sort by ts before
+/// feeding to `computeIdleInWindow`.
+fn collectSessionEventsInPath(
+    alloc: Allocator,
+    path: []const u8,
+    beacons_out: *std.ArrayList(Found),
+    events_out: *std.ArrayList(Event),
+) void {
     const data = main.readEntireFile(alloc, path) catch return;
     defer alloc.free(data);
 
     var iter = std.mem.splitScalar(u8, data, '\n');
     while (iter.next()) |raw| {
-        appendEntryBeacons(alloc, raw, out);
+        scanEntry(alloc, raw, beacons_out, events_out);
     }
 }
 
-const PickMode = enum { last, all };
-
-/// Parse one JSONL line, extract assistant message timestamp + concatenated
-/// text-block content, and return the LAST well-formed beacon (or null).
-fn parseEntryBeacon(alloc: Allocator, raw: []const u8, mode: PickMode) ?Found {
-    _ = mode;
+fn parseEntryBeacon(alloc: Allocator, raw: []const u8) ?Found {
     const line = std.mem.trim(u8, raw, " \t\r\n");
     if (line.len == 0) return null;
 
-    const ts_text = extractAssistantTimestampAndText(alloc, line) orelse return null;
-    defer alloc.free(ts_text.text);
-
-    var it = MatchIter{ .text = ts_text.text };
-    var last_ok: ?Beacon = null;
-    while (it.next()) |m| {
-        if (parseBeaconJson(alloc, m.json)) |b| {
-            // Free previous if any (we replace).
-            if (last_ok) |prev| freeBeacon(alloc, prev);
-            last_ok = b;
-        }
-    }
-    if (last_ok) |b| return Found{ .beacon = b, .ts = ts_text.ts };
-    return null;
-}
-
-fn appendEntryBeacons(alloc: Allocator, raw: []const u8, out: *std.ArrayList(Found)) void {
-    const line = std.mem.trim(u8, raw, " \t\r\n");
-    if (line.len == 0) return;
-
-    const ts_text = extractAssistantTimestampAndText(alloc, line) orelse return;
-    defer alloc.free(ts_text.text);
-
-    var it = MatchIter{ .text = ts_text.text };
-    while (it.next()) |m| {
-        if (parseBeaconJson(alloc, m.json)) |b| {
-            out.append(alloc, .{ .beacon = b, .ts = ts_text.ts }) catch {
-                freeBeacon(alloc, b);
-                return;
-            };
-        }
-    }
-}
-
-const TsText = struct {
-    ts: f64,
-    text: []u8, // owned, joined "\n" of text-block contents
-};
-
-fn extractAssistantTimestampAndText(alloc: Allocator, line: []const u8) ?TsText {
     const parsed = std.json.parseFromSlice(
         std.json.Value,
         alloc,
@@ -288,22 +248,129 @@ fn extractAssistantTimestampAndText(alloc: Allocator, line: []const u8) ?TsText 
     ) catch return null;
     defer parsed.deinit();
 
-    const root = parsed.value;
+    const cls = classifyEntry(alloc, parsed.value) orelse return null;
+    if (cls.kind != .assistant) {
+        if (cls.text) |t| alloc.free(t);
+        return null;
+    }
+    const text = cls.text orelse return null;
+    defer alloc.free(text);
+
+    var it = MatchIter{ .text = text };
+    var last_ok: ?Beacon = null;
+    while (it.next()) |m| {
+        if (parseBeaconJson(alloc, m.json)) |b| {
+            if (last_ok) |prev| freeBeacon(alloc, prev);
+            last_ok = b;
+        }
+    }
+    if (last_ok) |b| return Found{ .beacon = b, .ts = cls.ts };
+    return null;
+}
+
+fn scanEntry(
+    alloc: Allocator,
+    raw: []const u8,
+    beacons_out: *std.ArrayList(Found),
+    events_out: *std.ArrayList(Event),
+) void {
+    const line = std.mem.trim(u8, raw, " \t\r\n");
+    if (line.len == 0) return;
+
+    const parsed = std.json.parseFromSlice(
+        std.json.Value,
+        alloc,
+        line,
+        .{ .ignore_unknown_fields = true },
+    ) catch return;
+    defer parsed.deinit();
+
+    const cls = classifyEntry(alloc, parsed.value) orelse return;
+    switch (cls.kind) {
+        .user_real => {
+            events_out.append(alloc, .{ .ts = cls.ts, .is_real_user = true }) catch {};
+        },
+        .user_tool_result => {
+            // Tool-result entries are tagged `type: "user"` in the JSONL but
+            // represent agent-active time waiting on tools -- NOT user idle.
+            events_out.append(alloc, .{ .ts = cls.ts, .is_real_user = false }) catch {};
+        },
+        .assistant => {
+            events_out.append(alloc, .{ .ts = cls.ts, .is_real_user = false }) catch {};
+            if (cls.text) |text| {
+                defer alloc.free(text);
+                var it = MatchIter{ .text = text };
+                while (it.next()) |m| {
+                    if (parseBeaconJson(alloc, m.json)) |b| {
+                        beacons_out.append(alloc, .{ .beacon = b, .ts = cls.ts }) catch {
+                            freeBeacon(alloc, b);
+                        };
+                    }
+                }
+            }
+        },
+        .other => {},
+    }
+}
+
+const EntryKind = enum { assistant, user_real, user_tool_result, other };
+
+const Classified = struct {
+    ts: f64,
+    kind: EntryKind,
+    /// Owned, joined "\n" of text-block contents (assistant only). Caller frees.
+    text: ?[]u8,
+};
+
+/// Decide what kind of entry a parsed JSONL line is and extract timestamp +
+/// (for assistants) concatenated text-block content. Returns null when
+/// timestamp is missing/unparseable.
+fn classifyEntry(alloc: Allocator, root: std.json.Value) ?Classified {
     if (root != .object) return null;
-
-    const msg_v = root.object.get("message") orelse return null;
-    if (msg_v != .object) return null;
-    const msg = msg_v.object;
-
-    const role = msg.get("role") orelse return null;
-    if (role != .string or !std.mem.eql(u8, role.string, "assistant")) return null;
 
     const ts_v = root.object.get("timestamp") orelse return null;
     if (ts_v != .string or ts_v.string.len == 0) return null;
     const ts = main.parseTs(ts_v.string) catch return null;
 
-    const content_v = msg.get("content") orelse return null;
-    if (content_v != .array) return null;
+    // `type: "user"` entries are user prompts OR tool_results-tagged-as-user.
+    const type_v = root.object.get("type");
+    if (type_v) |tv| {
+        if (tv == .string and std.mem.eql(u8, tv.string, "user")) {
+            // Peek at message.content. If array containing a tool_result block,
+            // treat as tool_result-as-user (NOT idle). Otherwise treat as a
+            // real user prompt -- including the bare-string variant (older
+            // user-prompt format dumps `content` as a plain string).
+            const msg_v = root.object.get("message");
+            const content_v: ?std.json.Value = blk: {
+                if (msg_v) |mv| {
+                    if (mv == .object) {
+                        if (mv.object.get("content")) |c| break :blk c;
+                    }
+                }
+                break :blk null;
+            };
+            const is_tool_result = userContentIsToolResult(content_v);
+            return .{
+                .ts = ts,
+                .kind = if (is_tool_result) .user_tool_result else .user_real,
+                .text = null,
+            };
+        }
+    }
+
+    // Assistant detection by `message.role`.
+    const msg_v = root.object.get("message") orelse return .{ .ts = ts, .kind = .other, .text = null };
+    if (msg_v != .object) return .{ .ts = ts, .kind = .other, .text = null };
+    const msg = msg_v.object;
+    const role = msg.get("role") orelse return .{ .ts = ts, .kind = .other, .text = null };
+    if (role != .string or !std.mem.eql(u8, role.string, "assistant")) {
+        return .{ .ts = ts, .kind = .other, .text = null };
+    }
+
+    // Concatenate text-block content. Assistant content is always an array
+    // of content blocks in observed corpora; bare-string is a user-only case.
+    const content_v = msg.get("content") orelse return .{ .ts = ts, .kind = .assistant, .text = null };
+    if (content_v != .array) return .{ .ts = ts, .kind = .assistant, .text = null };
 
     var buf: std.ArrayList(u8) = .empty;
     var first = true;
@@ -318,7 +385,40 @@ fn extractAssistantTimestampAndText(alloc: Allocator, line: []const u8) ?TsText 
         buf.appendSlice(alloc, txt_v.string) catch return null;
     }
     const owned = buf.toOwnedSlice(alloc) catch return null;
-    return TsText{ .ts = ts, .text = owned };
+    return .{ .ts = ts, .kind = .assistant, .text = owned };
+}
+
+/// True iff `content` is an array containing at least one `tool_result` block.
+/// Bare-string and missing content return false (those are real user prompts,
+/// not tool results).
+fn userContentIsToolResult(content: ?std.json.Value) bool {
+    const c = content orelse return false;
+    if (c != .array) return false; // bare string or absent => not a tool result
+    for (c.array.items) |block| {
+        if (block != .object) continue;
+        const tv = block.object.get("type") orelse continue;
+        if (tv == .string and std.mem.eql(u8, tv.string, "tool_result")) return true;
+    }
+    return false;
+}
+
+/// Sum the portion of [lo, hi] occupied by gaps that immediately precede a
+/// real user entry. Iterates events[1..]; for each `events[i].is_real_user`
+/// true, accumulates the slice of `(events[i-1].ts, events[i].ts)` that lies
+/// inside `[lo, hi]`.
+fn computeIdleInWindow(events: []const Event, lo: f64, hi: f64) f64 {
+    if (events.len < 2) return 0.0;
+    var idle: f64 = 0.0;
+    var i: usize = 1;
+    while (i < events.len) : (i += 1) {
+        if (!events[i].is_real_user) continue;
+        const prev_ts = events[i - 1].ts;
+        const ts = events[i].ts;
+        const gap_lo = @max(prev_ts, lo);
+        const gap_hi = @min(ts, hi);
+        if (gap_hi > gap_lo) idle += gap_hi - gap_lo;
+    }
+    return idle;
 }
 
 fn freeBeacon(alloc: Allocator, b: Beacon) void {
@@ -327,7 +427,7 @@ fn freeBeacon(alloc: Allocator, b: Beacon) void {
     alloc.free(b.drift);
 }
 
-// ─── beacons-latest ──────────────────────────────────────────────────────────
+// --- beacons-latest --------------------------------------------------------
 
 const LatestArgs = struct {
     session_id: []const u8 = "",
@@ -368,7 +468,6 @@ pub fn runLatest(gpa: Allocator, args: [][]const u8) !void {
     const root = if (parsed.projects_root) |r| try alloc.dupe(u8, r) else try main.defaultRoot(alloc);
     const now_unix: f64 = parsed.now_unix orelse main.nowUnix();
 
-    // Discover candidate transcript paths matching the session-id.
     const paths = try findSessionPaths(alloc, root, parsed.session_id);
 
     var best: ?Found = null;
@@ -396,7 +495,7 @@ pub fn runLatest(gpa: Allocator, args: [][]const u8) !void {
     main.writeStdout(w.items());
 }
 
-// ─── beacons-history ─────────────────────────────────────────────────────────
+// --- beacons-history -------------------------------------------------------
 
 const HistoryArgs = struct {
     period_seconds: u64 = 0,
@@ -430,6 +529,10 @@ fn parseHistoryArgs(args: [][]const u8) !HistoryArgs {
     return out;
 }
 
+fn cmpEventAsc(_: void, a: Event, b: Event) bool {
+    return a.ts < b.ts;
+}
+
 pub fn runHistory(gpa: Allocator, args: [][]const u8) !void {
     const t0 = main.perfNow();
     const frq = main.perfFreq();
@@ -444,7 +547,6 @@ pub fn runHistory(gpa: Allocator, args: [][]const u8) !void {
     const period_cutoff = now_unix - @as(f64, @floatFromInt(parsed.period_seconds));
     const window_lo = @max(period_cutoff, parsed.win_start_unix);
 
-    // Discover ALL groups (no mtime filter — beacon timestamps drive inclusion).
     var grp_map = try main.discover(alloc, root, -std.math.inf(f64));
 
     const session_count = grp_map.count();
@@ -452,14 +554,16 @@ pub fn runHistory(gpa: Allocator, args: [][]const u8) !void {
     var pairs: std.ArrayList(Pair) = .empty;
     var vi = grp_map.valueIterator();
     while (vi.next()) |list| {
-        var all: std.ArrayList(Found) = .empty;
+        var all_beacons: std.ArrayList(Found) = .empty;
+        var all_events: std.ArrayList(Event) = .empty;
         for (list.items) |p| {
-            findAllInPath(alloc, p, &all);
+            collectSessionEventsInPath(alloc, p, &all_beacons, &all_events);
         }
-        // Filter to beacons inside the window.
+        std.mem.sort(Event, all_events.items, {}, cmpEventAsc);
+
         var begin: ?Found = null;
         var end: ?Found = null;
-        for (all.items) |f| {
+        for (all_beacons.items) |f| {
             if (f.ts < window_lo) continue;
             if (std.mem.eql(u8, f.beacon.kind, "begin")) {
                 if (begin == null or f.ts < begin.?.ts) begin = f;
@@ -471,7 +575,15 @@ pub fn runHistory(gpa: Allocator, args: [][]const u8) !void {
             const b = begin.?;
             const e = end.?;
             if (e.ts > b.ts) {
-                try pairs.append(alloc, .{ .begin_eta = b.beacon.eta_seconds, .actual_elapsed = e.ts - b.ts });
+                const wall = e.ts - b.ts;
+                const idle = computeIdleInWindow(all_events.items, b.ts, e.ts);
+                const active = @max(0.0, wall - idle);
+                try pairs.append(alloc, .{
+                    .begin_eta = b.beacon.eta_seconds,
+                    .actual_elapsed = wall,
+                    .idle_excluded = idle,
+                    .active_elapsed = active,
+                });
             }
         }
     }
@@ -488,6 +600,10 @@ pub fn runHistory(gpa: Allocator, args: [][]const u8) !void {
         try writeJsonNumber(&w, p.begin_eta);
         try w.appendStr(",\"actual_elapsed\":");
         try writeJsonNumber(&w, p.actual_elapsed);
+        try w.appendStr(",\"idle_excluded\":");
+        try writeJsonNumber(&w, p.idle_excluded);
+        try w.appendStr(",\"active_elapsed\":");
+        try writeJsonNumber(&w, p.active_elapsed);
         try w.appendStr("}");
     }
     try w.appendFmt("],\"session_count\":{d},\"n_pairs\":{d},\"bias_factor\":", .{ session_count, pairs.items.len });
@@ -501,7 +617,12 @@ pub fn runHistory(gpa: Allocator, args: [][]const u8) !void {
     main.writeStdout(w.items());
 }
 
-const Pair = struct { begin_eta: f64, actual_elapsed: f64 };
+const Pair = struct {
+    begin_eta: f64,
+    actual_elapsed: f64,
+    idle_excluded: f64,
+    active_elapsed: f64,
+};
 
 fn biasFactor(alloc: Allocator, pairs: []const Pair) ?f64 {
     if (pairs.len == 0) return null;
@@ -509,7 +630,7 @@ fn biasFactor(alloc: Allocator, pairs: []const Pair) ?f64 {
     defer ratios.deinit(alloc);
     for (pairs) |p| {
         if (p.begin_eta > 0) {
-            ratios.append(alloc, p.actual_elapsed / p.begin_eta) catch return null;
+            ratios.append(alloc, p.active_elapsed / p.begin_eta) catch return null;
         }
     }
     if (ratios.items.len == 0) return null;
@@ -519,11 +640,7 @@ fn biasFactor(alloc: Allocator, pairs: []const Pair) ?f64 {
     return (ratios.items[n / 2 - 1] + ratios.items[n / 2]) / 2.0;
 }
 
-// ─── session-id path discovery (beacons-latest) ──────────────────────────────
-//
-// Find files matching either:
-//   <root>/<slug>/<sid>.jsonl                           (parent transcript)
-//   <root>/<slug>/<sess>/subagents/agent-<sid>.jsonl    (subagent transcript)
+// --- session-id path discovery (beacons-latest) ----------------------------
 
 fn findSessionPaths(alloc: Allocator, root: []const u8, sid: []const u8) !std.ArrayList([]const u8) {
     var out: std.ArrayList([]const u8) = .empty;
@@ -537,7 +654,6 @@ fn findSessionPaths(alloc: Allocator, root: []const u8, sid: []const u8) !std.Ar
 
 fn findSessionPathsWindows(alloc: Allocator, out: *std.ArrayList([]const u8), root: []const u8, sid: []const u8) !void {
     const platform = main.platform;
-    // Iterate slug dirs under root.
     const slug_pattern = try std.fmt.allocPrint(alloc, "{s}\\*", .{root});
     var fd: platform.WIN32_FIND_DATAW = undefined;
     const wpat = try std.unicode.utf8ToUtf16LeAllocZ(alloc, slug_pattern);
@@ -556,13 +672,11 @@ fn findSessionPathsWindows(alloc: Allocator, out: *std.ArrayList([]const u8), ro
                 const slug = try std.unicode.utf16LeToUtf8Alloc(alloc, name_w);
                 const slug_dir = try std.fmt.allocPrint(alloc, "{s}\\{s}", .{ root, slug });
 
-                // Parent: <slug_dir>/<sid>.jsonl
                 const parent_path = try std.fmt.allocPrint(alloc, "{s}\\{s}.jsonl", .{ slug_dir, sid });
                 if (fileExists(alloc, parent_path)) {
                     try out.append(alloc, parent_path);
                 } else alloc.free(parent_path);
 
-                // Subagents: enumerate session dirs and look for agent-<sid>.jsonl
                 try findSubagentsForSidWindows(alloc, out, slug_dir, sid);
             }
         }
@@ -686,7 +800,6 @@ fn fileExists(alloc: Allocator, path: []const u8) bool {
         const ret = linux.statx(linux.AT.FDCWD, zpath, 0, .{}, &statx_buf);
         const signed: isize = @bitCast(ret);
         if (signed < 0) return false;
-        // Reject directories.
         return (statx_buf.mode & 0o170000) != 0o040000;
     }
 }

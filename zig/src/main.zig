@@ -6,7 +6,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const beacons = @import("beacons.zig");
 
-const VERSION = "zig/0.1.0";
+const VERSION = "zig/0.1.1";
 pub const is_windows = builtin.os.tag == .windows;
 
 // ─── Platform abstraction ────────────────────────────────────────────────────
