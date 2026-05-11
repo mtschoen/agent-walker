@@ -17,6 +17,7 @@
 
 #include "beacons.hpp"
 #include "common.hpp"
+#include "walker_roots.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -324,6 +325,8 @@ std::string serialize_beacon(const Beacon& b) {
 struct LatestArgs {
     std::string session_id;
     std::optional<fs::path> projects_root;
+    std::vector<fs::path> extra_projects_roots;
+    bool read_config = true;
     std::optional<double> now_unix;
 };
 
@@ -353,6 +356,12 @@ std::optional<LatestArgs> parse_latest_args(const std::vector<std::string>& args
             if (!v) return std::nullopt;
             try { out.now_unix = std::stod(*v); }
             catch (...) { err = "--now: invalid number"; return std::nullopt; }
+        } else if (flag == "--extra-projects-root") {
+            auto v = need_value(flag);
+            if (!v) return std::nullopt;
+            out.extra_projects_roots.emplace_back(*v);
+        } else if (flag == "--no-config") {
+            out.read_config = false;
         } else {
             err = "unknown flag: " + flag;
             return std::nullopt;
@@ -367,6 +376,8 @@ struct HistoryArgs {
     bool have_period = false;
     double win_start_unix = 0.0;
     std::optional<fs::path> projects_root;
+    std::vector<fs::path> extra_projects_roots;
+    bool read_config = true;
     std::optional<double> now_unix;
 };
 
@@ -400,6 +411,12 @@ std::optional<HistoryArgs> parse_history_args(const std::vector<std::string>& ar
             if (!v) return std::nullopt;
             try { out.now_unix = std::stod(*v); }
             catch (...) { err = "--now: invalid number"; return std::nullopt; }
+        } else if (flag == "--extra-projects-root") {
+            auto v = need_value(flag);
+            if (!v) return std::nullopt;
+            out.extra_projects_roots.emplace_back(*v);
+        } else if (flag == "--no-config") {
+            out.read_config = false;
         } else {
             err = "unknown flag: " + flag;
             return std::nullopt;
@@ -437,16 +454,20 @@ int run_latest(const std::vector<std::string>& args) {
         return 2;
     }
     LatestArgs parsed = std::move(*parsed_opt);
-    fs::path root = parsed.projects_root.value_or(walker::default_projects_root());
+    fs::path primary = parsed.projects_root.value_or(walker::default_projects_root());
+    std::vector<fs::path> roots = walker::resolve_roots(
+        primary, parsed.extra_projects_roots, parsed.read_config);
     double now_unix = parsed.now_unix.value_or(walker::current_unix());
 
     // Discover candidate paths: parent <root>/<slug>/<sid>.jsonl and
     // subagent <root>/<slug>/<sid_parent>/subagents/agent-<sid>.jsonl.
     std::vector<fs::path> paths;
-    std::error_code ec;
-    if (fs::exists(root, ec)) {
-        std::string parent_filename = parsed.session_id + ".jsonl";
-        std::string subagent_filename = "agent-" + parsed.session_id + ".jsonl";
+    std::string parent_filename = parsed.session_id + ".jsonl";
+    std::string subagent_filename = "agent-" + parsed.session_id + ".jsonl";
+
+    for (const fs::path& root : roots) {
+        std::error_code ec;
+        if (!fs::exists(root, ec)) continue;
 
         for (auto& slug_entry : fs::directory_iterator(root, ec)) {
             if (!slug_entry.is_directory()) continue;
@@ -506,38 +527,41 @@ struct GroupKeyHash {
 
 using HistoryGroups = std::unordered_map<GroupKey, std::vector<fs::path>, GroupKeyHash>;
 
-HistoryGroups discover_history_groups(const fs::path& root) {
+HistoryGroups discover_history_groups(const std::vector<fs::path>& roots) {
     HistoryGroups groups;
     std::error_code ec;
-    if (!fs::exists(root, ec)) return groups;
 
-    for (auto& slug_entry : fs::directory_iterator(root, ec)) {
-        if (!slug_entry.is_directory()) continue;
-        std::string slug = slug_entry.path().filename().string();
+    for (const fs::path& root : roots) {
+        if (!fs::exists(root, ec)) continue;
 
-        // Parents: <root>/<slug>/<sid>.jsonl
-        for (auto& file_entry : fs::directory_iterator(slug_entry.path(), ec)) {
-            if (!file_entry.is_regular_file()) continue;
-            const auto& path = file_entry.path();
-            if (path.extension() != ".jsonl") continue;
-            std::string sid = path.stem().string();
-            groups[{slug, sid}].push_back(path);
-        }
+        for (auto& slug_entry : fs::directory_iterator(root, ec)) {
+            if (!slug_entry.is_directory()) continue;
+            std::string slug = slug_entry.path().filename().string();
 
-        // Subagents: <root>/<slug>/<sid>/subagents/agent-*.jsonl
-        for (auto& session_entry : fs::directory_iterator(slug_entry.path(), ec)) {
-            if (!session_entry.is_directory()) continue;
-            std::string sid = session_entry.path().filename().string();
+            // Parents: <root>/<slug>/<sid>.jsonl
+            for (auto& file_entry : fs::directory_iterator(slug_entry.path(), ec)) {
+                if (!file_entry.is_regular_file()) continue;
+                const auto& path = file_entry.path();
+                if (path.extension() != ".jsonl") continue;
+                std::string sid = path.stem().string();
+                groups[{slug, sid}].push_back(path);
+            }
 
-            fs::path subdir = session_entry.path() / "subagents";
-            if (!fs::is_directory(subdir, ec)) continue;
-            for (auto& agent_entry : fs::directory_iterator(subdir, ec)) {
-                if (!agent_entry.is_regular_file()) continue;
-                const auto& apath = agent_entry.path();
-                if (apath.extension() != ".jsonl") continue;
-                std::string fname = apath.filename().string();
-                if (fname.substr(0, 6) != "agent-") continue;
-                groups[{slug, sid}].push_back(apath);
+            // Subagents: <root>/<slug>/<sid>/subagents/agent-*.jsonl
+            for (auto& session_entry : fs::directory_iterator(slug_entry.path(), ec)) {
+                if (!session_entry.is_directory()) continue;
+                std::string sid = session_entry.path().filename().string();
+
+                fs::path subdir = session_entry.path() / "subagents";
+                if (!fs::is_directory(subdir, ec)) continue;
+                for (auto& agent_entry : fs::directory_iterator(subdir, ec)) {
+                    if (!agent_entry.is_regular_file()) continue;
+                    const auto& apath = agent_entry.path();
+                    if (apath.extension() != ".jsonl") continue;
+                    std::string fname = apath.filename().string();
+                    if (fname.substr(0, 6) != "agent-") continue;
+                    groups[{slug, sid}].push_back(apath);
+                }
             }
         }
     }
@@ -572,9 +596,10 @@ int run_history(const std::vector<std::string>& args) {
     double now_unix = parsed.now_unix.value_or(walker::current_unix());
     double period_cutoff = now_unix - static_cast<double>(parsed.period_seconds);
     double window_lo = std::max(period_cutoff, parsed.win_start_unix);
-    fs::path root = parsed.projects_root.value_or(walker::default_projects_root());
-
-    HistoryGroups groups = discover_history_groups(root);
+    fs::path primary = parsed.projects_root.value_or(walker::default_projects_root());
+    std::vector<fs::path> roots = walker::resolve_roots(
+        primary, parsed.extra_projects_roots, parsed.read_config);
+    HistoryGroups groups = discover_history_groups(roots);
     size_t session_count = groups.size();
 
     std::vector<std::pair<double, double>> pairs;  // (begin_eta, actual_elapsed)
