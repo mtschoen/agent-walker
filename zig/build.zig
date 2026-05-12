@@ -8,6 +8,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        // Darwin has no stable syscall ABI; libSystem is the supported
+        // interface, so the macOS code path goes through std.c.
+        .link_libc = target.result.os.tag == .macos,
     });
 
     const exe = b.addExecutable(.{

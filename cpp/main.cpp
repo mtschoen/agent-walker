@@ -286,6 +286,17 @@ static std::string group_key(const std::string& slug, const std::string& sid) {
     return slug + '\0' + sid;
 }
 
+// Portable file_time_type -> Unix seconds. std::chrono::clock_cast is C++20
+// but missing from Apple Clang's libc++ (as of Xcode 16). The offset trick
+// works on every implementation; precision is more than enough for mtime
+// comparison against an integer-second cutoff.
+static double file_mtime_to_unix(fs::file_time_type mtime) {
+    auto sys_time = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+        mtime - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+    auto secs = std::chrono::time_point_cast<std::chrono::seconds>(sys_time);
+    return static_cast<double>(secs.time_since_epoch().count());
+}
+
 static GroupMap discover_groups(
     const std::vector<fs::path>& roots,
     double earliest)
@@ -309,10 +320,7 @@ static GroupMap discover_groups(
 
                 auto mtime = fs::last_write_time(path, ec);
                 if (!ec) {
-                    auto sys_time = std::chrono::time_point_cast<std::chrono::seconds>(
-                        std::chrono::clock_cast<std::chrono::system_clock>(mtime));
-                    double mtime_unix = static_cast<double>(sys_time.time_since_epoch().count());
-                    if (mtime_unix < earliest) continue;
+                    if (file_mtime_to_unix(mtime) < earliest) continue;
                 }
 
                 std::string sid = path.stem().string();
@@ -337,10 +345,7 @@ static GroupMap discover_groups(
 
                     auto mtime = fs::last_write_time(apath, ec);
                     if (!ec) {
-                        auto sys_time = std::chrono::time_point_cast<std::chrono::seconds>(
-                            std::chrono::clock_cast<std::chrono::system_clock>(mtime));
-                        double mtime_unix = static_cast<double>(sys_time.time_since_epoch().count());
-                        if (mtime_unix < earliest) continue;
+                        if (file_mtime_to_unix(mtime) < earliest) continue;
                     }
 
                     groups[group_key(slug, sid)].push_back(apath);

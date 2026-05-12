@@ -1,5 +1,8 @@
-// Native pace-walker -- Zig implementation (cross-platform: Linux + Windows).
+// Native pace-walker -- Zig implementation (cross-platform: Linux + Windows + macOS).
 // See ../SPEC.md for the contract every implementation must honor.
+//
+// Linux uses raw syscalls via std.os.linux (no libc). Darwin uses libc (std.c)
+// since it has no stable syscall ABI. Windows uses Win32 directly.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -8,6 +11,7 @@ const beacons = @import("beacons.zig");
 
 const VERSION = "zig/0.1.1";
 pub const is_windows = builtin.os.tag == .windows;
+pub const is_darwin = builtin.os.tag == .macos;
 
 // ─── Platform abstraction ────────────────────────────────────────────────────
 
@@ -83,6 +87,10 @@ pub fn nowUnix() f64 {
         var ft: platform.FILETIME = .{};
         platform.GetSystemTimeAsFileTime(&ft);
         return ft.toUnix();
+    } else if (is_darwin) {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(std.c.CLOCK.REALTIME, &ts);
+        return @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) / 1_000_000_000.0;
     } else {
         var ts: platform.linux.timespec = undefined;
         _ = platform.linux.clock_gettime(platform.linux.CLOCK.REALTIME, &ts);
@@ -95,6 +103,10 @@ pub fn perfNow() i64 {
         var v: platform.LARGE_INTEGER = undefined;
         _ = platform.QueryPerformanceCounter(&v);
         return v.quad;
+    } else if (is_darwin) {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &ts);
+        return ts.sec * 1_000_000_000 + ts.nsec;
     } else {
         var ts: platform.linux.timespec = undefined;
         _ = platform.linux.clock_gettime(platform.linux.CLOCK.MONOTONIC, &ts);
@@ -124,6 +136,13 @@ pub fn writeStdout(bytes: []const u8) void {
             if (written == 0) break;
             offset += written;
         }
+    } else if (is_darwin) {
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const n = std.c.write(1, bytes.ptr + offset, bytes.len - offset);
+            if (n <= 0) break;
+            offset += @intCast(n);
+        }
     } else {
         var offset: usize = 0;
         while (offset < bytes.len) {
@@ -147,6 +166,13 @@ pub fn writeStderr(bytes: []const u8) void {
             if (written == 0) break;
             offset += written;
         }
+    } else if (is_darwin) {
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const n = std.c.write(2, bytes.ptr + offset, bytes.len - offset);
+            if (n <= 0) break;
+            offset += @intCast(n);
+        }
     } else {
         var offset: usize = 0;
         while (offset < bytes.len) {
@@ -166,6 +192,12 @@ fn fileOpen(alloc: Allocator, path: []const u8) !PlatformFd {
         const h = platform.CreateFileW(wpath.ptr, platform.GENERIC_READ, platform.FILE_SHARE_READ, null, platform.OPEN_EXISTING, platform.FILE_ATTRIBUTE_NORMAL, null) orelse return error.OpenFailed;
         if (h == platform.INVALID_HANDLE_VALUE) return error.OpenFailed;
         return h;
+    } else if (is_darwin) {
+        const zpath = try alloc.dupeZ(u8, path);
+        defer alloc.free(zpath);
+        const fd = std.c.openat(std.c.AT.FDCWD, zpath, .{});
+        if (fd < 0) return error.OpenFailed;
+        return fd;
     } else {
         const zpath = try alloc.dupeZ(u8, path);
         defer alloc.free(zpath);
@@ -179,6 +211,8 @@ fn fileOpen(alloc: Allocator, path: []const u8) !PlatformFd {
 fn fileClose(fd: PlatformFd) void {
     if (is_windows) {
         _ = platform.CloseHandle(fd);
+    } else if (is_darwin) {
+        _ = std.c.close(fd);
     } else {
         _ = platform.linux.close(fd);
     }
@@ -189,6 +223,10 @@ fn fileRead(fd: PlatformFd, buf: []u8) !usize {
         var n: u32 = 0;
         if (platform.ReadFile(fd, buf.ptr, @intCast(buf.len), &n, null) == 0) return error.ReadFailed;
         return n;
+    } else if (is_darwin) {
+        const n = std.c.read(fd, buf.ptr, buf.len);
+        if (n < 0) return error.ReadFailed;
+        return @intCast(n);
     } else {
         const n = platform.linux.read(fd, buf.ptr, buf.len);
         const signed: isize = @bitCast(n);
@@ -218,6 +256,15 @@ fn mtimeOk(alloc: Allocator, path: []const u8, earliest: f64) bool {
         var info: platform.WIN32_FILE_ATTRIBUTE_DATA = undefined;
         if (platform.GetFileAttributesExW(wpath.ptr, 0, &info) == 0) return true;
         return info.ftLastWriteTime.toUnix() >= earliest;
+    } else if (is_darwin) {
+        const zpath = alloc.dupeZ(u8, path) catch return true;
+        defer alloc.free(zpath);
+        var st: std.c.Stat = undefined;
+        if (std.c.fstatat(std.c.AT.FDCWD, zpath, &st, 0) != 0) return true;
+        const mt = st.mtime();
+        const mtime = @as(f64, @floatFromInt(mt.sec)) +
+            @as(f64, @floatFromInt(mt.nsec)) / 1_000_000_000.0;
+        return mtime >= earliest;
     } else {
         const zpath = alloc.dupeZ(u8, path) catch return true;
         defer alloc.free(zpath);
@@ -242,9 +289,28 @@ fn mtimeOk(alloc: Allocator, path: []const u8, earliest: f64) bool {
 pub fn getArgs(alloc: Allocator) ![][]const u8 {
     if (is_windows) {
         return getArgsWindows(alloc);
+    } else if (is_darwin) {
+        return getArgsDarwin(alloc);
     } else {
         return getArgsLinux(alloc);
     }
+}
+
+// On Darwin libc exposes argv via _NSGetArgv()/_NSGetArgc() (crt_externs.h).
+extern "c" fn _NSGetArgv() *[*][*:0]u8;
+extern "c" fn _NSGetArgc() *c_int;
+
+fn getArgsDarwin(alloc: Allocator) ![][]const u8 {
+    if (!is_darwin) unreachable;
+    const argc: usize = @intCast(_NSGetArgc().*);
+    const argv = _NSGetArgv().*;
+    var out: std.ArrayList([]const u8) = .empty;
+    var i: usize = 1; // skip argv[0]
+    while (i < argc) : (i += 1) {
+        const arg = std.mem.span(argv[i]);
+        try out.append(alloc, try alloc.dupe(u8, arg));
+    }
+    return out.toOwnedSlice(alloc);
 }
 
 fn getArgsLinux(alloc: Allocator) ![][]const u8 {
@@ -326,6 +392,11 @@ pub fn getEnvVar(alloc: Allocator, name: []const u8) ?[]const u8 {
         const len = platform.GetEnvironmentVariableW(@ptrCast(&wn), &wv, @intCast(wv.len));
         if (len == 0) return null;
         return std.unicode.utf16LeToUtf8Alloc(alloc, wv[0..len]) catch null;
+    } else if (is_darwin) {
+        const name_z = alloc.dupeZ(u8, name) catch return null;
+        defer alloc.free(name_z);
+        const v = std.c.getenv(name_z) orelse return null;
+        return alloc.dupe(u8, std.mem.span(v)) catch null;
     } else {
         // Read /proc/self/environ to find the variable without libc
         const fd: i32 = @bitCast(@as(u32, @truncate(platform.linux.openat(
@@ -604,8 +675,83 @@ pub fn defaultRoot(alloc: Allocator) ![]const u8 {
 pub fn discover(alloc: Allocator, root_path: []const u8, earliest: f64) !FileMap {
     if (is_windows) {
         return discoverWindows(alloc, root_path, earliest);
+    } else if (is_darwin) {
+        return discoverDarwin(alloc, root_path, earliest);
     } else {
         return discoverLinux(alloc, root_path, earliest);
+    }
+}
+
+// Darwin directory walk uses libc opendir/readdir/closedir.
+// Mirrors the structure of discoverLinux below.
+fn discoverDarwin(alloc: Allocator, root_path: []const u8, earliest: f64) !FileMap {
+    var map = FileMap.init(alloc);
+    const root_z = try alloc.dupeZ(u8, root_path);
+    defer alloc.free(root_z);
+    const root_dir = std.c.opendir(root_z) orelse return map;
+    defer _ = std.c.closedir(root_dir);
+
+    while (std.c.readdir(root_dir)) |ent| {
+        if (ent.type != std.c.DT.DIR) continue;
+        const name_ptr: [*:0]const u8 = @ptrCast(&ent.name);
+        const slug = std.mem.span(name_ptr);
+        if (slug.len == 0) continue;
+        if (slug[0] == '.' and (slug.len == 1 or (slug.len == 2 and slug[1] == '.'))) continue;
+
+        const slug_dir = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ root_path, slug });
+        try scanSlugDirDarwin(alloc, &map, slug, slug_dir, earliest);
+    }
+    return map;
+}
+
+fn scanSlugDirDarwin(alloc: Allocator, map: *FileMap, slug: []const u8, slug_dir: []const u8, earliest: f64) !void {
+    const slug_z = try alloc.dupeZ(u8, slug_dir);
+    defer alloc.free(slug_z);
+    const dir = std.c.opendir(slug_z) orelse return;
+    defer _ = std.c.closedir(dir);
+
+    while (std.c.readdir(dir)) |ent| {
+        const name_ptr: [*:0]const u8 = @ptrCast(&ent.name);
+        const name = std.mem.span(name_ptr);
+        if (name.len == 0) continue;
+        if (name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.'))) continue;
+
+        if (ent.type == std.c.DT.REG or ent.type == std.c.DT.UNKNOWN) {
+            if (std.mem.endsWith(u8, name, ".jsonl")) {
+                const sid = name[0 .. name.len - 6];
+                const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ slug_dir, name });
+                if (!mtimeOk(alloc, path, earliest)) {
+                    alloc.free(path);
+                    continue;
+                }
+                try addFile(alloc, map, slug, sid, path);
+            }
+        } else if (ent.type == std.c.DT.DIR) {
+            const subagents_dir = try std.fmt.allocPrint(alloc, "{s}/{s}/subagents", .{ slug_dir, name });
+            try scanSubagentsDarwin(alloc, map, slug, name, subagents_dir, earliest);
+        }
+    }
+}
+
+fn scanSubagentsDarwin(alloc: Allocator, map: *FileMap, slug: []const u8, sid: []const u8, subagents_dir: []const u8, earliest: f64) !void {
+    const sub_z = try alloc.dupeZ(u8, subagents_dir);
+    defer alloc.free(sub_z);
+    const dir = std.c.opendir(sub_z) orelse return;
+    defer _ = std.c.closedir(dir);
+
+    while (std.c.readdir(dir)) |ent| {
+        if (ent.type != std.c.DT.REG and ent.type != std.c.DT.UNKNOWN) continue;
+        const name_ptr: [*:0]const u8 = @ptrCast(&ent.name);
+        const aname = std.mem.span(name_ptr);
+        if (!std.mem.startsWith(u8, aname, "agent-")) continue;
+        if (!std.mem.endsWith(u8, aname, ".jsonl")) continue;
+
+        const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ subagents_dir, aname });
+        if (!mtimeOk(alloc, path, earliest)) {
+            alloc.free(path);
+            continue;
+        }
+        try addFile(alloc, map, slug, sid, path);
     }
 }
 

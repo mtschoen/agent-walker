@@ -7,6 +7,7 @@ const Allocator = std.mem.Allocator;
 const main = @import("main.zig");
 
 const is_windows = main.is_windows;
+const is_darwin = main.is_darwin;
 const PATH_SEP = main.PATH_SEP;
 
 // --- Beacon shape ----------------------------------------------------------
@@ -646,10 +647,56 @@ fn findSessionPaths(alloc: Allocator, root: []const u8, sid: []const u8) !std.Ar
     var out: std.ArrayList([]const u8) = .empty;
     if (is_windows) {
         try findSessionPathsWindows(alloc, &out, root, sid);
+    } else if (is_darwin) {
+        try findSessionPathsDarwin(alloc, &out, root, sid);
     } else {
         try findSessionPathsLinux(alloc, &out, root, sid);
     }
     return out;
+}
+
+fn findSessionPathsDarwin(alloc: Allocator, out: *std.ArrayList([]const u8), root: []const u8, sid: []const u8) !void {
+    const root_z = try alloc.dupeZ(u8, root);
+    defer alloc.free(root_z);
+    const root_dir = std.c.opendir(root_z) orelse return;
+    defer _ = std.c.closedir(root_dir);
+
+    while (std.c.readdir(root_dir)) |ent| {
+        if (ent.type != std.c.DT.DIR) continue;
+        const name_ptr: [*:0]const u8 = @ptrCast(&ent.name);
+        const slug = std.mem.span(name_ptr);
+        if (slug.len == 0) continue;
+        if (slug[0] == '.' and (slug.len == 1 or (slug.len == 2 and slug[1] == '.'))) continue;
+
+        const slug_dir = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ root, slug });
+
+        const parent_path = try std.fmt.allocPrint(alloc, "{s}/{s}.jsonl", .{ slug_dir, sid });
+        if (fileExists(alloc, parent_path)) {
+            try out.append(alloc, parent_path);
+        } else alloc.free(parent_path);
+
+        try findSubagentsForSidDarwin(alloc, out, slug_dir, sid);
+    }
+}
+
+fn findSubagentsForSidDarwin(alloc: Allocator, out: *std.ArrayList([]const u8), slug_dir: []const u8, sid: []const u8) !void {
+    const slug_z = try alloc.dupeZ(u8, slug_dir);
+    defer alloc.free(slug_z);
+    const dir = std.c.opendir(slug_z) orelse return;
+    defer _ = std.c.closedir(dir);
+
+    while (std.c.readdir(dir)) |ent| {
+        if (ent.type != std.c.DT.DIR) continue;
+        const name_ptr: [*:0]const u8 = @ptrCast(&ent.name);
+        const sess = std.mem.span(name_ptr);
+        if (sess.len == 0) continue;
+        if (sess[0] == '.' and (sess.len == 1 or (sess.len == 2 and sess[1] == '.'))) continue;
+
+        const candidate = try std.fmt.allocPrint(alloc, "{s}/{s}/subagents/agent-{s}.jsonl", .{ slug_dir, sess, sid });
+        if (fileExists(alloc, candidate)) {
+            try out.append(alloc, candidate);
+        } else alloc.free(candidate);
+    }
 }
 
 fn findSessionPathsWindows(alloc: Allocator, out: *std.ArrayList([]const u8), root: []const u8, sid: []const u8) !void {
@@ -792,6 +839,12 @@ fn fileExists(alloc: Allocator, path: []const u8) bool {
         var info: platform.WIN32_FILE_ATTRIBUTE_DATA = undefined;
         if (platform.GetFileAttributesExW(wpath.ptr, 0, &info) == 0) return false;
         return (info.dwFileAttributes & platform.FILE_ATTRIBUTE_DIRECTORY) == 0;
+    } else if (is_darwin) {
+        const zpath = alloc.dupeZ(u8, path) catch return false;
+        defer alloc.free(zpath);
+        var st: std.c.Stat = undefined;
+        if (std.c.fstatat(std.c.AT.FDCWD, zpath, &st, 0) != 0) return false;
+        return (st.mode & 0o170000) != 0o040000;
     } else {
         const linux = main.platform.linux;
         const zpath = alloc.dupeZ(u8, path) catch return false;
