@@ -19,6 +19,14 @@
       noise, well inside the 0.001 tolerance). Conformance harness
       gained per-impl scoping for `--no-config` / `--extra-projects-root`
       so rust/go/zig stop erroring on cpp-only flags.
+- [x] Add macOS support to C++ and Zig impls. Apple
+      Clang's libc++ lacks std::chrono::clock_cast; cpp
+      uses a portable file_clock→system_clock offset trick.
+      Zig adds a parallel Darwin code path via std.c
+      (libSystem) alongside the existing Linux raw-syscall
+      path; build.zig links libc only on macOS targets.
+      All four impls pass shared/conformance.py on macOS
+      arm64 (54/54).
 
 ## Inbox
 
