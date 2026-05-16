@@ -5,6 +5,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const beacons = @import("beacons.zig");
+const search = @import("search.zig");
 
 const VERSION = "zig/0.1.1";
 pub const is_windows = builtin.os.tag == .windows;
@@ -870,6 +871,7 @@ pub fn main() !void {
         if (std.mem.eql(u8, first, "cost")) break :blk "cost";
         if (std.mem.eql(u8, first, "beacons-latest")) break :blk "beacons-latest";
         if (std.mem.eql(u8, first, "beacons-history")) break :blk "beacons-history";
+        if (std.mem.eql(u8, first, "search")) break :blk "search";
         if (first.len > 0 and first[0] == '-') break :blk "cost";
         std.debug.print("walker: unknown subcommand: {s}\n", .{first});
         std.process.exit(2);
@@ -884,6 +886,9 @@ pub fn main() !void {
     }
     if (std.mem.eql(u8, subcommand, "beacons-history")) {
         return beacons.runHistory(gpa, rest);
+    }
+    if (std.mem.eql(u8, subcommand, "search")) {
+        return search.run(gpa, rest);
     }
     return runCost(gpa, rest);
 }

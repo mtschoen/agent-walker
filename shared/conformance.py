@@ -53,7 +53,7 @@ IMPLS_WITH_EXTRA_ROOTS = {"cpp"}
 # Impls that have implemented the `search` subcommand. Add languages here as
 # their search ports land. Until the set contains an impl, its search check
 # is skipped (rather than reported as failure).
-IMPLS_WITH_SEARCH: set[str] = {"rust"}
+IMPLS_WITH_SEARCH: set[str] = {"rust", "cpp", "go", "zig"}
 
 CANDIDATES = {
     "rust": [
