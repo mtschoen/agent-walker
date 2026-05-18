@@ -24,7 +24,7 @@ pub const platform = if (is_windows) struct {
     pub const FILETIME = extern struct {
         lo: u32 = 0,
         hi: u32 = 0,
-        fn toUnix(ft: FILETIME) f64 {
+        pub fn toUnix(ft: FILETIME) f64 {
             const hns: i64 = (@as(i64, ft.hi) << 32) | @as(i64, ft.lo);
             return @as(f64, @floatFromInt(hns - 116_444_736_000_000_000)) / 10_000_000.0;
         }
