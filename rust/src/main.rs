@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 mod beacons;
+mod content;
+mod search;
 
 #[derive(Default)]
 struct Args {
@@ -269,6 +271,7 @@ fn main() {
         Some("cost") => ("cost", &raw[1..]),
         Some("beacons-latest") => ("beacons-latest", &raw[1..]),
         Some("beacons-history") => ("beacons-history", &raw[1..]),
+        Some("search") => ("search", &raw[1..]),
         // Bare flag invocation = cost mode (back-compat).
         Some(s) if s.starts_with('-') => ("cost", &raw[..]),
         Some(s) => {
@@ -282,6 +285,7 @@ fn main() {
         "cost" => run_cost(rest),
         "beacons-latest" => beacons::run_latest(rest),
         "beacons-history" => beacons::run_history(rest),
+        "search" => search::run(rest),
         _ => unreachable!(),
     }
 }

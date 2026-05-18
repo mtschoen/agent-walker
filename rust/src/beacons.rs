@@ -10,6 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use crate::content::{extract_text, user_content_is_tool_result};
 use crate::{current_unix, default_projects_root, parse_iso8601};
 
 #[derive(Deserialize)]
@@ -44,36 +45,6 @@ fn beacon_re() -> Regex {
     // Non-greedy {.*?} so two beacons in one text don't merge.
     Regex::new(r"(?s)<progress-beacon>\s*(\{.*?\})\s*</progress-beacon>")
         .expect("static regex compiles")
-}
-
-fn extract_text(content: &Value) -> String {
-    let arr = match content.as_array() {
-        Some(a) => a,
-        None => return String::new(),
-    };
-    let mut parts: Vec<&str> = Vec::new();
-    for block in arr {
-        if block.get("type").and_then(|v| v.as_str()) == Some("text") {
-            if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
-                parts.push(t);
-            }
-        }
-    }
-    parts.join("\n")
-}
-
-/// True when a `type: "user"` message's content contains tool_result blocks
-/// (tool output coming back from the agent's own tool calls), NOT a real
-/// user prompt. Tool-result entries are agent-active time waiting on tools,
-/// not user-idle time.
-fn user_content_is_tool_result(content: Option<&Value>) -> bool {
-    let arr = match content.and_then(|v| v.as_array()) {
-        Some(a) => a,
-        None => return false,
-    };
-    arr.iter().any(|block| {
-        block.get("type").and_then(|v| v.as_str()) == Some("tool_result")
-    })
 }
 
 /// Walk one transcript file. For each assistant entry, parse the latest
@@ -113,7 +84,7 @@ fn find_latest_in_path(path: &Path, re: &Regex) -> Option<(Beacon, f64)> {
             Some(t) => t,
             None => continue,
         };
-        let combined = extract_text(&content);
+        let combined = extract_text(&content, false);
         // Pick the last well-formed beacon in this entry, then update
         // `latest` if this entry's timestamp is the highest seen.
         let mut entry_beacon: Option<Beacon> = None;
@@ -193,7 +164,7 @@ fn collect_session_events_in_path(path: &Path, re: &Regex) -> SessionEvents {
             None => continue,
         };
         events.push((ts, false));
-        let combined = extract_text(&content);
+        let combined = extract_text(&content, false);
         for caps in re.captures_iter(&combined) {
             if let Some(m) = caps.get(1) {
                 if let Ok(b) = serde_json::from_str::<Beacon>(m.as_str()) {
