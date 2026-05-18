@@ -138,50 +138,76 @@ const MatchIter = struct {
 };
 
 fn parseBeaconJson(alloc: Allocator, json_src: []const u8) ?Beacon {
-    const parsed = std.json.parseFromSlice(
-        std.json.Value,
-        alloc,
-        json_src,
-        .{ .ignore_unknown_fields = true },
-    ) catch return null;
-    defer parsed.deinit();
-    const root = parsed.value;
-    if (root != .object) return null;
-    const obj = root.object;
+    var scanner = std.json.Scanner.initCompleteInput(alloc, json_src);
+    defer scanner.deinit();
 
-    const kind_v = obj.get("kind") orelse return null;
-    if (kind_v != .string) return null;
+    if (!(main.enterObject(&scanner) catch return null)) return null;
 
-    const eta_v = obj.get("eta_seconds") orelse return null;
-    const eta: f64 = switch (eta_v) {
-        .integer => |n| @floatFromInt(n),
-        .float => |f| f,
-        .number_string => |s| std.fmt.parseFloat(f64, s) catch return null,
-        else => return null,
-    };
-
-    const summary_v = obj.get("summary") orelse return null;
-    if (summary_v != .string) return null;
-
-    const drift_v = obj.get("drift") orelse return null;
-    if (drift_v != .string) return null;
-
+    var kind: ?[]const u8 = null;
+    var eta: ?f64 = null;
+    var summary: ?[]const u8 = null;
+    var drift: ?[]const u8 = null;
     var beats_left: ?i64 = null;
-    if (obj.get("beats_left")) |bl_v| {
-        switch (bl_v) {
-            .integer => |n| beats_left = n,
-            .float => |f| beats_left = @intFromFloat(f),
-            else => {},
+
+    while (true) {
+        const key = (main.parseObjectKey(&scanner, alloc) catch return null) orelse break;
+        if (std.mem.eql(u8, key, "kind")) {
+            kind = main.parseStringValue(&scanner, alloc) catch return null;
+        } else if (std.mem.eql(u8, key, "eta_seconds")) {
+            eta = parseF64Value(&scanner, alloc) catch return null;
+        } else if (std.mem.eql(u8, key, "summary")) {
+            summary = main.parseStringValue(&scanner, alloc) catch return null;
+        } else if (std.mem.eql(u8, key, "drift")) {
+            drift = main.parseStringValue(&scanner, alloc) catch return null;
+        } else if (std.mem.eql(u8, key, "beats_left")) {
+            beats_left = parseI64Value(&scanner, alloc) catch return null;
+        } else {
+            scanner.skipValue() catch return null;
         }
     }
 
     return Beacon{
-        .kind = alloc.dupe(u8, kind_v.string) catch return null,
-        .eta_seconds = eta,
-        .summary = alloc.dupe(u8, summary_v.string) catch return null,
-        .drift = alloc.dupe(u8, drift_v.string) catch return null,
+        .kind = kind orelse return null,
+        .eta_seconds = eta orelse return null,
+        .summary = summary orelse return null,
+        .drift = drift orelse return null,
         .beats_left = beats_left,
     };
+}
+
+/// Read a numeric value as f64. Returns null when the value is non-numeric.
+fn parseF64Value(scanner: *std.json.Scanner, alloc: Allocator) !?f64 {
+    const peek = try scanner.peekNextTokenType();
+    if (peek != .number) {
+        try scanner.skipValue();
+        return null;
+    }
+    const tok = try scanner.nextAlloc(alloc, .alloc_if_needed);
+    const slice: []const u8 = switch (tok) {
+        .number => |s| s,
+        .allocated_number => |s| s,
+        else => unreachable,
+    };
+    return std.fmt.parseFloat(f64, slice) catch null;
+}
+
+/// Read a numeric value as i64. Falls back to truncating-from-float when
+/// the source is a JSON float (matches the prior `.float => |f| @intFromFloat(f)` path).
+fn parseI64Value(scanner: *std.json.Scanner, alloc: Allocator) !?i64 {
+    const peek = try scanner.peekNextTokenType();
+    if (peek != .number) {
+        try scanner.skipValue();
+        return null;
+    }
+    const tok = try scanner.nextAlloc(alloc, .alloc_if_needed);
+    const slice: []const u8 = switch (tok) {
+        .number => |s| s,
+        .allocated_number => |s| s,
+        else => unreachable,
+    };
+    if (std.fmt.parseInt(i64, slice, 10)) |n| return n else |_| {}
+    if (std.fmt.parseFloat(f64, slice)) |f| return @intFromFloat(f) else |_| {}
+    return null;
 }
 
 // --- transcript scanning ---------------------------------------------------
@@ -240,29 +266,14 @@ fn parseEntryBeacon(alloc: Allocator, raw: []const u8) ?Found {
     const line = std.mem.trim(u8, raw, " \t\r\n");
     if (line.len == 0) return null;
 
-    const parsed = std.json.parseFromSlice(
-        std.json.Value,
-        alloc,
-        line,
-        .{ .ignore_unknown_fields = true },
-    ) catch return null;
-    defer parsed.deinit();
-
-    const cls = classifyEntry(alloc, parsed.value) orelse return null;
-    if (cls.kind != .assistant) {
-        if (cls.text) |t| alloc.free(t);
-        return null;
-    }
+    const cls = classifyEntry(alloc, line) orelse return null;
+    if (cls.kind != .assistant) return null;
     const text = cls.text orelse return null;
-    defer alloc.free(text);
 
     var it = MatchIter{ .text = text };
     var last_ok: ?Beacon = null;
     while (it.next()) |m| {
-        if (parseBeaconJson(alloc, m.json)) |b| {
-            if (last_ok) |prev| freeBeacon(alloc, prev);
-            last_ok = b;
-        }
+        if (parseBeaconJson(alloc, m.json)) |b| last_ok = b;
     }
     if (last_ok) |b| return Found{ .beacon = b, .ts = cls.ts };
     return null;
@@ -277,15 +288,7 @@ fn scanEntry(
     const line = std.mem.trim(u8, raw, " \t\r\n");
     if (line.len == 0) return;
 
-    const parsed = std.json.parseFromSlice(
-        std.json.Value,
-        alloc,
-        line,
-        .{ .ignore_unknown_fields = true },
-    ) catch return;
-    defer parsed.deinit();
-
-    const cls = classifyEntry(alloc, parsed.value) orelse return;
+    const cls = classifyEntry(alloc, line) orelse return;
     switch (cls.kind) {
         .user_real => {
             events_out.append(alloc, .{ .ts = cls.ts, .is_real_user = true }) catch {};
@@ -298,13 +301,10 @@ fn scanEntry(
         .assistant => {
             events_out.append(alloc, .{ .ts = cls.ts, .is_real_user = false }) catch {};
             if (cls.text) |text| {
-                defer alloc.free(text);
                 var it = MatchIter{ .text = text };
                 while (it.next()) |m| {
                     if (parseBeaconJson(alloc, m.json)) |b| {
-                        beacons_out.append(alloc, .{ .beacon = b, .ts = cls.ts }) catch {
-                            freeBeacon(alloc, b);
-                        };
+                        beacons_out.append(alloc, .{ .beacon = b, .ts = cls.ts }) catch {};
                     }
                 }
             }
@@ -322,84 +322,129 @@ const Classified = struct {
     text: ?[]u8,
 };
 
-/// Decide what kind of entry a parsed JSONL line is and extract timestamp +
-/// (for assistants) concatenated text-block content. Returns null when
-/// timestamp is missing/unparseable.
-fn classifyEntry(alloc: Allocator, root: std.json.Value) ?Classified {
-    if (root != .object) return null;
+/// Scanner-streamed entry classification. Walks the line in one pass,
+/// collecting timestamp/type/role plus a joined text buffer for assistant
+/// entries and a `has_tool_result` flag for user entries. Key order is not
+/// assumed -- both content and role are collected eagerly inside the
+/// message walk so the final classify-and-dispatch step at the bottom can
+/// decide regardless of which key came first.
+fn classifyEntry(alloc: Allocator, line: []const u8) ?Classified {
+    var scanner = std.json.Scanner.initCompleteInput(alloc, line);
+    defer scanner.deinit();
 
-    const ts_v = root.object.get("timestamp") orelse return null;
-    if (ts_v != .string or ts_v.string.len == 0) return null;
-    const ts = main.parseTs(ts_v.string) catch return null;
+    if (!(main.enterObject(&scanner) catch return null)) return null;
 
-    // `type: "user"` entries are user prompts OR tool_results-tagged-as-user.
-    const type_v = root.object.get("type");
-    if (type_v) |tv| {
-        if (tv == .string and std.mem.eql(u8, tv.string, "user")) {
-            // Peek at message.content. If array containing a tool_result block,
-            // treat as tool_result-as-user (NOT idle). Otherwise treat as a
-            // real user prompt -- including the bare-string variant (older
-            // user-prompt format dumps `content` as a plain string).
-            const msg_v = root.object.get("message");
-            const content_v: ?std.json.Value = blk: {
-                if (msg_v) |mv| {
-                    if (mv == .object) {
-                        if (mv.object.get("content")) |c| break :blk c;
-                    }
+    var ts: ?f64 = null;
+    var type_is_user = false;
+    var role_is_assistant = false;
+    var has_tool_result = false;
+    var text_buf: std.ArrayList(u8) = .empty;
+    var text_first = true;
+
+    while (true) {
+        const key = (main.parseObjectKey(&scanner, alloc) catch return null) orelse break;
+        if (std.mem.eql(u8, key, "timestamp")) {
+            const v = main.parseStringValue(&scanner, alloc) catch return null;
+            if (v) |s| ts = main.parseTs(s) catch return null;
+        } else if (std.mem.eql(u8, key, "type")) {
+            const v = main.parseStringValue(&scanner, alloc) catch return null;
+            if (v) |s| type_is_user = std.mem.eql(u8, s, "user");
+        } else if (std.mem.eql(u8, key, "message")) {
+            if (!(main.enterObject(&scanner) catch return null)) continue;
+            while (true) {
+                const mkey = (main.parseObjectKey(&scanner, alloc) catch return null) orelse break;
+                if (std.mem.eql(u8, mkey, "role")) {
+                    const v = main.parseStringValue(&scanner, alloc) catch return null;
+                    if (v) |s| role_is_assistant = std.mem.eql(u8, s, "assistant");
+                } else if (std.mem.eql(u8, mkey, "content")) {
+                    walkContentForClassify(&scanner, alloc, &text_buf, &text_first, &has_tool_result) catch return null;
+                } else {
+                    scanner.skipValue() catch return null;
                 }
-                break :blk null;
-            };
-            const is_tool_result = userContentIsToolResult(content_v);
-            return .{
-                .ts = ts,
-                .kind = if (is_tool_result) .user_tool_result else .user_real,
-                .text = null,
-            };
+            }
+        } else {
+            scanner.skipValue() catch return null;
         }
     }
 
-    // Assistant detection by `message.role`.
-    const msg_v = root.object.get("message") orelse return .{ .ts = ts, .kind = .other, .text = null };
-    if (msg_v != .object) return .{ .ts = ts, .kind = .other, .text = null };
-    const msg = msg_v.object;
-    const role = msg.get("role") orelse return .{ .ts = ts, .kind = .other, .text = null };
-    if (role != .string or !std.mem.eql(u8, role.string, "assistant")) {
-        return .{ .ts = ts, .kind = .other, .text = null };
-    }
+    const t = ts orelse return null;
 
-    // Concatenate text-block content. Assistant content is always an array
-    // of content blocks in observed corpora; bare-string is a user-only case.
-    const content_v = msg.get("content") orelse return .{ .ts = ts, .kind = .assistant, .text = null };
-    if (content_v != .array) return .{ .ts = ts, .kind = .assistant, .text = null };
-
-    var buf: std.ArrayList(u8) = .empty;
-    var first = true;
-    for (content_v.array.items) |block| {
-        if (block != .object) continue;
-        const tv = block.object.get("type") orelse continue;
-        if (tv != .string or !std.mem.eql(u8, tv.string, "text")) continue;
-        const txt_v = block.object.get("text") orelse continue;
-        if (txt_v != .string) continue;
-        if (!first) buf.append(alloc, '\n') catch return null;
-        first = false;
-        buf.appendSlice(alloc, txt_v.string) catch return null;
+    if (type_is_user) {
+        return .{
+            .ts = t,
+            .kind = if (has_tool_result) .user_tool_result else .user_real,
+            .text = null,
+        };
     }
-    const owned = buf.toOwnedSlice(alloc) catch return null;
-    return .{ .ts = ts, .kind = .assistant, .text = owned };
+    if (role_is_assistant) {
+        const text: ?[]u8 = if (text_first) null else (text_buf.toOwnedSlice(alloc) catch return null);
+        return .{ .ts = t, .kind = .assistant, .text = text };
+    }
+    return .{ .ts = t, .kind = .other, .text = null };
 }
 
-/// True iff `content` is an array containing at least one `tool_result` block.
-/// Bare-string and missing content return false (those are real user prompts,
-/// not tool results).
-fn userContentIsToolResult(content: ?std.json.Value) bool {
-    const c = content orelse return false;
-    if (c != .array) return false; // bare string or absent => not a tool result
-    for (c.array.items) |block| {
-        if (block != .object) continue;
-        const tv = block.object.get("type") orelse continue;
-        if (tv == .string and std.mem.eql(u8, tv.string, "tool_result")) return true;
+/// Walk a content value (which may be a bare string, an array of content
+/// blocks, or something else). Builds joined "\n"-separated text for
+/// `type: "text"` blocks and sets `has_tool_result` when any `tool_result`
+/// block is seen. Bare-string content is collected as text too -- harmless
+/// for user_real entries (text is discarded) and matches the legacy code's
+/// "extract text where present" semantics.
+fn walkContentForClassify(
+    scanner: *std.json.Scanner,
+    alloc: Allocator,
+    text_buf: *std.ArrayList(u8),
+    text_first: *bool,
+    has_tool_result: *bool,
+) !void {
+    const peek = try scanner.peekNextTokenType();
+    switch (peek) {
+        .string => {
+            if (try main.parseStringValue(scanner, alloc)) |s| {
+                if (!text_first.*) try text_buf.append(alloc, '\n');
+                text_first.* = false;
+                try text_buf.appendSlice(alloc, s);
+            }
+        },
+        .array_begin => {
+            _ = try scanner.next();
+            while (true) {
+                const block_peek = try scanner.peekNextTokenType();
+                if (block_peek == .array_end) {
+                    _ = try scanner.next();
+                    break;
+                }
+                if (block_peek != .object_begin) {
+                    try scanner.skipValue();
+                    continue;
+                }
+                _ = try scanner.next();
+                var block_type: ?[]const u8 = null;
+                var block_text: ?[]const u8 = null;
+                while (true) {
+                    const bkey = (try main.parseObjectKey(scanner, alloc)) orelse break;
+                    if (std.mem.eql(u8, bkey, "type")) {
+                        block_type = try main.parseStringValue(scanner, alloc);
+                    } else if (std.mem.eql(u8, bkey, "text")) {
+                        block_text = try main.parseStringValue(scanner, alloc);
+                    } else {
+                        try scanner.skipValue();
+                    }
+                }
+                if (block_type) |bt| {
+                    if (std.mem.eql(u8, bt, "tool_result")) {
+                        has_tool_result.* = true;
+                    } else if (std.mem.eql(u8, bt, "text")) {
+                        if (block_text) |txt| {
+                            if (!text_first.*) try text_buf.append(alloc, '\n');
+                            text_first.* = false;
+                            try text_buf.appendSlice(alloc, txt);
+                        }
+                    }
+                }
+            }
+        },
+        else => try scanner.skipValue(),
     }
-    return false;
 }
 
 /// Sum the portion of [lo, hi] occupied by gaps that immediately precede a
@@ -419,12 +464,6 @@ fn computeIdleInWindow(events: []const Event, lo: f64, hi: f64) f64 {
         if (gap_hi > gap_lo) idle += gap_hi - gap_lo;
     }
     return idle;
-}
-
-fn freeBeacon(alloc: Allocator, b: Beacon) void {
-    alloc.free(b.kind);
-    alloc.free(b.summary);
-    alloc.free(b.drift);
 }
 
 // --- beacons-latest --------------------------------------------------------
@@ -548,45 +587,40 @@ pub fn runHistory(gpa: Allocator, args: [][]const u8) !void {
     const window_lo = @max(period_cutoff, parsed.win_start_unix);
 
     var grp_map = try main.discover(alloc, root, -std.math.inf(f64));
-
     const session_count = grp_map.count();
 
-    var pairs: std.ArrayList(Pair) = .empty;
+    var groups: std.ArrayList([]const []const u8) = .empty;
     var vi = grp_map.valueIterator();
     while (vi.next()) |list| {
-        var all_beacons: std.ArrayList(Found) = .empty;
-        var all_events: std.ArrayList(Event) = .empty;
-        for (list.items) |p| {
-            collectSessionEventsInPath(alloc, p, &all_beacons, &all_events);
-        }
-        std.mem.sort(Event, all_events.items, {}, cmpEventAsc);
-
-        var begin: ?Found = null;
-        var end: ?Found = null;
-        for (all_beacons.items) |f| {
-            if (f.ts < window_lo) continue;
-            if (std.mem.eql(u8, f.beacon.kind, "begin")) {
-                if (begin == null or f.ts < begin.?.ts) begin = f;
-            } else if (std.mem.eql(u8, f.beacon.kind, "end")) {
-                if (end == null or f.ts > end.?.ts) end = f;
-            }
-        }
-        if (begin != null and end != null) {
-            const b = begin.?;
-            const e = end.?;
-            if (e.ts > b.ts) {
-                const wall = e.ts - b.ts;
-                const idle = computeIdleInWindow(all_events.items, b.ts, e.ts);
-                const active = @max(0.0, wall - idle);
-                try pairs.append(alloc, .{
-                    .begin_eta = b.beacon.eta_seconds,
-                    .actual_elapsed = wall,
-                    .idle_excluded = idle,
-                    .active_elapsed = active,
-                });
-            }
-        }
+        try groups.append(alloc, list.items);
     }
+
+    // Worker pool: each worker holds its own arena (arena allocators are not
+    // thread-safe) and its own pairs list. The arenas stay alive until after
+    // the output JSON is written -- pair fields are plain f64 so the merge
+    // below copies values into the main arena cleanly.
+    const ncpu = std.Thread.getCpuCount() catch 4;
+    const nw = @min(8, ncpu);
+    const workers = try alloc.alloc(HistoryWorker, nw);
+    for (workers) |*w| w.* = .{
+        .arena = std.heap.ArenaAllocator.init(gpa),
+        .pairs = .empty,
+    };
+    defer for (workers) |*w| w.arena.deinit();
+
+    var queue_cur = std.atomic.Value(usize).init(0);
+    const threads = try alloc.alloc(std.Thread, nw);
+    for (workers, 0..) |_, i| {
+        threads[i] = try std.Thread.spawn(
+            .{},
+            historyDoWork,
+            .{ &workers[i], &queue_cur, groups.items, window_lo },
+        );
+    }
+    for (threads) |th| th.join();
+
+    var pairs: std.ArrayList(Pair) = .empty;
+    for (workers) |*w| try pairs.appendSlice(alloc, w.pairs.items);
 
     const bias = biasFactor(alloc, pairs.items);
 
@@ -623,6 +657,58 @@ const Pair = struct {
     idle_excluded: f64,
     active_elapsed: f64,
 };
+
+const HistoryWorker = struct {
+    arena: std.heap.ArenaAllocator,
+    pairs: std.ArrayList(Pair),
+};
+
+fn historyDoWork(
+    worker: *HistoryWorker,
+    queue_cur: *std.atomic.Value(usize),
+    groups: []const []const []const u8,
+    window_lo: f64,
+) void {
+    const wa = worker.arena.allocator();
+    while (true) {
+        const i = queue_cur.fetchAdd(1, .seq_cst);
+        if (i >= groups.len) break;
+        const paths = groups[i];
+
+        var all_beacons: std.ArrayList(Found) = .empty;
+        var all_events: std.ArrayList(Event) = .empty;
+        for (paths) |p| {
+            collectSessionEventsInPath(wa, p, &all_beacons, &all_events);
+        }
+        std.mem.sort(Event, all_events.items, {}, cmpEventAsc);
+
+        var begin: ?Found = null;
+        var end: ?Found = null;
+        for (all_beacons.items) |f| {
+            if (f.ts < window_lo) continue;
+            if (std.mem.eql(u8, f.beacon.kind, "begin")) {
+                if (begin == null or f.ts < begin.?.ts) begin = f;
+            } else if (std.mem.eql(u8, f.beacon.kind, "end")) {
+                if (end == null or f.ts > end.?.ts) end = f;
+            }
+        }
+        if (begin != null and end != null) {
+            const b = begin.?;
+            const e = end.?;
+            if (e.ts > b.ts) {
+                const wall = e.ts - b.ts;
+                const idle = computeIdleInWindow(all_events.items, b.ts, e.ts);
+                const active = @max(0.0, wall - idle);
+                worker.pairs.append(wa, .{
+                    .begin_eta = b.beacon.eta_seconds,
+                    .actual_elapsed = wall,
+                    .idle_excluded = idle,
+                    .active_elapsed = active,
+                }) catch {};
+            }
+        }
+    }
+}
 
 fn biasFactor(alloc: Allocator, pairs: []const Pair) ?f64 {
     if (pairs.len == 0) return null;

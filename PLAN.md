@@ -19,6 +19,14 @@
       noise, well inside the 0.001 tolerance). Conformance harness
       gained per-impl scoping for `--no-config` / `--extra-projects-root`
       so rust/go/zig stop erroring on cpp-only flags.
+- [x] Close the Zig perf gap (Scanner streaming + worker pool). All
+      three hot paths ported from `parseFromSlice(Value, ...)` to
+      `std.json.Scanner` token streaming; beacons-history + search now
+      have a `min(8, ncpu)` worker pool matching cost mode's. Net:
+      cost 313ms→148ms (2.1×), beacons-history 13.8s→769ms (18×),
+      search 11.75s→573ms (20×). Zig is now fastest in search (4.16×
+      cpp), second-fastest in beacons-history (1.12× cpp), within 2×
+      of cpp on cost. PR #6 on gitea.
 
 ## Inbox
 
@@ -105,130 +113,125 @@ valid. The cross-machine smoke test in the search spec's `## Verification`
 section targets the cpp production binary; once this port lands, it can
 optionally target rust/go/zig too.
 
-### Close the Zig perf gap
+### Parallelize search + beacons-history in C++ / Rust / Go
 
-- [ ] Replace `std.json.parseFromSlice(std.json.Value, ...)` with
-      `std.json.Scanner` zero-copy token streaming on all three Zig
-      hot paths (`main.zig` cost, `beacons.zig` history+latest,
-      `search.zig` scan). Reuse one arena per file (reset between
-      lines via `_ = arena.reset(.retain_capacity)`), not per line.
-- [ ] Add a `min(8, ncpu)` worker pool to `beacons.zig::runHistory`
-      and `search.zig::run` matching the existing cost-mode pool in
-      `main.zig`. One group per work unit; merge results after.
-- [ ] Re-run `shared/bench.py --mode cost` + `--mode beacons-history`
-      plus the search ad-hoc bench. Target: Zig within 2x of C++ in
-      every mode. Update `RESULTS.md` after.
+- [ ] Add a `min(8, ncpu)` worker pool to `cpp/search.cpp::run` and
+      `cpp/beacons.cpp::runHistory`. Cost mode already has a thread
+      pool in `cpp/main.cpp`; mirror that pattern. Worker unit = one
+      file (search) or one session group (beacons-history). Per-worker
+      simdjson `parser` is required since `parser::iterate` is not
+      thread-safe.
+- [ ] Add `rayon::par_iter` to `rust/src/search.rs` and
+      `rust/src/beacons.rs::run_history`. Mirror the cost-mode reduce
+      pattern in `rust/src/main.rs`.
+- [ ] Add a goroutine fan-out to `go/search.go::Run` and
+      `go/beacons.go::RunHistory`. Use `sync.WaitGroup` + buffered
+      channel; merge results after.
+- [ ] Re-bench all four impls; update `RESULTS.md`. Target: cpp
+      reclaims the search-mode lead (currently 4.16× behind zig); cpp
+      beacons-history stays the fastest; rust + go close their gaps to
+      cpp.
 
-**Context.** Live-fleet bench medians after the Zig search port
-(2026-05-18):
+**Context.** After PR #6 (Zig perf-gap close), zig is fastest in
+search by a wide margin because it's the only impl with a worker pool
+in that mode. The other three impls are single-threaded in search and
+beacons-history; only cost mode is parallel. Current state:
 
-| Mode                       | rust   | cpp        | go     | zig    |
-| -------------------------- | ------ | ---------- | ------ | ------ |
-| cost (8 workers)           | 119ms  | **75ms**   | 115ms  | 313ms  |
-| beacons-history (1 thread) | 976ms  | **690ms**  | 1172ms | 13.8s  |
-| search `TODO --count-only` | **1139ms** | 2411ms | 1335ms | 11.75s |
+| Mode                       | rust    | cpp       | go      | zig          |
+| -------------------------- | ------: | --------: | ------: | -----------: |
+| cost (8 workers)           | 106ms   | **81ms**  | 110ms   | 148ms        |
+| beacons-history            | 1004ms  | **685ms** | 1196ms  | 769ms (8w)   |
+| search `TODO --count-only` | 1171ms  | 2385ms    | 1322ms  | **573ms** (8w) |
 
-Zig is 4x slower than cpp in cost mode and 20x slower in
-beacons-history. The gap is *not* a parallelism gap — rust/cpp/go
-beacons + search are all single-threaded too. It's per-line JSON parse
-cost: rust uses typed `serde_json`, cpp uses `simdjson` on-demand, go
-uses `bytedance/sonic`. Zig uses `std.json.parseFromSlice(Value, ...)`
-which allocates an `ObjectMap` (StringArrayHashMap) per object plus
-dupes every string — the slowest architecture of the four. The Broch
-Web "Optimizing a JSON parser in Zig" piece reports ~86x speedup just
-from switching to an arena allocator; switching off `Value` entirely
-should compound that.
+Cpp at 2385ms in search is roughly 4× slower than zig's 573ms — that
+gap is entirely parallelism. Per-file simdjson parse cost is already
+near optimal; throwing 8 cores at it should drop cpp to ~300ms (best-
+case linear scaling, more realistically ~400-450ms accounting for
+discovery overhead). Same logic applies to rust and go's
+beacons-history + search.
 
-**Diagnosis (per Zig hot path).**
+**Reference.** Existing cost-mode parallelism patterns:
 
-- `main.zig::processLine` — `parseFromSlice(Value, alloc, line, ...)`
-  + `defer parsed.deinit()` per line, even though the per-group arena
-  is already pooling. Touches `message.role`, `message.id`,
-  `timestamp`, `message.model`, `message.usage.{input,output,cache_read,cache_write}_tokens`
-  — five string keys, four numbers. Five-field Scanner walk is a
-  drop-in replacement.
-- `beacons.zig::classifyEntry` — same `parseFromSlice(Value, ...)`
-  then walks `message.content` to extract text blocks AND dupes
-  `kind` / `summary` / `drift` strings per Beacon. Per-beacon string
-  dup is unnecessary when the beacon is consumed immediately by
-  `writeJson`.
-- `search.zig::scanFile` (this PR) — same pattern. Worse: calls
-  `extractText` twice per line (once for default, once for
-  with-tools) PLUS `isOnlyToolBlocks` — three passes over the content
-  array. Defer redundant passes.
+- `cpp/main.cpp` — `std::thread` pool, `std::atomic<size_t>` for
+  queue index, `std::mutex` on the accumulator. Each thread holds its
+  own `simdjson::ondemand::parser`.
+- `rust/src/main.rs` — `rayon::par_iter().reduce(|| Acc::default(),
+  ...)`. One line if the work unit is independent.
+- `go/main.go` — goroutines + `sync.WaitGroup`. Each goroutine has a
+  local accumulator; merge after `wg.Wait()`.
+- `zig/src/beacons.zig::runHistory` (this PR) and
+  `zig/src/search.zig::run` (this PR) — for cross-language reference
+  on per-worker arena + atomic-index queue + result merge.
 
 **Fix path, cheapest → most invasive.**
 
-1. **Scanner streaming.** Replace `parseFromSlice(Value)` with
-   `std.json.Scanner.initCompleteInput(alloc, line)` and dispatch on
-   token type. Token strings reference the input slice (zero-copy)
-   when allocation is `.alloc_if_needed` and the input is held in
-   memory — which it is, since we read the whole file into a `[]u8`.
-   Expected: 3-10x speedup on the parse step alone, no library
-   dependency added.
-2. **Arena hygiene.** Hoist the `ArenaAllocator` out of per-line
-   scope; reset between lines instead of init/deinit per line.
-   Already done in `main.zig` (per-group arena via `Wctx`) but NOT
-   in `beacons.zig::scanEntry` (uses `parsed.deinit()` per line) or
-   `search.zig::scanFile` (single big arena, but `parsed.deinit` per
-   line). Reuse the arena, drop the per-line deinit.
-3. **Worker pool for beacons + search.** Lift `main.zig`'s `Queue`
-   + `Accum` + `doWork` pattern into a generic helper, fan groups
-   out across `min(8, ncpu)` workers. Group-level work is already
-   independent (per-group dedup + per-group beacon collection).
-   Expected: roughly Nx where N is core count, on top of the parse
-   speedup.
-4. **One-pass content scan in search.** Combine `extractText(default)`
-   + `extractText(with_tools)` + `isOnlyToolBlocks` into a single
-   walk over `message.content`. Currently three iterations; one is
-   enough. Smaller win (~10-20%) but easy.
-5. **Last resort: zimdjson.** If steps 1-4 don't close the gap, the
-   simdjson-port [zimdjson](https://github.com/EzequielRamis/zimdjson)
-   (active, Zig 0.14+) is the heavyweight fallback. Adds a build
-   dependency and pulls Zig out of "zero deps" territory — only do
-   this if the stdlib `Scanner` approach plateaus above the 2x-of-cpp
-   target. Worth a microbench-of-one-fixture first so we know whether
-   the dependency is buying real perf or marginal noise.
+1. **cpp search.** Most impactful (biggest current gap). Take
+   `cpp/main.cpp`'s thread pool, extract to a small shared helper,
+   reuse in `search.cpp::run`. Each thread needs its own
+   `simdjson::ondemand::parser` (the parser holds intermediate state
+   in `string_buf` that is not thread-safe). Local hits list per
+   thread, merge before sort.
+2. **cpp beacons-history.** Same pattern, work unit = session group
+   from `discover()`. Pairs are pure f64 — no string-lifetime issues
+   on merge.
+3. **rust search + beacons-history.** Add `rayon::par_iter` over the
+   file list (search) / group list (beacons-history). Hit/pair types
+   already own their fields; merge is a flat-map.
+4. **go search + beacons-history.** Goroutine fan-out + buffered
+   channel + waitgroup. Sonic's `Unmarshal` is thread-safe per
+   docs/source — no per-goroutine parser needed.
 
 **Risks / non-obvious.**
 
-- `std.json.Scanner` with `.alloc_if_needed` only avoids dup when a
-  token doesn't span a buffer boundary. With `initCompleteInput`
-  (whole line in memory) this should always be the case, but
-  field-name comparisons need to handle the slice-into-input lifetime
-  correctly — extract by reference, copy out only the fields kept
-  past the line (`timestamp_str`, `role`, the joined text). Test the
-  bare-string user-content path explicitly (the Rust port's
-  string-vs-array fallback) since Scanner doesn't auto-coerce.
-- Worker-pool addition for `beacons-history` interacts with the
-  global event-sort step (each group sorts its own events;
-  cross-group ordering doesn't matter for `bias_factor` calc).
-  Verify with a conformance rerun after the change — the harness's
-  order-independent `pairs_key` sort guards against ordering churn.
-- The cost-mode arena is reset *per group*, not per file. Beacons +
-  search currently allocate per *call*. Don't blindly copy cost's
-  pattern — search's per-file scan accumulates `ScanMessage`s that
-  are consumed in `processFile` and then becomes garbage; per-file
-  arena reset is the right granularity there.
+- **simdjson parser is NOT thread-safe** even for read-only use:
+  `parser` owns mutable internal buffers reused across `iterate`
+  calls. Per-thread parser is mandatory; this is the only real
+  porting surface for cpp.
+- **`std::regex` is the second bottleneck in cpp search,** not the
+  parser. The 2385ms median splits roughly 60% simdjson + 40%
+  std::regex (estimate; verify with a profiler before assuming).
+  Parallelization closes the parse half; a separate follow-up could
+  swap `std::regex` for `re2` or a custom matcher. **Decide whether
+  to fold that in or punt it to a separate PR after measuring.**
+- **rust's serde_json is already typed-Deserialize**, so per-line
+  parse cost is lower than cpp's simdjson, but rust is still
+  single-threaded in search. The lower per-line cost means rayon's
+  win may be smaller in absolute ms; benchmark before claiming a
+  target speedup.
+- **go's discovery is a single goroutine** walking the filesystem
+  via `filepath.Walk`. With parallel scanning, the discovery becomes
+  the new bottleneck — measure whether it's worth parallelizing the
+  walk too (probably not; disk seek is sequential anyway).
+- **Hit ordering must be deterministic** across runs. After the
+  fan-out, sort hits using the existing `hitLessThan` (or per-lang
+  equivalent) before truncation to `--limit`. Conformance fixtures
+  pin output order via the harness's order-independent diff, but
+  human users expect "most recent first" stability.
 
 **Verification.**
 
-- `python shared/conformance.py rust cpp go zig` must stay clean
-  after every step (cost + beacons-latest + beacons-history + 17
-  search combos). Don't merge a perf change that breaks conformance
-  even by one fixture.
-- `python shared/bench.py --mode cost rust cpp go zig --no-python`
-  + `--mode beacons-history` re-run with 5-run medians.
-- Re-create the search ad-hoc bench (was a one-off, deleted at PR
-  close) — small script under `.claude/scripts/` is fine; don't
-  promote to `shared/bench.py` yet.
-- Update `RESULTS.md` with the new numbers and a language-level note
-  (e.g. "std.json materializes a Value tree; Scanner streaming closed
-  N% of the gap before any threading change").
+- `python shared/conformance.py rust cpp go zig` clean across all 4
+  impls after each parallelization step.
+- `python shared/bench.py --mode cost rust cpp go zig --no-python` +
+  `--mode beacons-history`: re-run with 5-run medians.
+- `python .claude/scripts/bench-search.py` (kept from PR #6): 5-run
+  search bench against the live fleet.
+- Update `RESULTS.md`:
+  - Refresh the cross-mode table at the top
+  - Add a "What changed in the parallelize-cpp/rust/go pass" section
+    mirroring the "Zig perf-gap pass" section's structure
+- Spot-check `--limit` ordering by comparing pre/post-PR hit
+  sequences for `walker search TODO --limit 5`: top-N should be
+  identical.
 
-**Out of scope here.** Don't rewrite C++/Rust/Go — they're at the
-ceiling of their respective JSON libraries. Don't switch Zig away
-from "zero deps + stdlib only" unless step 5 is taken. Don't touch
-the regex matcher in `search.zig` — its allocator hot path is
-negligible vs JSON parsing (the disproportionate beacons-history gap,
-which uses no regex, proves where the cost is).
+**Out of scope here.** Don't replace `std::regex` with re2 unless
+profiling proves it's blocking the parallelization win. Don't touch
+zig — it's already parallel. Don't refactor discovery into a thread
+pool (disk-bound, not CPU-bound).
+
+**Pointer for the next agent.** Read the worker-pool pattern in
+`zig/src/beacons.zig::runHistory` (just-shipped in PR #6, lines
+~536-590) and `zig/src/search.zig::run` (lines ~1130-1160) as the
+cross-language reference. The shape is identical across all four
+languages: per-worker arena/state, atomic queue index, local results
+list, merge-then-sort after join.

@@ -543,108 +543,123 @@ fn writeJsonString(w: *Buf, s: []const u8) !void {
     try w.appendStr("\"");
 }
 
-// Serialize a std.json.Value back to a JSON string. Used for tool_use.input
-// which the reference impls dump verbatim with include-tool-blocks.
-fn writeJsonValue(w: *Buf, v: std.json.Value) !void {
-    switch (v) {
-        .null => try w.appendStr("null"),
-        .bool => |b| try w.appendStr(if (b) "true" else "false"),
-        .integer => |n| try w.appendFmt("{d}", .{n}),
-        .float => |f| try w.appendFmt("{d}", .{f}),
-        .number_string => |s| try w.appendStr(s),
-        .string => |s| try writeJsonString(w, s),
-        .array => |arr| {
-            try w.appendStr("[");
-            for (arr.items, 0..) |item, k| {
-                if (k > 0) try w.appendStr(",");
-                try writeJsonValue(w, item);
-            }
-            try w.appendStr("]");
-        },
-        .object => |obj| {
-            try w.appendStr("{");
-            var first = true;
-            var it = obj.iterator();
-            while (it.next()) |kv| {
-                if (!first) try w.appendStr(",");
-                first = false;
-                try writeJsonString(w, kv.key_ptr.*);
-                try w.appendStr(":");
-                try writeJsonValue(w, kv.value_ptr.*);
-            }
-            try w.appendStr("}");
-        },
-    }
-}
-
-// ─── Content extraction ──────────────────────────────────────────────────────
-
-// Concatenate text-block content into a single string with "\n" between blocks.
-// With `include_tool_blocks`, also pulls tool_use.input (JSON-stringified) and
-// tool_result.content (string or text-block array).
-fn extractText(alloc: Allocator, content: std.json.Value, include_tool_blocks: bool) ![]u8 {
-    if (content == .string) {
-        return alloc.dupe(u8, content.string);
-    }
-    if (content != .array) return alloc.dupe(u8, "");
-
+// Echo a JSON value via Scanner tokens into `buf`. Used for tool_use.input
+// which the reference impls dump verbatim with include-tool-blocks. Number
+// formatting mirrors the prior `writeJsonValue`: integers raw, floats
+// reformatted through `{d}` so `1e3` becomes `1000` (matches the
+// parseFromSlice round-trip).
+fn dumpValueAsJson(scanner: *std.json.Scanner, alloc: Allocator) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(alloc);
-    var first = true;
-
-    for (content.array.items) |block| {
-        if (block != .object) continue;
-        const tv = block.object.get("type") orelse continue;
-        if (tv != .string) continue;
-        const t = tv.string;
-        if (std.mem.eql(u8, t, "text")) {
-            const txt = block.object.get("text") orelse continue;
-            if (txt != .string) continue;
-            if (!first) try buf.append(alloc, '\n');
-            first = false;
-            try buf.appendSlice(alloc, txt.string);
-        } else if (include_tool_blocks and std.mem.eql(u8, t, "tool_use")) {
-            const input = block.object.get("input") orelse continue;
-            var w = Buf{ .alloc = alloc };
-            defer w.list.deinit(alloc);
-            try writeJsonValue(&w, input);
-            if (!first) try buf.append(alloc, '\n');
-            first = false;
-            try buf.appendSlice(alloc, w.items());
-        } else if (include_tool_blocks and std.mem.eql(u8, t, "tool_result")) {
-            const c = block.object.get("content") orelse continue;
-            if (c == .string) {
-                if (!first) try buf.append(alloc, '\n');
-                first = false;
-                try buf.appendSlice(alloc, c.string);
-            } else if (c == .array) {
-                for (c.array.items) |ib| {
-                    if (ib != .object) continue;
-                    const itv = ib.object.get("type") orelse continue;
-                    if (itv != .string or !std.mem.eql(u8, itv.string, "text")) continue;
-                    const itx = ib.object.get("text") orelse continue;
-                    if (itx != .string) continue;
-                    if (!first) try buf.append(alloc, '\n');
-                    first = false;
-                    try buf.appendSlice(alloc, itx.string);
-                }
-            }
-        }
-    }
+    try dumpValueInto(scanner, alloc, &buf);
     return buf.toOwnedSlice(alloc);
 }
 
-fn isOnlyToolBlocks(content: std.json.Value) bool {
-    if (content != .array) return false;
-    if (content.array.items.len == 0) return false;
-    for (content.array.items) |block| {
-        if (block != .object) return false;
-        const tv = block.object.get("type") orelse return false;
-        if (tv != .string) return false;
-        const t = tv.string;
-        if (!std.mem.eql(u8, t, "tool_use") and !std.mem.eql(u8, t, "tool_result")) return false;
+fn dumpValueInto(scanner: *std.json.Scanner, alloc: Allocator, buf: *std.ArrayList(u8)) !void {
+    const peek = try scanner.peekNextTokenType();
+    switch (peek) {
+        .object_begin => {
+            _ = try scanner.next();
+            try buf.append(alloc, '{');
+            var first = true;
+            while (true) {
+                const kt = try scanner.nextAlloc(alloc, .alloc_if_needed);
+                const key: []const u8 = switch (kt) {
+                    .object_end => break,
+                    .string => |s| s,
+                    .allocated_string => |s| s,
+                    else => return error.UnexpectedToken,
+                };
+                if (!first) try buf.append(alloc, ',');
+                first = false;
+                try writeJsonStringInto(buf, alloc, key);
+                try buf.append(alloc, ':');
+                try dumpValueInto(scanner, alloc, buf);
+            }
+            try buf.append(alloc, '}');
+        },
+        .array_begin => {
+            _ = try scanner.next();
+            try buf.append(alloc, '[');
+            var first = true;
+            while (true) {
+                const ep = try scanner.peekNextTokenType();
+                if (ep == .array_end) {
+                    _ = try scanner.next();
+                    break;
+                }
+                if (!first) try buf.append(alloc, ',');
+                first = false;
+                try dumpValueInto(scanner, alloc, buf);
+            }
+            try buf.append(alloc, ']');
+        },
+        .string => {
+            const t = try scanner.nextAlloc(alloc, .alloc_if_needed);
+            const s: []const u8 = switch (t) {
+                .string => |x| x,
+                .allocated_string => |x| x,
+                else => return error.UnexpectedToken,
+            };
+            try writeJsonStringInto(buf, alloc, s);
+        },
+        .number => {
+            const t = try scanner.nextAlloc(alloc, .alloc_if_needed);
+            const s: []const u8 = switch (t) {
+                .number => |x| x,
+                .allocated_number => |x| x,
+                else => return error.UnexpectedToken,
+            };
+            if (std.fmt.parseInt(i64, s, 10)) |_| {
+                try buf.appendSlice(alloc, s);
+            } else |_| {
+                if (std.fmt.parseFloat(f64, s)) |f| {
+                    const fmt = try std.fmt.allocPrint(alloc, "{d}", .{f});
+                    try buf.appendSlice(alloc, fmt);
+                } else |_| {
+                    try buf.appendSlice(alloc, s);
+                }
+            }
+        },
+        .true => {
+            _ = try scanner.next();
+            try buf.appendSlice(alloc, "true");
+        },
+        .false => {
+            _ = try scanner.next();
+            try buf.appendSlice(alloc, "false");
+        },
+        .null => {
+            _ = try scanner.next();
+            try buf.appendSlice(alloc, "null");
+        },
+        else => return error.UnexpectedToken,
     }
-    return true;
+}
+
+fn writeJsonStringInto(buf: *std.ArrayList(u8), alloc: Allocator, s: []const u8) !void {
+    try buf.append(alloc, '"');
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        switch (c) {
+            '"' => try buf.appendSlice(alloc, "\\\""),
+            '\\' => try buf.appendSlice(alloc, "\\\\"),
+            '\n' => try buf.appendSlice(alloc, "\\n"),
+            '\r' => try buf.appendSlice(alloc, "\\r"),
+            '\t' => try buf.appendSlice(alloc, "\\t"),
+            8 => try buf.appendSlice(alloc, "\\b"),
+            12 => try buf.appendSlice(alloc, "\\f"),
+            else => {
+                if (c < 0x20) {
+                    const escaped = try std.fmt.allocPrint(alloc, "\\u{x:0>4}", .{c});
+                    try buf.appendSlice(alloc, escaped);
+                } else {
+                    try buf.append(alloc, c);
+                }
+            },
+        }
+    }
+    try buf.append(alloc, '"');
 }
 
 // ─── Per-file scan ───────────────────────────────────────────────────────────
@@ -661,7 +676,10 @@ const ScanMessage = struct {
 
 fn scanFile(alloc: Allocator, path: []const u8) ![]ScanMessage {
     const data = main.readEntireFile(alloc, path) catch return alloc.alloc(ScanMessage, 0);
-    defer alloc.free(data);
+    // Don't free `data`: slices into it (timestamp_str, role) live on in the
+    // returned ScanMessages until the arena reclaims them. With an arena
+    // allocator `alloc.free` is a no-op anyway, but dropping the defer makes
+    // the lifetime story explicit.
 
     var out: std.ArrayList(ScanMessage) = .empty;
     errdefer out.deinit(alloc);
@@ -673,49 +691,233 @@ fn scanFile(alloc: Allocator, path: []const u8) ![]ScanMessage {
         const line = std.mem.trim(u8, raw, " \t\r\n");
         if (line.len == 0) continue;
 
-        const parsed = std.json.parseFromSlice(
-            std.json.Value,
-            alloc,
-            line,
-            .{ .ignore_unknown_fields = true },
-        ) catch continue;
-        defer parsed.deinit();
-
-        const root = parsed.value;
-        if (root != .object) continue;
-
-        const msg_v = root.object.get("message") orelse continue;
-        if (msg_v != .object) continue;
-        const role_v = msg_v.object.get("role") orelse continue;
-        if (role_v != .string or role_v.string.len == 0) continue;
-        const content_v = msg_v.object.get("content") orelse continue;
-
-        var ts_str_owned: []u8 = try alloc.dupe(u8, "");
-        var ts: ?f64 = null;
-        if (root.object.get("timestamp")) |t| {
-            if (t == .string and t.string.len > 0) {
-                alloc.free(ts_str_owned);
-                ts_str_owned = try alloc.dupe(u8, t.string);
-                ts = main.parseTs(t.string) catch null;
-            }
+        if (try parseScanMessage(alloc, line, idx)) |m| {
+            try out.append(alloc, m);
         }
-
-        const text_default = try extractText(alloc, content_v, false);
-        const text_with_tools = try extractText(alloc, content_v, true);
-        const only_tool = isOnlyToolBlocks(content_v);
-        const role_owned = try alloc.dupe(u8, role_v.string);
-
-        try out.append(alloc, .{
-            .line_number = idx,
-            .timestamp = ts,
-            .timestamp_str = ts_str_owned,
-            .role = role_owned,
-            .text_default = text_default,
-            .text_with_tools = text_with_tools,
-            .is_only_tool_blocks = only_tool,
-        });
     }
     return out.toOwnedSlice(alloc);
+}
+
+/// Single-pass Scanner walk that produces both `text_default` and
+/// `text_with_tools` plus the `is_only_tool_blocks` flag. Returns null when
+/// the entry is missing the structural fields a hit requires (role,
+/// content). Key order is not assumed -- both role and content are
+/// collected eagerly inside the message walk.
+fn parseScanMessage(alloc: Allocator, line: []const u8, idx: u32) !?ScanMessage {
+    var scanner = std.json.Scanner.initCompleteInput(alloc, line);
+    defer scanner.deinit();
+
+    if (!(try main.enterObject(&scanner))) return null;
+
+    var ts_str: []const u8 = "";
+    var ts: ?f64 = null;
+    var role: ?[]const u8 = null;
+    var have_content = false;
+    var content_was_array = false;
+    var total_blocks: usize = 0;
+    var tool_blocks: usize = 0;
+    var text_default: std.ArrayList(u8) = .empty;
+    var text_with_tools: std.ArrayList(u8) = .empty;
+    var text_default_first = true;
+    var text_with_tools_first = true;
+
+    while (true) {
+        const key = (try main.parseObjectKey(&scanner, alloc)) orelse break;
+        if (std.mem.eql(u8, key, "timestamp")) {
+            const v = try main.parseStringValue(&scanner, alloc);
+            if (v) |s| {
+                if (s.len > 0) {
+                    ts_str = s;
+                    ts = main.parseTs(s) catch null;
+                }
+            }
+        } else if (std.mem.eql(u8, key, "message")) {
+            if (!(try main.enterObject(&scanner))) continue;
+            while (true) {
+                const mkey = (try main.parseObjectKey(&scanner, alloc)) orelse break;
+                if (std.mem.eql(u8, mkey, "role")) {
+                    role = try main.parseStringValue(&scanner, alloc);
+                } else if (std.mem.eql(u8, mkey, "content")) {
+                    have_content = true;
+                    try walkContentSearch(
+                        &scanner,
+                        alloc,
+                        &text_default,
+                        &text_with_tools,
+                        &text_default_first,
+                        &text_with_tools_first,
+                        &total_blocks,
+                        &tool_blocks,
+                        &content_was_array,
+                    );
+                } else {
+                    try scanner.skipValue();
+                }
+            }
+        } else {
+            try scanner.skipValue();
+        }
+    }
+
+    const r = role orelse return null;
+    if (r.len == 0) return null;
+    if (!have_content) return null;
+
+    // Matches isOnlyToolBlocks: array, non-empty, every block is tool_use|tool_result.
+    const only_tool = content_was_array and total_blocks > 0 and total_blocks == tool_blocks;
+
+    return ScanMessage{
+        .line_number = idx,
+        .timestamp = ts,
+        .timestamp_str = ts_str,
+        .role = r,
+        .text_default = try text_default.toOwnedSlice(alloc),
+        .text_with_tools = try text_with_tools.toOwnedSlice(alloc),
+        .is_only_tool_blocks = only_tool,
+    };
+}
+
+/// One-pass walk of `message.content`. Builds `text_default` (text blocks
+/// only) and `text_with_tools` (text + tool_use.input + tool_result.content)
+/// simultaneously, while counting blocks for the `is_only_tool_blocks`
+/// flag. Each content-derived snippet appended is separated by "\n" from
+/// the previous append into the same buf, matching the legacy
+/// `extractText` behavior (including separating inner tool_result text
+/// items individually rather than as one joined block).
+fn walkContentSearch(
+    scanner: *std.json.Scanner,
+    alloc: Allocator,
+    text_default: *std.ArrayList(u8),
+    text_with_tools: *std.ArrayList(u8),
+    text_default_first: *bool,
+    text_with_tools_first: *bool,
+    total_blocks: *usize,
+    tool_blocks: *usize,
+    content_was_array: *bool,
+) !void {
+    const peek = try scanner.peekNextTokenType();
+    switch (peek) {
+        .string => {
+            // Bare-string content: extractText returned it directly for both
+            // default and with-tools modes. Match that.
+            if (try main.parseStringValue(scanner, alloc)) |s| {
+                try text_default.appendSlice(alloc, s);
+                text_default_first.* = false;
+                try text_with_tools.appendSlice(alloc, s);
+                text_with_tools_first.* = false;
+            }
+        },
+        .array_begin => {
+            content_was_array.* = true;
+            _ = try scanner.next();
+            while (true) {
+                const bp = try scanner.peekNextTokenType();
+                if (bp == .array_end) {
+                    _ = try scanner.next();
+                    break;
+                }
+                if (bp != .object_begin) {
+                    try scanner.skipValue();
+                    continue;
+                }
+                _ = try scanner.next();
+                total_blocks.* += 1;
+
+                var block_type: ?[]const u8 = null;
+                var block_text: ?[]const u8 = null;
+                var tool_use_input_serialized: ?[]u8 = null;
+                var tool_result_string: ?[]const u8 = null;
+                var tool_result_array_lines: std.ArrayList([]const u8) = .empty;
+
+                while (true) {
+                    const bkey = (try main.parseObjectKey(scanner, alloc)) orelse break;
+                    if (std.mem.eql(u8, bkey, "type")) {
+                        block_type = try main.parseStringValue(scanner, alloc);
+                    } else if (std.mem.eql(u8, bkey, "text")) {
+                        block_text = try main.parseStringValue(scanner, alloc);
+                    } else if (std.mem.eql(u8, bkey, "input")) {
+                        tool_use_input_serialized = try dumpValueAsJson(scanner, alloc);
+                    } else if (std.mem.eql(u8, bkey, "content")) {
+                        const cp = try scanner.peekNextTokenType();
+                        if (cp == .string) {
+                            tool_result_string = try main.parseStringValue(scanner, alloc);
+                        } else if (cp == .array_begin) {
+                            _ = try scanner.next();
+                            while (true) {
+                                const ip = try scanner.peekNextTokenType();
+                                if (ip == .array_end) {
+                                    _ = try scanner.next();
+                                    break;
+                                }
+                                if (ip != .object_begin) {
+                                    try scanner.skipValue();
+                                    continue;
+                                }
+                                _ = try scanner.next();
+                                var inner_type: ?[]const u8 = null;
+                                var inner_text: ?[]const u8 = null;
+                                while (true) {
+                                    const ikey = (try main.parseObjectKey(scanner, alloc)) orelse break;
+                                    if (std.mem.eql(u8, ikey, "type")) {
+                                        inner_type = try main.parseStringValue(scanner, alloc);
+                                    } else if (std.mem.eql(u8, ikey, "text")) {
+                                        inner_text = try main.parseStringValue(scanner, alloc);
+                                    } else {
+                                        try scanner.skipValue();
+                                    }
+                                }
+                                if (inner_type) |it| {
+                                    if (std.mem.eql(u8, it, "text")) {
+                                        if (inner_text) |t| {
+                                            try tool_result_array_lines.append(alloc, t);
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            try scanner.skipValue();
+                        }
+                    } else {
+                        try scanner.skipValue();
+                    }
+                }
+
+                if (block_type) |bt| {
+                    if (std.mem.eql(u8, bt, "text")) {
+                        if (block_text) |txt| {
+                            if (!text_default_first.*) try text_default.append(alloc, '\n');
+                            text_default_first.* = false;
+                            try text_default.appendSlice(alloc, txt);
+                            if (!text_with_tools_first.*) try text_with_tools.append(alloc, '\n');
+                            text_with_tools_first.* = false;
+                            try text_with_tools.appendSlice(alloc, txt);
+                        }
+                    } else if (std.mem.eql(u8, bt, "tool_use")) {
+                        tool_blocks.* += 1;
+                        if (tool_use_input_serialized) |inp| {
+                            if (!text_with_tools_first.*) try text_with_tools.append(alloc, '\n');
+                            text_with_tools_first.* = false;
+                            try text_with_tools.appendSlice(alloc, inp);
+                        }
+                    } else if (std.mem.eql(u8, bt, "tool_result")) {
+                        tool_blocks.* += 1;
+                        if (tool_result_string) |s| {
+                            if (!text_with_tools_first.*) try text_with_tools.append(alloc, '\n');
+                            text_with_tools_first.* = false;
+                            try text_with_tools.appendSlice(alloc, s);
+                        } else if (tool_result_array_lines.items.len > 0) {
+                            for (tool_result_array_lines.items) |t| {
+                                if (!text_with_tools_first.*) try text_with_tools.append(alloc, '\n');
+                                text_with_tools_first.* = false;
+                                try text_with_tools.appendSlice(alloc, t);
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        else => try scanner.skipValue(),
+    }
 }
 
 // ─── Discovery ───────────────────────────────────────────────────────────────
@@ -1048,6 +1250,29 @@ fn processFile(
     }
 }
 
+// ─── Worker pool ─────────────────────────────────────────────────────────────
+
+const SearchWorker = struct {
+    arena: std.heap.ArenaAllocator,
+    hits: std.ArrayList(Hit),
+};
+
+fn searchDoWork(
+    worker: *SearchWorker,
+    queue_cur: *std.atomic.Value(usize),
+    files: []const DiscoveredFile,
+    args: SearchArgs,
+    pattern: *const Pattern,
+) void {
+    const wa = worker.arena.allocator();
+    while (true) {
+        const i = queue_cur.fetchAdd(1, .seq_cst);
+        if (i >= files.len) break;
+        const f = files[i];
+        processFile(wa, f, args, pattern, &worker.hits) catch {};
+    }
+}
+
 // ─── Sort + dedup ────────────────────────────────────────────────────────────
 
 fn hitLessThan(_: void, a: Hit, b: Hit) bool {
@@ -1133,10 +1358,32 @@ pub fn run(gpa: Allocator, argv: [][]const u8) !void {
     const host_root = args.projects_root;
     const roots_walked: u64 = 1;
 
-    var hits: std.ArrayList(Hit) = .empty;
-    for (files) |f| {
-        try processFile(alloc, f, args, &pattern, &hits);
+    // Worker pool: each worker scans a subset of files using its own arena
+    // (arena allocators are not thread-safe). Worker arenas hold the Hit
+    // string slices (snippets, context turns, etc.) and stay alive via the
+    // bottom defer until after the output buffer is written to stdout.
+    const ncpu = std.Thread.getCpuCount() catch 4;
+    const nw = @min(8, ncpu);
+    const workers = try alloc.alloc(SearchWorker, nw);
+    for (workers) |*w| w.* = .{
+        .arena = std.heap.ArenaAllocator.init(gpa),
+        .hits = .empty,
+    };
+    defer for (workers) |*w| w.arena.deinit();
+
+    var queue_cur = std.atomic.Value(usize).init(0);
+    const threads = try alloc.alloc(std.Thread, nw);
+    for (workers, 0..) |_, i| {
+        threads[i] = try std.Thread.spawn(
+            .{},
+            searchDoWork,
+            .{ &workers[i], &queue_cur, files, args, &pattern },
+        );
     }
+    for (threads) |th| th.join();
+
+    var hits: std.ArrayList(Hit) = .empty;
+    for (workers) |*w| try hits.appendSlice(alloc, w.hits.items);
 
     std.mem.sort(Hit, hits.items, {}, hitLessThan);
 

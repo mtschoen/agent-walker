@@ -477,14 +477,81 @@ fn calToUnix(yr: i32, mo: u32, dy: u32, hr: u32, mn: u32, sc: u32) i64 {
     return d * 86400 + @as(i64, hr) * 3600 + @as(i64, mn) * 60 + @as(i64, sc);
 }
 
-// ─── JSON helpers ────────────────────────────────────────────────────────────
+// ─── JSON Scanner helpers ────────────────────────────────────────────────────
+//
+// Five-field token streaming over the JSONL hot path. Beats
+// `std.json.parseFromSlice(Value, ...)` by ~10x because it skips the
+// `ObjectMap` allocation and per-string dup that `Value` materialization
+// requires. Strings returned with `.alloc_if_needed` are slices into the
+// input buffer (zero-copy) when no escape decoding is required, which is
+// the typical case for the keys we read (`role`, `id`, `model`,
+// `timestamp`, `input_tokens`, etc.).
 
-fn ju64(obj: std.json.ObjectMap, key: []const u8) u64 {
-    return switch (obj.get(key) orelse return 0) {
-        .integer => |n| if (n >= 0) @intCast(n) else 0,
-        .float => |f| if (f >= 0.0) @intFromFloat(f) else 0,
-        else => 0,
+/// Peek-and-descend into an object. Returns true if the next value was an
+/// object (and consumes its `object_begin`); false otherwise (and skips
+/// the value entirely). Caller iterates keys until parseObjectKey returns
+/// null (i.e. `object_end`).
+pub fn enterObject(scanner: *std.json.Scanner) !bool {
+    const peek = try scanner.peekNextTokenType();
+    if (peek != .object_begin) {
+        try scanner.skipValue();
+        return false;
+    }
+    _ = try scanner.next();
+    return true;
+}
+
+/// Read the next object key, or return null when we've hit `object_end`.
+/// Returned slice is valid as long as the input buffer (and arena) is.
+pub fn parseObjectKey(scanner: *std.json.Scanner, alloc: Allocator) !?[]const u8 {
+    const tok = try scanner.nextAlloc(alloc, .alloc_if_needed);
+    return switch (tok) {
+        .object_end => null,
+        .string => |s| s,
+        .allocated_string => |s| s,
+        else => error.UnexpectedToken,
     };
+}
+
+/// Read a string-typed value, or skip+null when the value is something
+/// else (null, number, etc.). Callers use this for "give me the string
+/// if it's a string, otherwise treat as missing."
+pub fn parseStringValue(scanner: *std.json.Scanner, alloc: Allocator) !?[]const u8 {
+    const peek = try scanner.peekNextTokenType();
+    if (peek != .string) {
+        try scanner.skipValue();
+        return null;
+    }
+    const tok = try scanner.nextAlloc(alloc, .alloc_if_needed);
+    return switch (tok) {
+        .string => |s| s,
+        .allocated_string => |s| s,
+        else => unreachable,
+    };
+}
+
+/// Read a non-negative integer value. Numbers come back as their raw
+/// byte slice from Scanner; we try integer parse, then float fallback,
+/// to match the behavior of the prior `ju64(obj, key)` helper.
+pub fn parseU64Value(scanner: *std.json.Scanner, alloc: Allocator) !u64 {
+    const peek = try scanner.peekNextTokenType();
+    if (peek != .number) {
+        try scanner.skipValue();
+        return 0;
+    }
+    const tok = try scanner.nextAlloc(alloc, .alloc_if_needed);
+    const slice: []const u8 = switch (tok) {
+        .number => |s| s,
+        .allocated_number => |s| s,
+        else => unreachable,
+    };
+    if (std.fmt.parseInt(i64, slice, 10)) |n| {
+        return if (n >= 0) @intCast(n) else 0;
+    } else |_| {}
+    if (std.fmt.parseFloat(f64, slice)) |f| {
+        return if (f >= 0.0) @intFromFloat(f) else 0;
+    } else |_| {}
+    return 0;
 }
 
 // ─── Group walking ───────────────────────────────────────────────────────────
@@ -527,27 +594,68 @@ fn processLine(
     const line = std.mem.trim(u8, raw, " \t\r\n");
     if (line.len == 0) return;
 
-    const parsed = std.json.parseFromSlice(
-        std.json.Value,
-        alloc,
-        line,
-        .{ .ignore_unknown_fields = true },
-    ) catch return;
-    defer parsed.deinit();
+    var scanner = std.json.Scanner.initCompleteInput(alloc, line);
+    defer scanner.deinit();
 
-    const root = parsed.value;
-    if (root != .object) return;
-    const msg_v = root.object.get("message") orelse return;
-    if (msg_v != .object) return;
-    const msg = msg_v.object;
+    if (!(enterObject(&scanner) catch return)) return;
 
-    const role = msg.get("role") orelse return;
-    if (role != .string or !std.mem.eql(u8, role.string, "assistant")) return;
+    var role_assistant = false;
+    var id_str: ?[]const u8 = null;
+    var ts_value: ?f64 = null;
+    var model: []const u8 = "";
+    var inp: u64 = 0;
+    var out_: u64 = 0;
+    var cr: u64 = 0;
+    var cw: u64 = 0;
 
-    if (msg.get("id")) |id_v| {
-        if (id_v == .string and id_v.string.len > 0) {
-            if (seen.contains(id_v.string)) return;
-            const k = alloc.dupe(u8, id_v.string) catch return;
+    while (true) {
+        const key = (parseObjectKey(&scanner, alloc) catch return) orelse break;
+        if (std.mem.eql(u8, key, "message")) {
+            if (!(enterObject(&scanner) catch return)) continue;
+            while (true) {
+                const mkey = (parseObjectKey(&scanner, alloc) catch return) orelse break;
+                if (std.mem.eql(u8, mkey, "role")) {
+                    const v = parseStringValue(&scanner, alloc) catch return;
+                    if (v) |s| role_assistant = std.mem.eql(u8, s, "assistant");
+                } else if (std.mem.eql(u8, mkey, "id")) {
+                    id_str = parseStringValue(&scanner, alloc) catch return;
+                } else if (std.mem.eql(u8, mkey, "model")) {
+                    const v = parseStringValue(&scanner, alloc) catch return;
+                    if (v) |s| model = s;
+                } else if (std.mem.eql(u8, mkey, "usage")) {
+                    if (!(enterObject(&scanner) catch return)) continue;
+                    while (true) {
+                        const ukey = (parseObjectKey(&scanner, alloc) catch return) orelse break;
+                        if (std.mem.eql(u8, ukey, "input_tokens")) {
+                            inp = parseU64Value(&scanner, alloc) catch return;
+                        } else if (std.mem.eql(u8, ukey, "output_tokens")) {
+                            out_ = parseU64Value(&scanner, alloc) catch return;
+                        } else if (std.mem.eql(u8, ukey, "cache_read_input_tokens")) {
+                            cr = parseU64Value(&scanner, alloc) catch return;
+                        } else if (std.mem.eql(u8, ukey, "cache_creation_input_tokens")) {
+                            cw = parseU64Value(&scanner, alloc) catch return;
+                        } else {
+                            scanner.skipValue() catch return;
+                        }
+                    }
+                } else {
+                    scanner.skipValue() catch return;
+                }
+            }
+        } else if (std.mem.eql(u8, key, "timestamp")) {
+            const v = parseStringValue(&scanner, alloc) catch return;
+            if (v) |s| ts_value = parseTs(s) catch null;
+        } else {
+            scanner.skipValue() catch return;
+        }
+    }
+
+    if (!role_assistant) return;
+
+    if (id_str) |id| {
+        if (id.len > 0) {
+            if (seen.contains(id)) return;
+            const k = alloc.dupe(u8, id) catch return;
             seen.put(k, {}) catch {
                 alloc.free(k);
                 return;
@@ -555,26 +663,10 @@ fn processLine(
         }
     }
 
-    const ts_v = root.object.get("timestamp") orelse return;
-    if (ts_v != .string or ts_v.string.len == 0) return;
-    const ts = parseTs(ts_v.string) catch return;
+    const ts = ts_value orelse return;
     if (ts < earliest) return;
 
-    const mdl: []const u8 = if (msg.get("model")) |mv| (if (mv == .string) mv.string else "") else "";
-    var inp: u64 = 0;
-    var out_: u64 = 0;
-    var cr: u64 = 0;
-    var cw: u64 = 0;
-    if (msg.get("usage")) |uv| {
-        if (uv == .object) {
-            inp = ju64(uv.object, "input_tokens");
-            out_ = ju64(uv.object, "output_tokens");
-            cr = ju64(uv.object, "cache_read_input_tokens");
-            cw = ju64(uv.object, "cache_creation_input_tokens");
-        }
-    }
-
-    const c = modelCost(inp, out_, cr, cw, mdl);
+    const c = modelCost(inp, out_, cr, cw, model);
     if (ts >= pc) trailing.* += c;
     if (ts >= ws) window.* += c;
 }
