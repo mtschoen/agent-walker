@@ -12,24 +12,45 @@ totals on the live fleet.
 - 32-core box (Windows 11). 5 warm runs each via `shared/bench.py
   --runs 5`; reporting median wall-clock.
 
-## Headline numbers
+## Headline numbers — cost mode
 
-| Lang   | Median    | Range       | vs winner | vs slowest | LoC | Binary  |
-| ------ | --------: | ----------- | --------: | ---------: | --: | ------: |
-| C++    |  **87ms** |  84-95      | 1.00x     | 3.97x      | 599 |  267 KB |
-| Rust   |   112ms   | 100-118     | 1.29x     | 3.08x      | 230 |  423 KB |
-| Go     |   154ms   | 147-160     | 1.77x     | 2.24x      | 410 |  8.0 MB |
-| Zig    |   164ms   | 156-172     | 1.89x     | 2.10x      | 900 |  977 KB |
-| Python |   345ms   | 324-362     | 3.97x     | 1.00x      | ~80 |     n/a |
+| Lang   | Median    | Range       | vs winner | vs slowest | Binary  |
+| ------ | --------: | ----------- | --------: | ---------: | ------: |
+| C++    |  **81ms** |  78-83      | 1.00x     | 1.83x      |  267 KB |
+| Rust   |   106ms   |  95-112     | 1.31x     | 1.40x      |  423 KB |
+| Go     |   110ms   | 107-113     | 1.36x     | 1.35x      |  8.0 MB |
+| Zig    |   148ms   | 144-160     | 1.83x     | 1.00x      |  977 KB |
+| Python |   345ms   | 324-362     | 4.26x     | n/a        |     n/a |
 
 Python reference is the orjson + 8-worker `ProcessPoolExecutor` walker
 that ships in [schoen-claude-status](https://github.com/mtschoen/schoen-claude-status).
 Original single-thread `json.loads` baseline (not in this table) was
 ~750ms.
 
-All five implementations agree to the cent on the live fleet
+All four native implementations agree to the cent on the live fleet
 (trailing/window values shift between bench passes as new sessions
 land in the corpus, but every impl in a single pass agrees).
+
+## Cross-mode performance
+
+The status line drives three different walker subcommands. Numbers here
+are 5-run medians on the same live fleet (~300 files survive the weekly
+mtime filter; ~130 distinct session groups; ~10× larger when search
+ignores the mtime filter).
+
+| Mode                         | rust    | cpp        | go      | zig         |
+| ---------------------------- | ------: | ---------: | ------: | ----------: |
+| cost (8 workers)             | 106ms   | **81ms**   | 110ms   | 148ms       |
+| beacons-history (8 workers)  | 1004ms  | **685ms**  | 1196ms  | 769ms       |
+| search `TODO --count-only`   | 1171ms  | 2385ms     | 1322ms  | **573ms**   |
+
+Zig has overtaken cpp in search mode and is second-fastest in
+beacons-history. The flip story: cpp is single-threaded in
+beacons-history and search; zig now has a `min(8, ncpu)` worker pool in
+all three modes. Once parallel, zig's faster matcher pulls ahead in the
+regex-heavy search workload (cpp's `std::regex` is the bottleneck there).
+A worker-pool retrofit in cpp would close those two columns; not done
+this pass.
 
 ## What changed since the first pass
 
@@ -43,8 +64,46 @@ the ranking:
 - **Go (`encoding/json` → `bytedance/sonic` v1.15.1): 373ms → 141ms** (2.6x).
   Now between Zig and Python.
 
-Rust and Zig were unchanged across the two passes — they were already on
-parsers with no per-line allocation in the hot path.
+Rust was unchanged across the two passes — already on a non-allocating
+parser (typed serde_json).
+
+## What changed in the Zig perf-gap pass
+
+After the beacons-history and search subcommands landed, zig was 4-20×
+slower than cpp across the three modes because `std.json.parseFromSlice`
+materializes a full `Value` tree (`ObjectMap` allocation plus dup of
+every string) for every JSONL line. Two changes closed the gap:
+
+1. **Scanner streaming (all three hot paths).** Replaced
+   `parseFromSlice(Value, ...)` with `std.json.Scanner` token streaming.
+   The scanner walks tokens against the input slice with
+   `.alloc_if_needed` semantics, so the five fields we care about per
+   line (`role`, `id`, `model`, `timestamp`, `usage.*`) come back as
+   zero-copy slices into the input when escape-free. No `ObjectMap`,
+   no per-string dup, no recursive `Value` construction. Closed
+   ~60-70% of the gap before any threading change:
+   - cost-mode: 313ms → 163ms
+   - beacons-history: 13.8s → 5.6s
+   - search: 11.75s → 4.5s
+2. **Worker pool in beacons-history + search.** Both subcommands were
+   single-threaded; cost mode already had a pool. Lifted the pattern,
+   gave each worker its own arena (arena allocators are not
+   thread-safe), and merged per-worker result lists at the end. The
+   per-worker arenas stay alive until the output JSON is written
+   because hit/pair fields slice into them. On the 8-worker pool
+   (`min(8, ncpu)`):
+   - beacons-history: 5.6s → 769ms (7.3× on top of Scanner)
+   - search: 4.5s → 573ms (7.9× on top of Scanner)
+
+Search also got a one-pass content-walker collapse: the prior code
+called `extractText(default)` + `extractText(with_tools)` +
+`isOnlyToolBlocks` (three iterations over `message.content`); the
+Scanner walker builds both text variants and counts tool-block ratio in
+a single pass.
+
+Net: zig went from "slowest in every mode" to "fastest in search,
+second-fastest in beacons-history, within 2× of cpp in cost." All on
+stdlib only — no `zimdjson` dependency, no PCRE library.
 
 ## Surprises
 
@@ -114,7 +173,15 @@ or IPC costs.
 
 - Zig 0.16, `winget install zig.zig` on Windows; tarball under `~/.local/zig`
   on Linux
-- `std.json` dynamic value parsing, manual field extraction
+- `std.json.Scanner` token streaming with `.alloc_if_needed` (zero-copy
+  slices into the input buffer when no escape decoding is needed).
+  Shared helpers (`enterObject`, `parseObjectKey`, `parseStringValue`,
+  `parseU64Value`) in `main.zig` are reused from `beacons.zig` and
+  `search.zig`
+- 8-worker `std.Thread` pool in all three subcommands (cost,
+  beacons-history, search). Each worker owns a private
+  `ArenaAllocator` and a local result list; main thread merges after
+  `join`
 - Cross-platform via `builtin.os.tag` conditional compilation:
   - Windows path: direct Win32 externs (`CreateFileW`, `FindFirstFileW`,
     `QueryPerformanceCounter`) because `std.io` was removed in 0.16 and
@@ -122,8 +189,6 @@ or IPC costs.
   - Linux path: `std.os.linux` syscalls (`openat`, `getdents64`, `statx`,
     `clock_gettime`); reads `/proc/self/cmdline` + `/proc/self/environ`
     to avoid a libc dependency
-- 900 LoC reflects both platform binding surfaces; without them it'd
-  be closer to Rust's count
 - Compiler error messages were excellent throughout
 - 977 KB binary
 - The cross-platform restructure cost about 18% on Windows perf
@@ -189,6 +254,10 @@ python3 shared/bench.py --runs 5 --no-python
 
 - [x] ~~Rebuild C++ on `simdjson` and Go on `sonic-go` — does the ranking
       change?~~ Yes: C++ overtakes Rust by 25%; Go closes to ~141ms.
+- [x] ~~Close the Zig perf gap with Scanner streaming + worker pool.~~
+      Done — see "What changed in the Zig perf-gap pass" above. Net
+      result: zig now fastest in search, second-fastest in
+      beacons-history, within 2× of cpp on cost mode.
 - [ ] Tune Rust further: try `simd-json` instead of `serde_json` (the
       tradeoff for small per-line objects is mixed; worth measuring).
 - [ ] Wire the winner (C++ now, was Rust) back into

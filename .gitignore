@@ -15,3 +15,6 @@ Thumbs.db
 
 # Claude Code project-local state (settings.local.json, session-scoped logs, etc.)
 .claude/
+
+# Local git worktrees
+.worktrees/

@@ -9,6 +9,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const search_mod = b.createModule(.{
+        .root_source_file = b.path("src/search.zig"),
+    });
+    root_module.addImport("search", search_mod);
 
     const exe = b.addExecutable(.{
         .name = "walker",
