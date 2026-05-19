@@ -31,9 +31,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -712,11 +714,53 @@ func runSearch(argv []string) {
 	filesWalked := uint64(len(files))
 	hostRoot := args.ProjectsRoot
 
-	// Process files
-	var hits []searchHit
+	// Process files in parallel. Work unit = one file; each worker owns a
+	// local hits slice to avoid contention; merge after all workers exit,
+	// then sort. searchScanFile/searchProcessFile use only local state; the
+	// shared compiled `re` is safe for concurrent use per regexp.Regexp's
+	// docs ("safe for concurrent use by multiple goroutines"). sonic's
+	// Unmarshal is documented thread-safe. Mirrors the cost-mode pattern
+	// in main.go's runCost (channel + sync.WaitGroup + per-worker accumulator).
+	numWorkers := runtime.NumCPU()
+	if numWorkers > 8 {
+		numWorkers = 8
+	}
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+
+	work := make(chan searchFileInfo, len(files))
+	perWorkerHits := make([][]searchHit, numWorkers)
+
+	var wg sync.WaitGroup
+	for workerIndex := 0; workerIndex < numWorkers; workerIndex++ {
+		wg.Add(1)
+		go func(tid int) {
+			defer wg.Done()
+			local := perWorkerHits[tid][:0]
+			for f := range work {
+				hs := searchProcessFile(f, args, re, hostRoot)
+				if len(hs) > 0 {
+					local = append(local, hs...)
+				}
+			}
+			perWorkerHits[tid] = local
+		}(workerIndex)
+	}
 	for _, f := range files {
-		hs := searchProcessFile(f, args, re, hostRoot)
-		hits = append(hits, hs...)
+		work <- f
+	}
+	close(work)
+	wg.Wait()
+
+	// Merge per-worker hits
+	total := 0
+	for _, v := range perWorkerHits {
+		total += len(v)
+	}
+	hits := make([]searchHit, 0, total)
+	for _, v := range perWorkerHits {
+		hits = append(hits, v...)
 	}
 
 	// Sort newest-first

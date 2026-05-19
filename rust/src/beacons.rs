@@ -1,6 +1,7 @@
 // Beacon-mode subcommands: beacons-latest and beacons-history.
 // See ../SPEC.md "Subcommands" for the contract.
 
+use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -428,41 +429,73 @@ pub fn run_history(args: &[String]) {
     let session_count = groups.len();
     let re = beacon_re();
 
+    // Flatten group paths into an indexable list so rayon can fan out one task
+    // per group. Group identity (slug, sid) no longer matters past this point —
+    // pair output is keyed by (eta, active) and conformance sorts pairs before
+    // comparing. Mirrors the cost-mode and cpp parallel patterns.
+    let group_paths: Vec<Vec<PathBuf>> = groups.into_values().collect();
+
+    let workers = std::cmp::min(
+        8,
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4),
+    );
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build()
+        .expect("rayon pool");
+
     // Pairs feed bias_factor as (begin_eta, active_elapsed). pair_meta carries
     // the (wall, idle, active) breakdown for the JSON output, parallel-indexed.
-    let mut pairs: Vec<(f64, f64)> = Vec::new();
-    let mut pair_meta: Vec<(f64, f64, f64)> = Vec::new();
-    for paths in groups.values() {
-        let mut beacons_all: Vec<(Beacon, f64)> = Vec::new();
-        let mut events_all: Vec<(f64, bool)> = Vec::new();
-        for path in paths {
-            let se = collect_session_events_in_path(path, &re);
-            beacons_all.extend(se.beacons);
-            events_all.extend(se.events);
-        }
-        events_all.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-        // Filter to beacons inside the window.
-        beacons_all.retain(|(_, ts)| *ts >= window_lo);
+    // regex::Regex is Send+Sync for read-only matching, so the shared `re`
+    // works across workers. Each task gets local beacons/events buffers; final
+    // pair tuples are concatenated via reduce.
+    let (pairs, pair_meta): (Vec<(f64, f64)>, Vec<(f64, f64, f64)>) = pool.install(|| {
+        group_paths
+            .par_iter()
+            .map(|paths| {
+                let mut beacons_all: Vec<(Beacon, f64)> = Vec::new();
+                let mut events_all: Vec<(f64, bool)> = Vec::new();
+                for path in paths {
+                    let se = collect_session_events_in_path(path, &re);
+                    beacons_all.extend(se.beacons);
+                    events_all.extend(se.events);
+                }
+                events_all.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+                // Filter to beacons inside the window.
+                beacons_all.retain(|(_, ts)| *ts >= window_lo);
 
-        // Earliest "begin" and latest "end" in the window.
-        let begin = beacons_all
-            .iter()
-            .filter(|(b, _)| b.kind == "begin")
-            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
-        let end = beacons_all
-            .iter()
-            .filter(|(b, _)| b.kind == "end")
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
-        if let (Some((begin_b, begin_ts)), Some((_end_b, end_ts))) = (begin, end) {
-            if *end_ts > *begin_ts {
-                let wall = *end_ts - *begin_ts;
-                let idle = compute_idle_in_window(&events_all, *begin_ts, *end_ts);
-                let active = (wall - idle).max(0.0);
-                pairs.push((begin_b.eta_seconds, active));
-                pair_meta.push((wall, idle, active));
-            }
-        }
-    }
+                let begin = beacons_all
+                    .iter()
+                    .filter(|(b, _)| b.kind == "begin")
+                    .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
+                let end = beacons_all
+                    .iter()
+                    .filter(|(b, _)| b.kind == "end")
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
+                let mut local_pairs: Vec<(f64, f64)> = Vec::new();
+                let mut local_meta: Vec<(f64, f64, f64)> = Vec::new();
+                if let (Some((begin_b, begin_ts)), Some((_end_b, end_ts))) = (begin, end) {
+                    if *end_ts > *begin_ts {
+                        let wall = *end_ts - *begin_ts;
+                        let idle = compute_idle_in_window(&events_all, *begin_ts, *end_ts);
+                        let active = (wall - idle).max(0.0);
+                        local_pairs.push((begin_b.eta_seconds, active));
+                        local_meta.push((wall, idle, active));
+                    }
+                }
+                (local_pairs, local_meta)
+            })
+            .reduce(
+                || (Vec::new(), Vec::new()),
+                |(mut ap, mut am), (mut bp, mut bm)| {
+                    ap.append(&mut bp);
+                    am.append(&mut bm);
+                    (ap, am)
+                },
+            )
+    });
 
     let bias = bias_factor(&pairs);
     let elapsed_ms = started.elapsed().as_millis() as u64;

@@ -10,9 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -576,53 +578,100 @@ func runBeaconsHistory(args []string) {
 	groups := discoverHistoryGroups(root)
 	sessionCount := uint64(len(groups))
 
-	var pairs []historyPair
+	// Flatten group paths for the worker pool. Group identity does not
+	// matter past this point: pair order doesn't matter (conformance
+	// sorts pairs before comparing), so we don't need a stable key.
+	groupSlices := make([][]string, 0, len(groups))
 	for _, paths := range groups {
-		var beaconsAll []beaconWithTimestamp
-		var eventsAll []event
-		for _, path := range paths {
-			se := collectSessionEventsInPath(path)
-			beaconsAll = append(beaconsAll, se.beacons...)
-			eventsAll = append(eventsAll, se.events...)
-		}
-		sort.Slice(eventsAll, func(i, j int) bool {
-			return eventsAll[i].timestamp < eventsAll[j].timestamp
-		})
-		var inside []beaconWithTimestamp
-		for _, b := range beaconsAll {
-			if b.timestamp >= windowLo {
-				inside = append(inside, b)
-			}
-		}
+		groupSlices = append(groupSlices, paths)
+	}
 
-		var begin, end *beaconWithTimestamp
-		for index := range inside {
-			b := &inside[index]
-			switch b.beacon.Kind {
-			case "begin":
-				if begin == nil || b.timestamp < begin.timestamp {
-					begin = b
+	// Parallel per-group walk. Work unit = one session group; each worker
+	// owns a local pairs slice merged after all workers exit. The shared
+	// beaconRegex is safe for concurrent use (regexp.Regexp is documented
+	// thread-safe for its Find/Match methods). sonic.Unmarshal is also
+	// documented thread-safe. Mirrors the cost-mode pattern in main.go.
+	numWorkers := runtime.NumCPU()
+	if numWorkers > 8 {
+		numWorkers = 8
+	}
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+
+	work := make(chan []string, len(groupSlices))
+	perWorkerPairs := make([][]historyPair, numWorkers)
+
+	var wg sync.WaitGroup
+	for workerIndex := 0; workerIndex < numWorkers; workerIndex++ {
+		wg.Add(1)
+		go func(tid int) {
+			defer wg.Done()
+			local := perWorkerPairs[tid][:0]
+			for paths := range work {
+				var beaconsAll []beaconWithTimestamp
+				var eventsAll []event
+				for _, path := range paths {
+					se := collectSessionEventsInPath(path)
+					beaconsAll = append(beaconsAll, se.beacons...)
+					eventsAll = append(eventsAll, se.events...)
 				}
-			case "end":
-				if end == nil || b.timestamp > end.timestamp {
-					end = b
+				sort.Slice(eventsAll, func(i, j int) bool {
+					return eventsAll[i].timestamp < eventsAll[j].timestamp
+				})
+				var inside []beaconWithTimestamp
+				for _, b := range beaconsAll {
+					if b.timestamp >= windowLo {
+						inside = append(inside, b)
+					}
+				}
+
+				var begin, end *beaconWithTimestamp
+				for index := range inside {
+					b := &inside[index]
+					switch b.beacon.Kind {
+					case "begin":
+						if begin == nil || b.timestamp < begin.timestamp {
+							begin = b
+						}
+					case "end":
+						if end == nil || b.timestamp > end.timestamp {
+							end = b
+						}
+					}
+				}
+				if begin != nil && end != nil && end.timestamp > begin.timestamp {
+					wall := end.timestamp - begin.timestamp
+					idle := computeIdleInWindow(eventsAll, begin.timestamp, end.timestamp)
+					active := wall - idle
+					if active < 0 {
+						active = 0
+					}
+					local = append(local, historyPair{
+						beginEta:      begin.beacon.EtaSeconds,
+						actualElapsed: wall,
+						idleExcluded:  idle,
+						activeElapsed: active,
+					})
 				}
 			}
-		}
-		if begin != nil && end != nil && end.timestamp > begin.timestamp {
-			wall := end.timestamp - begin.timestamp
-			idle := computeIdleInWindow(eventsAll, begin.timestamp, end.timestamp)
-			active := wall - idle
-			if active < 0 {
-				active = 0
-			}
-			pairs = append(pairs, historyPair{
-				beginEta:      begin.beacon.EtaSeconds,
-				actualElapsed: wall,
-				idleExcluded:  idle,
-				activeElapsed: active,
-			})
-		}
+			perWorkerPairs[tid] = local
+		}(workerIndex)
+	}
+	for _, paths := range groupSlices {
+		work <- paths
+	}
+	close(work)
+	wg.Wait()
+
+	// Merge per-worker pairs
+	total := 0
+	for _, v := range perWorkerPairs {
+		total += len(v)
+	}
+	pairs := make([]historyPair, 0, total)
+	for _, v := range perWorkerPairs {
+		pairs = append(pairs, v...)
 	}
 
 	bias, biasOK := biasFactor(pairs)

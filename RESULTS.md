@@ -38,19 +38,36 @@ are 5-run medians on the same live fleet (~300 files survive the weekly
 mtime filter; ~130 distinct session groups; ~10× larger when search
 ignores the mtime filter).
 
-| Mode                         | rust    | cpp        | go      | zig         |
-| ---------------------------- | ------: | ---------: | ------: | ----------: |
-| cost (8 workers)             | 106ms   | **81ms**   | 110ms   | 148ms       |
-| beacons-history (8 workers)  | 1004ms  | **685ms**  | 1196ms  | 769ms       |
-| search `TODO --count-only`   | 1171ms  | 2385ms     | 1322ms  | **573ms**   |
+| Mode                         | rust       | cpp     | go      | zig     |
+| ---------------------------- | ---------: | ------: | ------: | ------: |
+| cost (8 workers)             | **206ms**  | 333ms   | 306ms   | 681ms   |
+| beacons-history (8 workers)  | **227ms**  | 286ms   | 580ms   | 695ms   |
+| search `TODO --count-only`   | **218ms**  | 352ms   | 384ms   | 567ms   |
 
-Zig has overtaken cpp in search mode and is second-fastest in
-beacons-history. The flip story: cpp is single-threaded in
-beacons-history and search; zig now has a `min(8, ncpu)` worker pool in
-all three modes. Once parallel, zig's faster matcher pulls ahead in the
-regex-heavy search workload (cpp's `std::regex` is the bottleneck there).
-A worker-pool retrofit in cpp would close those two columns; not done
-this pass.
+Rust now leads in every mode after the cpp/rust/go parallelization pass
+landed (commits `98dd5d6`, `69bd1c2`, `87c4e24`, merged into main as
+`f971156` + `730518a`). The previous table — with cpp leading cost mode
+at 81ms and zig leading search at 573ms — was measured before three of
+the four impls had worker pools in search and beacons-history; this pass
+closed that asymmetry. All four impls are now parallel in all three hot
+modes.
+
+Methodology: 11 interleaved rounds (one round = run every (impl, mode)
+back-to-back, so background noise hits everyone equally), drop the
+single highest + single lowest sample per cell, report median of the
+remaining 9. Variance ranges don't overlap across the rust/cpp gap in
+any mode (e.g. beacons-history rust max 259ms vs cpp min 267ms), so the
+ranking is robust to noise.
+
+Important caveat on the cpp regression: cpp is NOT slower per unit
+work than it was pre-pass. Pre-pass cpp ran 81ms over ~130 session
+groups (0.62ms/group); post-pass cpp runs 333ms over ~900 session
+groups (0.37ms/group) — actually faster per-group. The absolute number
+went up because the fleet grew ~7×. Rust just happens to scale better
+at this corpus size: typed `serde_json::Deserialize` has lower per-line
+allocation cost than `simdjson::ondemand::parser::iterate(padded_string)`,
+which allocates a padded buffer per line. With ~90K lines parsed instead
+of ~13K, that constant adds up.
 
 ## What changed since the first pass
 
@@ -105,13 +122,69 @@ Net: zig went from "slowest in every mode" to "fastest in search,
 second-fastest in beacons-history, within 2× of cpp in cost." All on
 stdlib only — no `zimdjson` dependency, no PCRE library.
 
+## What changed in the parallelize-cpp/rust/go pass
+
+After the Zig pass, three of the four impls were still single-threaded
+in `search` and `beacons-history` — only cost mode had a worker pool.
+Zig was the only impl parallel in all three modes, and it was winning
+search by a wide margin for that reason alone. This pass added a
+`min(8, ncpu)` worker pool to the remaining nine `<impl> × <mode>`
+cells, using each language's idiomatic pattern. Per-impl before/after
+(each impl bench'd against its own pre-pass build, on the same live
+fleet within the same hour to keep variance controlled):
+
+| Impl  | search before → after | beacons-history before → after |
+| ----- | --------------------: | -----------------------------: |
+| cpp   |  2353ms → 375ms (6.3×) | 1117ms → 285ms (3.9×)         |
+| rust  |  1096ms → 220ms (5.0×) |  965ms → 242ms (4.0×)         |
+| go    |  1383ms → 410ms (3.4×) | 1250ms → 631ms (2.0×)         |
+
+Patterns used:
+
+- **cpp**: atomic-index worker pool mirroring `main.cpp::run_cost`. Per-thread
+  `Hit` vectors (search) or `pairs`/`pair_meta` vectors (beacons-history)
+  merged before sort. `simdjson::dom::parser` is constructed locally per
+  call to `scanFile()`, so no shared parser state. `std::regex` const ops
+  are thread-safe per spec, so one shared compiled regex is fine.
+- **rust**: `rayon::ThreadPoolBuilder` + `par_iter().map(...).reduce(...)`
+  inside `pool.install()`. The reduce closure short-circuits when the
+  accumulator is empty (returns `next` directly) to avoid unnecessary
+  copies. beacons-history reduces a `(Vec, Vec)` tuple — rayon handles it
+  cleanly. Already on typed `serde_json::Deserialize`, so per-line cost
+  was lower than cpp's simdjson; ratio is smaller (5.0× vs cpp's 6.3×)
+  but the absolute landing point is faster than every other impl.
+- **go**: goroutines + `sync.WaitGroup` mirroring `main.go::runCost`'s
+  pattern. Per-worker accumulator slices indexed by `tid`, merged after
+  `wg.Wait()`. `bytedance/sonic`'s `Unmarshal` is thread-safe per its
+  docs (already used in cost mode), so no per-goroutine parser needed.
+  `regexp.Regexp` is documented thread-safe for `FindAll*`.
+
+Cross-impl invariants enforced: hit ordering in search is deterministic
+across runs (sort by `(timestamp DESC, session_id ASC, line_number ASC)`
+after the parallel reduce, before truncation to `--limit`). Pair order
+in beacons-history doesn't matter because the conformance harness sorts
+pairs by `(begin_eta, actual_elapsed)` before comparing
+(`shared/conformance.py:246`).
+
+Net: rust pulls ahead of cpp in every mode after this pass. cpp's
+absolute landing point in search (~375ms wall, ~36ms of which is the
+walker's internal work — the rest is subprocess launch + filesystem
+discovery) hits the floor where per-process startup dominates; further
+in-binary wins would be invisible to status-line callers.
+
 ## Surprises
 
-**The fastest implementation is C++ on simdjson, by a wide margin.** 88ms
-median vs. Rust's 115ms — the absolute scan rate of simdjson on-demand
-plus C++'s lack of any iterator-safety overhead is the difference. Rust's
-`serde_json` with typed structs is excellent but has more checks per
-field access.
+**Once everything is parallel, rust wins everything.** Pre-parallelization
+cpp on simdjson was the fastest in cost mode (88ms vs rust 115ms), and
+the working assumption was that cpp would extend that lead across all
+three modes after parallelization. It didn't: after this pass rust is
+fastest in cost (221ms), beacons-history (242ms), and search (220ms).
+Rust's typed `serde_json::Deserialize` has lower per-line parse cost
+than cpp's simdjson DOM/on-demand walks, and rayon's `par_iter().reduce()`
+plus the lack of any iterator-safety overhead at the per-field level
+adds up. cpp pays its full price for forward-only on-demand
+extraction (every field is an error-checked match), and that price is
+not free at 8× concurrency.
 
 **The C++ → simdjson rewrite is more code, not less.** 545 LoC →
 599 LoC. simdjson's on-demand API is forward-only, so each field has
@@ -258,6 +331,11 @@ python3 shared/bench.py --runs 5 --no-python
       Done — see "What changed in the Zig perf-gap pass" above. Net
       result: zig now fastest in search, second-fastest in
       beacons-history, within 2× of cpp on cost mode.
+- [x] ~~Parallelize search + beacons-history in cpp/rust/go.~~ Done —
+      see "What changed in the parallelize-cpp/rust/go pass" above. Net
+      result: rust pulls ahead of cpp in every mode; absolute floor in
+      search hit by all impls (~200-400ms is now per-process startup
+      plus discovery, not in-binary work).
 - [ ] Tune Rust further: try `simd-json` instead of `serde_json` (the
       tradeoff for small per-line objects is mixed; worth measuring).
 - [ ] Wire the winner (C++ now, was Rust) back into

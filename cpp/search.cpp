@@ -6,6 +6,7 @@
 #include "common.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -15,6 +16,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <simdjson.h>
@@ -553,12 +555,49 @@ int run(const std::vector<std::string>& argv) {
     size_t files_walked = files.size();
     std::string host_root = args.projects_root.string();
 
-    // Process each file
+    // Process files in parallel. Work unit = one file; each worker owns a
+    // local hits list to avoid contention; merge after join, then sort.
+    // simdjson::dom::parser is constructed locally inside scanFile() per
+    // call, so no parser-state sharing across threads. std::regex const
+    // operations are thread-safe per the standard, so one shared `re` is
+    // fine for parallel iteration. Mirrors the cost-mode pattern in
+    // main.cpp::run_cost.
+    size_t num_workers = std::min<size_t>(8, std::thread::hardware_concurrency());
+    if (num_workers == 0) num_workers = 4;
+
+    std::vector<std::vector<Hit>> per_thread_hits(num_workers);
+    std::atomic<size_t> task_index(0);
+
+    auto run_tasks = [&](size_t tid) {
+        auto& local = per_thread_hits[tid];
+        while (true) {
+            size_t idx = task_index.fetch_add(1, std::memory_order_relaxed);
+            if (idx >= files.size()) break;
+            auto hs = processFile(files[idx], args, re, host_root);
+            local.insert(local.end(),
+                         std::make_move_iterator(hs.begin()),
+                         std::make_move_iterator(hs.end()));
+        }
+    };
+
+    std::vector<std::thread> threads;
+    size_t bg_threads = (num_workers > 1) ? num_workers - 1 : 0;
+    threads.reserve(bg_threads);
+    for (size_t i = 0; i < bg_threads; ++i) {
+        threads.emplace_back(run_tasks, i + 1);
+    }
+    run_tasks(0); // main thread participates as worker 0
+    for (auto& t : threads) t.join();
+
+    // Merge per-thread hits
     std::vector<Hit> hits;
-    for (auto& f : files) {
-        auto hs = processFile(f, args, re, host_root);
-        hits.insert(hits.end(), std::make_move_iterator(hs.begin()),
-                           std::make_move_iterator(hs.end()));
+    size_t total = 0;
+    for (auto& v : per_thread_hits) total += v.size();
+    hits.reserve(total);
+    for (auto& v : per_thread_hits) {
+        hits.insert(hits.end(),
+                    std::make_move_iterator(v.begin()),
+                    std::make_move_iterator(v.end()));
     }
 
     // Sort newest-first by timestamp; tiebreak (session_id, line_number)

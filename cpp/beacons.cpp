@@ -24,6 +24,7 @@
 #include "walker_roots.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <iomanip>
@@ -33,6 +34,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -781,53 +783,107 @@ int run_history(const std::vector<std::string>& args) {
     HistoryGroups groups = discover_history_groups(roots);
     size_t session_count = groups.size();
 
+    // Flatten group paths into an indexable list for the worker pool. Group
+    // identity itself doesn't matter past this point — pair output is keyed
+    // by (eta, active), and conformance sorts pairs before comparing.
+    std::vector<std::vector<fs::path>> group_paths;
+    group_paths.reserve(session_count);
+    for (auto& [key, paths] : groups) {
+        group_paths.push_back(std::move(paths));
+    }
+
+    // Parallel per-group walk. Work unit = one session group. Each worker
+    // accumulates local pairs/pair_meta to avoid contention; merge after
+    // join. Per-call simdjson parsers (inside walk_entries_for_history and
+    // *_beacons_in) keep parser state thread-local. std::regex const ops
+    // are thread-safe, so the shared beacon_re() is fine. Mirrors the
+    // cost-mode and search-mode patterns elsewhere in this codebase.
+    size_t num_workers = std::min<size_t>(8, std::thread::hardware_concurrency());
+    if (num_workers == 0) num_workers = 4;
+
+    struct Local {
+        std::vector<std::pair<double, double>> pairs;
+        std::vector<std::tuple<double, double, double>> pair_meta;
+    };
+    std::vector<Local> per_thread(num_workers);
+    std::atomic<size_t> task_index(0);
+
+    auto run_tasks = [&](size_t tid) {
+        Local& local = per_thread[tid];
+        while (true) {
+            size_t idx = task_index.fetch_add(1, std::memory_order_relaxed);
+            if (idx >= group_paths.size()) break;
+            const auto& paths = group_paths[idx];
+
+            std::vector<std::pair<Beacon, double>> all_beacons;
+            std::vector<EventRow> events;
+            for (const auto& path : paths) {
+                walk_entries_for_history(
+                    path,
+                    [&](const std::string& text, const std::string& ts_str) {
+                        auto ts_opt = walker::parse_iso8601(ts_str);
+                        if (!ts_opt) return;
+                        double ts = *ts_opt;
+                        if (ts < window_lo) return;
+                        for (auto& b : all_beacons_in(text)) {
+                            all_beacons.emplace_back(std::move(b), ts);
+                        }
+                    },
+                    [&](const EventRow& row) {
+                        events.push_back(row);
+                    }
+                );
+            }
+            std::sort(events.begin(), events.end(),
+                      [](const EventRow& a, const EventRow& b) {
+                          return a.timestamp < b.timestamp;
+                      });
+
+            const std::pair<Beacon, double>* begin_ptr = nullptr;
+            for (const auto& bt : all_beacons) {
+                if (bt.first.kind != "begin") continue;
+                if (!begin_ptr || bt.second < begin_ptr->second) begin_ptr = &bt;
+            }
+            const std::pair<Beacon, double>* end_ptr = nullptr;
+            for (const auto& bt : all_beacons) {
+                if (bt.first.kind != "end") continue;
+                if (!end_ptr || bt.second > end_ptr->second) end_ptr = &bt;
+            }
+            if (!begin_ptr || !end_ptr) continue;
+            if (end_ptr->second <= begin_ptr->second) continue;
+
+            double wall = end_ptr->second - begin_ptr->second;
+            double idle = compute_idle_in_window(events, begin_ptr->second, end_ptr->second);
+            double active = wall - idle;
+            if (active < 0.0) active = 0.0;
+            local.pairs.emplace_back(begin_ptr->first.eta_seconds, active);
+            local.pair_meta.emplace_back(wall, idle, active);
+        }
+    };
+
+    std::vector<std::thread> threads;
+    size_t bg_threads = (num_workers > 1) ? num_workers - 1 : 0;
+    threads.reserve(bg_threads);
+    for (size_t i = 0; i < bg_threads; ++i) {
+        threads.emplace_back(run_tasks, i + 1);
+    }
+    run_tasks(0); // main thread participates as worker 0
+    for (auto& t : threads) t.join();
+
+    // Merge per-thread results
     std::vector<std::pair<double, double>> pairs;
     std::vector<std::tuple<double, double, double>> pair_meta;
-
-    for (const auto& [key, paths] : groups) {
-        std::vector<std::pair<Beacon, double>> all_beacons;
-        std::vector<EventRow> events;
-        for (const auto& path : paths) {
-            walk_entries_for_history(
-                path,
-                [&](const std::string& text, const std::string& ts_str) {
-                    auto ts_opt = walker::parse_iso8601(ts_str);
-                    if (!ts_opt) return;
-                    double ts = *ts_opt;
-                    if (ts < window_lo) return;
-                    for (auto& b : all_beacons_in(text)) {
-                        all_beacons.emplace_back(std::move(b), ts);
-                    }
-                },
-                [&](const EventRow& row) {
-                    events.push_back(row);
-                }
-            );
-        }
-        std::sort(events.begin(), events.end(),
-                  [](const EventRow& a, const EventRow& b) {
-                      return a.timestamp < b.timestamp;
-                  });
-
-        const std::pair<Beacon, double>* begin_ptr = nullptr;
-        for (const auto& bt : all_beacons) {
-            if (bt.first.kind != "begin") continue;
-            if (!begin_ptr || bt.second < begin_ptr->second) begin_ptr = &bt;
-        }
-        const std::pair<Beacon, double>* end_ptr = nullptr;
-        for (const auto& bt : all_beacons) {
-            if (bt.first.kind != "end") continue;
-            if (!end_ptr || bt.second > end_ptr->second) end_ptr = &bt;
-        }
-        if (!begin_ptr || !end_ptr) continue;
-        if (end_ptr->second <= begin_ptr->second) continue;
-
-        double wall = end_ptr->second - begin_ptr->second;
-        double idle = compute_idle_in_window(events, begin_ptr->second, end_ptr->second);
-        double active = wall - idle;
-        if (active < 0.0) active = 0.0;
-        pairs.emplace_back(begin_ptr->first.eta_seconds, active);
-        pair_meta.emplace_back(wall, idle, active);
+    size_t total = 0;
+    for (const auto& l : per_thread) total += l.pairs.size();
+    pairs.reserve(total);
+    pair_meta.reserve(total);
+    for (auto& l : per_thread) {
+        pairs.insert(pairs.end(),
+                     std::make_move_iterator(l.pairs.begin()),
+                     std::make_move_iterator(l.pairs.end()));
+        pair_meta.insert(pair_meta.end(),
+                         std::make_move_iterator(l.pair_meta.begin()),
+                         std::make_move_iterator(l.pair_meta.end()));
     }
 
     auto bias = compute_bias_factor(pairs);

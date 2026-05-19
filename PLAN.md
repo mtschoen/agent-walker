@@ -27,6 +27,16 @@
       search 11.75s→573ms (20×). Zig is now fastest in search (4.16×
       cpp), second-fastest in beacons-history (1.12× cpp), within 2×
       of cpp on cost. PR #6 on gitea.
+- [x] Parallelize search + beacons-history in cpp/rust/go. All three
+      impls now have `min(8, ncpu)` worker pools in all three hot modes;
+      zig already did from the prior pass. Per-impl ratios:
+      cpp search 2353→375ms (6.3×) / beacons-history 1117→285ms (3.9×);
+      rust search 1096→220ms (5.0×) / beacons-history 965→242ms (4.0×);
+      go search 1383→410ms (3.4×) / beacons-history 1250→631ms (2.0×).
+      Surprise: rust pulls ahead of cpp in every mode after the pass
+      (typed serde_json + rayon beat simdjson on-demand + std::thread
+      at 8× concurrency). Landed as commits 98dd5d6 / 69bd1c2 / 87c4e24,
+      merged as f971156 + 730518a. RESULTS.md updated.
 
 ## Inbox
 
@@ -113,24 +123,26 @@ valid. The cross-machine smoke test in the search spec's `## Verification`
 section targets the cpp production binary; once this port lands, it can
 optionally target rust/go/zig too.
 
-### Parallelize search + beacons-history in C++ / Rust / Go
+### Parallelize search + beacons-history in C++ / Rust / Go — DONE
 
-- [ ] Add a `min(8, ncpu)` worker pool to `cpp/search.cpp::run` and
-      `cpp/beacons.cpp::runHistory`. Cost mode already has a thread
-      pool in `cpp/main.cpp`; mirror that pattern. Worker unit = one
-      file (search) or one session group (beacons-history). Per-worker
-      simdjson `parser` is required since `parser::iterate` is not
-      thread-safe.
-- [ ] Add `rayon::par_iter` to `rust/src/search.rs` and
-      `rust/src/beacons.rs::run_history`. Mirror the cost-mode reduce
-      pattern in `rust/src/main.rs`.
-- [ ] Add a goroutine fan-out to `go/search.go::Run` and
-      `go/beacons.go::RunHistory`. Use `sync.WaitGroup` + buffered
-      channel; merge results after.
-- [ ] Re-bench all four impls; update `RESULTS.md`. Target: cpp
-      reclaims the search-mode lead (currently 4.16× behind zig); cpp
-      beacons-history stays the fastest; rust + go close their gaps to
-      cpp.
+This entire section is closed; see the matching `[x]` entry at the
+top of the file for the result summary. Kept here for archival
+context (the design notes were accurate; only the prediction about
+cpp reclaiming the lead was wrong — rust took it instead).
+
+- [x] Worker pool added to `cpp/search.cpp::run` and
+      `cpp/beacons.cpp::runHistory`. Atomic-index pattern mirroring
+      `main.cpp::run_cost`. Per-thread simdjson `parser` (constructed
+      locally per `scanFile()` call), shared compiled regex (const ops
+      are thread-safe).
+- [x] `rayon::par_iter().reduce()` added to `rust/src/search.rs` and
+      `rust/src/beacons.rs::run_history`. Inside `pool.install()`,
+      mirroring `main.rs::run_cost`.
+- [x] Goroutine fan-out added to `go/search.go::Run` and
+      `go/beacons.go::RunHistory`. `sync.WaitGroup` + per-worker
+      accumulator indexed by `tid`, merged after `wg.Wait()`. Mirrors
+      `main.go::runCost`.
+- [x] Re-benched all four impls; `RESULTS.md` updated.
 
 **Context.** After PR #6 (Zig perf-gap close), zig is fastest in
 search by a wide margin because it's the only impl with a worker pool

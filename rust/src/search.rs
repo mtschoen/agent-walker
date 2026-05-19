@@ -3,6 +3,7 @@
 // skills-dev/docs/superpowers/specs/claude-walker-search.md (pre-merge)
 // for the CLI contract.
 
+use rayon::prelude::*;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -624,11 +625,36 @@ pub fn run(raw: &[String]) {
     // follow-up tracked in PLAN.md.
     let roots_walked = 1;
 
-    // Collect hits across files.
-    let mut hits: Vec<Hit> = Vec::new();
-    for f in &files {
-        hits.extend(process_file(f, &args, &re, &host_root));
-    }
+    // Parallel per-file scan. Work unit = one file; each rayon task returns a
+    // local Vec<Hit> which we concat via reduce. The sort below restores the
+    // deterministic ordering required by SPEC. regex::Regex is Send+Sync for
+    // read-only matching, and serde_json::from_str is per-call thread-safe,
+    // so the shared `re` and `&host_root` are fine. Mirrors the cost-mode
+    // pattern in main.rs::run_cost.
+    let workers = std::cmp::min(
+        8,
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4),
+    );
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build()
+        .expect("rayon pool");
+
+    let mut hits: Vec<Hit> = pool.install(|| {
+        files
+            .par_iter()
+            .map(|f| process_file(f, &args, &re, &host_root))
+            .reduce(Vec::new, |mut acc, mut next| {
+                if acc.is_empty() {
+                    next
+                } else {
+                    acc.append(&mut next);
+                    acc
+                }
+            })
+    });
 
     // Sort newest first by timestamp; tiebreak by (session_id, line_number) for
     // deterministic ordering when timestamps collide.
