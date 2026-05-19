@@ -37,130 +37,27 @@
       (typed serde_json + rayon beat simdjson on-demand + std::thread
       at 8× concurrency). Landed as commits 98dd5d6 / 69bd1c2 / 87c4e24,
       merged as f971156 + 730518a. RESULTS.md updated.
+- [x] Investigate cpp cost-mode per-session regression vs rust. The
+      working theory — per-line `padded_string` allocation in
+      `walk_group` — was confirmed. Fix: `padded_string_view` into the
+      whole-file `padded_string::load` buffer. Applied to all three
+      hot paths (cost, beacons-{latest,history}) plus a search.cpp
+      mmap rewrite, `std::regex` replacement, dropped `text_with_tools`
+      double-extract, and zero-alloc `parse_iso8601` / `rates_for`.
+      Result on the same 365-group fleet (11-round interleaved median):
+      cpp cost 139ms, beacons-history 146ms, search 103ms — **cpp now
+      leads every mode** (rust second in all three). Ranges don't
+      overlap. Decision gate ("if cpp closes the gap, install target
+      stays as is") resolved in favor of cpp; rust promotion is not
+      needed. PR #8 on gitea (squash-merged as 17eebd7); RESULTS.md
+      "What changed in cpp perf-pass-2" section has the per-commit
+      breakdown.
 
 ## Inbox
 
-### Investigate cpp cost-mode per-session regression vs rust — before promoting rust to primary
-
-After the parallelize-cpp/rust/go pass landed, the interleaved 11-round
-bench (RESULTS.md "Headline numbers") showed rust ahead in every mode.
-For `search` and `beacons-history` that's explainable — the pass closed
-the parallelism gap and rust's typed `serde_json::Deserialize` has
-lower per-line parse cost than cpp's `simdjson::ondemand::iterate(padded_string)`.
-
-But `cost` mode is the worrying one: **we did not touch cost-mode code
-in this pass at all** (`git diff 50d0a93..dcbe91e -- cpp/main.cpp
-rust/src/main.rs go/main.go zig/src/main.zig` returns empty). Yet:
-
-| Impl  | Old fleet (130 grps) | New fleet (900 grps) | per-group, old → new |
-| ----- | -------------------: | -------------------: | -------------------: |
-| cpp   |  81ms                | 333ms                | 0.62 → 0.37 ms/grp   |
-| rust  | 106ms                | 206ms                | 0.82 → 0.23 ms/grp   |
-| go    | 110ms                | 306ms                | 0.85 → 0.34 ms/grp   |
-
-Both got faster per-session (warm-cache benefit from a bigger fleet
-hitting OS file cache, probably), but **rust got 3.6× faster per
-session while cpp got only 1.7× faster**. With the parser code
-unchanged on either side, that asymmetry has to be a real scaling
-difference in how the two parse the per-line work — and it's the lever
-we'd want to pull before adopting rust as the install target.
-
-**Before promoting rust to install.bat / install.sh, take a stab at cpp.**
-Some hypotheses to chase, in rough order of suspicion:
-
-1. **Per-line `padded_string` allocation cost.** `cpp/main.cpp::walk_group`
-   builds a `simdjson::padded_string(line)` for every JSONL line. That's
-   one heap allocation + memcpy per line — at 900 groups × ~100 lines/group
-   ≈ 90K allocations per cost run. Compare against rust's
-   `serde_json::from_slice(&line_bytes)` which uses the input bytes
-   in-place. Profile with `valgrind --tool=cachegrind` or just
-   instrument with `std::chrono` around the allocation to confirm. If
-   this is the bottleneck, the fix is to reuse a single `padded_string`
-   buffer per thread, resizing in place via
-   `parser.allocate(buffer_capacity)` once and writing into it. Or
-   look into `parser.iterate_padded(line)` if it exists in v4.6.4
-   — some versions accept a non-owning buffer with manual padding
-   provided.
-
-2. **`std::string` model construction.** `walk_group` calls
-   `model.assign(model_view.data(), model_view.size())` for every
-   assistant line. The lifetime of the underlying `string_view` is
-   the simdjson parser's internal buffer, which gets reused on the
-   next `iterate()`. Hence the assign-into-std::string. But this is
-   another heap alloc per assistant line. Could be replaced by
-   matching the model substring against a small string table inline
-   (sonnet/opus/haiku — three string prefixes are all we care about),
-   avoiding the `std::string` entirely.
-
-3. **`std::transform(::tolower)` in `rates_for`.** Called per assistant
-   line; allocates+copies the model string just to lowercase it. ASCII
-   prefix-match on the original would skip the copy. Trivial fix.
-
-4. **`std::unordered_set<std::string> seen_ids` per group.** Each
-   `insert(std::move(mid))` heap-allocates the string. With 4-byte SSO
-   the typical Anthropic message-id is too long for inline storage.
-   Consider `absl::flat_hash_set<uint64_t>` keyed on a FNV-1a or
-   wyhash of the id bytes — collisions would be statistically zero at
-   this corpus size.
-
-5. **simdjson per-thread parser construction overhead.** Each thread
-   gets a fresh `simdjson::ondemand::parser`. That parser allocates
-   internal buffers on first `iterate()`. With 900 groups split across
-   8 threads, that's ~112 group-files per thread sequentially — first
-   iterate per group on a thread is potentially expensive. Pre-warm
-   the parser with a dummy iterate at thread start, or reuse the same
-   parser across all groups assigned to a thread (already the case
-   — verify).
-
-6. **discovery vs walk split.** What fraction of the 333ms is
-   `discover_groups` (filesystem stat-walk) vs `walk_group` (parsing)?
-   Instrument both and compare to rust's. If discovery is the
-   bottleneck on Windows specifically (mtime filter walking 1500 files
-   with a stat each), the fix is independent of the parser hypothesis
-   above.
-
-**Methodology.**
-
-- Use `.claude/scripts/bench-interleaved.py` (created this session
-  but gitignored under .claude/; recreate if missing) — it interleaves
-  rounds across all four impls so noise is balanced. 11 rounds, drop
-  top+bottom, report median.
-- Profile with the OS tool of choice: Windows `Windows Performance
-  Recorder` + `Windows Performance Analyzer` (free, captures call
-  stacks), or just sprinkle `std::chrono::steady_clock` around the
-  suspected hot regions and emit timings to stderr. Don't reach for
-  `perf` — this is a Windows-primary investigation.
-- Each hypothesis should be measured *in isolation* (one change at a
-  time) so attribution is clean. If hypothesis 1 closes 70% of the
-  gap and hypothesis 2 closes 5% more, do the cheap ones first.
-- Once cpp matches or beats rust per-session, re-run the interleaved
-  bench and update RESULTS.md's headline table.
-
-**Decision gate.** This investigation is a prerequisite to switching
-install.bat / install.sh to deploy rust. If cpp closes the gap, the
-install target stays as is — cpp's binary is the smallest (267 KB vs
-rust 423 KB), warmup cost is lower, and there's institutional
-familiarity with the simdjson-on-demand code path. If after the
-optimizations cpp still loses by ≥10% per-session, then promote rust.
-
-**Out of scope.**
-
-- Don't touch `search` or `beacons-history` in cpp — those just landed
-  and are at acceptable parallel-mode floors. The asymmetry of
-  interest is in `cost`.
-- Don't refactor away from `simdjson::ondemand`. The on-demand API is
-  the right shape for forward-only field extraction; the suspected
-  bottlenecks are allocations *around* the parser, not the parser
-  itself.
-- Don't bench against the per-machine production fleet to claim
-  speedups — use the conformance corpus or generate a synthetic
-  fleet of known size so the absolute numbers are reproducible.
-
-**Pointer for the next agent.** Read `cpp/main.cpp::walk_group`
-(roughly lines 149-277) end-to-end; that's the per-line hot loop.
-Compare against `rust/src/main.rs`'s walk function for shape. The
-rust impl is roughly 2× as compact for the same work — that's where
-the per-allocation accounting lives.
+<!-- "Investigate cpp cost-mode per-session regression vs rust" was
+the first item here; closed by PR #8 (perf-pass-2). See the matching
+[x] entry in Done above for the resolution. -->
 
 ### Rainy-day: roll our own JSON parser in each language
 
@@ -188,8 +85,8 @@ File this under "fun exercise for a rainy day."
       `_walk_pace_buckets`: if `~/.claude/walker` exists and is
       executable, subprocess it; on any failure fall back to the
       existing Python parallel walker. Stays optional — no install
-      friction added to schoen-claude-status. **Winner is C++** (88ms
-      median); package as `~/.claude/walker.exe` from
+      friction added to schoen-claude-status. **Winner is C++** (139ms
+      median post-perf-pass-2); package as `~/.claude/walker.exe` from
       `cpp/build/Release/walker.exe`.
 
 ### Port walker-roots / cross-machine to non-cpp impls

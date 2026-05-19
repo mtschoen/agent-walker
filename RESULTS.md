@@ -68,11 +68,13 @@ the ranking is robust to noise. All four impls report identical
 trailing/window/files/groups/n_pairs/bias_factor on the same fleet
 under the same `--now` (sanity-checked before bench).
 
-Bench harness was an ad-hoc PowerShell script (interleaved rounds,
-wall-clock via `System.Diagnostics.Stopwatch`, one warm-up round per
-cell, drop top+bottom). `shared/bench.py` runs sequentially and is
-fine for single-impl tuning but doesn't isolate cross-impl noise the
-same way; promote to a tracked harness on next refresh.
+Bench harness: `.claude/scripts/bench-interleaved.py` (gitignored —
+lives outside the tracked tree; recreate from the methodology above if
+missing). It runs N interleaved rounds across the four impls,
+drops top+bottom, and reports median + walker-internal `elapsed_ms`
+alongside wall-clock so you can see how much of the wall is per-process
+startup. `shared/bench.py` runs sequentially per impl and is fine for
+single-impl tuning, but doesn't isolate cross-impl noise.
 
 ### Historical: rust leadership window
 
