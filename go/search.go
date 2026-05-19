@@ -206,50 +206,54 @@ type searchFileInfo struct {
 	Path      string
 	Slug      string
 	SessionID string
+	HostRoot  string
 }
 
-func searchDiscoverFiles(root string, since *float64, cwdSlug *string) []searchFileInfo {
+func searchDiscoverFiles(roots []string, since *float64, cwdSlug *string) []searchFileInfo {
 	var out []searchFileInfo
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return out
-	}
 	earliestTime := time.Time{}
 	if since != nil {
 		earliestTime = time.Unix(0, int64(*since*1e9))
 	}
-	for _, slugEnt := range entries {
-		if !slugEnt.IsDir() {
-			continue
-		}
-		slug := slugEnt.Name()
-		if cwdSlug != nil && slug != *cwdSlug {
-			continue
-		}
-		slugPath := filepath.Join(root, slug)
-		dirEntries, err := os.ReadDir(slugPath)
+	for _, root := range roots {
+		entries, err := os.ReadDir(root)
 		if err != nil {
 			continue
 		}
-		for _, fEnt := range dirEntries {
-			if fEnt.IsDir() {
+		for _, slugEnt := range entries {
+			if !slugEnt.IsDir() {
 				continue
 			}
-			if !strings.HasSuffix(fEnt.Name(), ".jsonl") {
+			slug := slugEnt.Name()
+			if cwdSlug != nil && slug != *cwdSlug {
 				continue
 			}
-			if since != nil {
-				info, err := fEnt.Info()
-				if err == nil && info.ModTime().Before(earliestTime) {
+			slugPath := filepath.Join(root, slug)
+			dirEntries, err := os.ReadDir(slugPath)
+			if err != nil {
+				continue
+			}
+			for _, fEnt := range dirEntries {
+				if fEnt.IsDir() {
 					continue
 				}
+				if !strings.HasSuffix(fEnt.Name(), ".jsonl") {
+					continue
+				}
+				if since != nil {
+					info, err := fEnt.Info()
+					if err == nil && info.ModTime().Before(earliestTime) {
+						continue
+					}
+				}
+				df := searchFileInfo{
+					Path:      filepath.Join(slugPath, fEnt.Name()),
+					Slug:      slug,
+					SessionID: strings.TrimSuffix(fEnt.Name(), ".jsonl"),
+					HostRoot:  root,
+				}
+				out = append(out, df)
 			}
-			df := searchFileInfo{
-				Path:      filepath.Join(slugPath, fEnt.Name()),
-				Slug:      slug,
-				SessionID: strings.TrimSuffix(fEnt.Name(), ".jsonl"),
-			}
-			out = append(out, df)
 		}
 	}
 	return out
@@ -372,6 +376,8 @@ type searchArgs struct {
 	Format              string
 	SnippetChars        uint32
 	ProjectsRoot        string
+	ExtraProjectsRoots  []string
+	ReadConfig          bool
 	Now                 float64
 }
 
@@ -383,6 +389,7 @@ func parseSearchArgs(raw []string) (searchArgs, error) {
 	args.Format = "pretty"
 	args.SnippetChars = 240
 	args.ProjectsRoot = defaultProjectsRoot()
+	args.ReadConfig = true
 	args.Now = float64(time.Now().UnixNano()) / 1e9
 
 	var sinceRaw, untilRaw *string
@@ -471,6 +478,14 @@ func parseSearchArgs(raw []string) (searchArgs, error) {
 			}
 			i++
 			args.ProjectsRoot = raw[i]
+		case "--extra-projects-root":
+			if i+1 >= len(raw) {
+				return args, fmt.Errorf("--extra-projects-root needs a value")
+			}
+			i++
+			args.ExtraProjectsRoots = append(args.ExtraProjectsRoots, raw[i])
+		case "--no-config":
+			args.ReadConfig = false
 		case "--now":
 			if i+1 >= len(raw) {
 				return args, fmt.Errorf("--now needs a value")
@@ -557,7 +572,7 @@ func isSearchNumeric(s string) bool {
 
 // === File processing ===
 
-func searchProcessFile(f searchFileInfo, args searchArgs, re *regexp.Regexp, hostRoot string) []searchHit {
+func searchProcessFile(f searchFileInfo, args searchArgs, re *regexp.Regexp) []searchHit {
 	msgs := searchScanFile(f.Path)
 	var hits []searchHit
 
@@ -613,7 +628,7 @@ func searchProcessFile(f searchFileInfo, args searchArgs, re *regexp.Regexp, hos
 			TimestampStr:   m.TimestampStr,
 			SessionID:      f.SessionID,
 			CwdSlug:        f.Slug,
-			HostRoot:       hostRoot,
+			HostRoot:       f.HostRoot,
 			FilePath:       f.Path,
 			LineNumber:     m.LineNumber,
 			Role:           m.Role,
@@ -705,14 +720,17 @@ func runSearch(argv []string) {
 		os.Exit(2)
 	}
 
+	// Resolve roots (primary + CLI extras + config extras).
+	roots := ResolveRoots(args.ProjectsRoot, args.ExtraProjectsRoots, args.ReadConfig)
+	rootsWalked := uint64(len(roots))
+
 	// Discover files
 	var cwdSlug *string
 	if args.Cwd != "" {
 		cwdSlug = &args.Cwd
 	}
-	files := searchDiscoverFiles(args.ProjectsRoot, args.Since, cwdSlug)
+	files := searchDiscoverFiles(roots, args.Since, cwdSlug)
 	filesWalked := uint64(len(files))
-	hostRoot := args.ProjectsRoot
 
 	// Process files in parallel. Work unit = one file; each worker owns a
 	// local hits slice to avoid contention; merge after all workers exit,
@@ -739,7 +757,7 @@ func runSearch(argv []string) {
 			defer wg.Done()
 			local := perWorkerHits[tid][:0]
 			for f := range work {
-				hs := searchProcessFile(f, args, re, hostRoot)
+				hs := searchProcessFile(f, args, re)
 				if len(hs) > 0 {
 					local = append(local, hs...)
 				}
@@ -816,7 +834,7 @@ func runSearch(argv []string) {
 				out.WriteByte('\n')
 			}
 		}
-		searchWriteSummary(out, hitsOutput, sessionsMatched, 1, filesWalked, truncated, elapsedMs)
+		searchWriteSummary(out, hitsOutput, sessionsMatched, rootsWalked, filesWalked, truncated, elapsedMs)
 		out.WriteByte('\n')
 		fmt.Print(out.String())
 	} else {
@@ -848,7 +866,7 @@ func runSearch(argv []string) {
 				fmt.Println()
 			}
 		}
-		searchWriteSummary(out, hitsOutput, sessionsMatched, 1, filesWalked, truncated, elapsedMs)
+		searchWriteSummary(out, hitsOutput, sessionsMatched, rootsWalked, filesWalked, truncated, elapsedMs)
 		out.WriteByte('\n')
 		fmt.Print(out.String())
 	}

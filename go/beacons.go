@@ -295,14 +295,16 @@ func computeIdleInWindow(events []event, lo, hi float64) float64 {
 // === beacons-latest ===
 
 type latestArguments struct {
-	sessionID    string
-	projectsRoot string
-	nowUnix      float64
-	nowSet       bool
+	sessionID          string
+	projectsRoot       string
+	extraProjectsRoots []string
+	readConfig         bool
+	nowUnix            float64
+	nowSet             bool
 }
 
 func parseLatestArguments(args []string) (latestArguments, error) {
-	var parsed latestArguments
+	parsed := latestArguments{readConfig: true}
 	i := 0
 	for i < len(args) {
 		flag := args[i]
@@ -319,6 +321,15 @@ func parseLatestArguments(args []string) (latestArguments, error) {
 			}
 			parsed.projectsRoot = args[i+1]
 			i += 2
+		case "--extra-projects-root":
+			if i+1 >= len(args) {
+				return parsed, fmt.Errorf("--extra-projects-root needs a value")
+			}
+			parsed.extraProjectsRoots = append(parsed.extraProjectsRoots, args[i+1])
+			i += 2
+		case "--no-config":
+			parsed.readConfig = false
+			i++
 		case "--now":
 			if i+1 >= len(args) {
 				return parsed, fmt.Errorf("--now needs a value")
@@ -347,22 +358,25 @@ func runBeaconsLatest(args []string) {
 		fmt.Fprintf(os.Stderr, "walker: beacons-latest: %v\n", err)
 		os.Exit(2)
 	}
-	root := parsed.projectsRoot
-	if root == "" {
-		root = defaultProjectsRoot()
+	primary := parsed.projectsRoot
+	if primary == "" {
+		primary = defaultProjectsRoot()
 	}
 	nowUnix := parsed.nowUnix
 	if !parsed.nowSet {
 		nowUnix = float64(time.Now().UnixNano()) / 1e9
 	}
 
-	parentPattern := filepath.Join(root, "*", parsed.sessionID+".jsonl")
-	subPattern := filepath.Join(root, "*", "*", "subagents", "agent-"+parsed.sessionID+".jsonl")
+	roots := ResolveRoots(primary, parsed.extraProjectsRoots, parsed.readConfig)
 	var paths []string
-	for _, pattern := range []string{parentPattern, subPattern} {
-		matches, err := filepath.Glob(pattern)
-		if err == nil {
-			paths = append(paths, matches...)
+	for _, root := range roots {
+		parentPattern := filepath.Join(root, "*", parsed.sessionID+".jsonl")
+		subPattern := filepath.Join(root, "*", "*", "subagents", "agent-"+parsed.sessionID+".jsonl")
+		for _, pattern := range []string{parentPattern, subPattern} {
+			matches, err := filepath.Glob(pattern)
+			if err == nil {
+				paths = append(paths, matches...)
+			}
 		}
 	}
 
@@ -406,15 +420,17 @@ func formatFloat(value float64) string {
 // === beacons-history ===
 
 type historyArguments struct {
-	periodSeconds uint64
-	winStartUnix  float64
-	projectsRoot  string
-	nowUnix       float64
-	nowSet        bool
+	periodSeconds      uint64
+	winStartUnix       float64
+	projectsRoot       string
+	extraProjectsRoots []string
+	readConfig         bool
+	nowUnix            float64
+	nowSet             bool
 }
 
 func parseHistoryArguments(args []string) (historyArguments, error) {
-	var parsed historyArguments
+	parsed := historyArguments{readConfig: true}
 	periodSet := false
 	i := 0
 	for i < len(args) {
@@ -447,6 +463,15 @@ func parseHistoryArguments(args []string) (historyArguments, error) {
 			}
 			parsed.projectsRoot = args[i+1]
 			i += 2
+		case "--extra-projects-root":
+			if i+1 >= len(args) {
+				return parsed, fmt.Errorf("--extra-projects-root needs a value")
+			}
+			parsed.extraProjectsRoots = append(parsed.extraProjectsRoots, args[i+1])
+			i += 2
+		case "--no-config":
+			parsed.readConfig = false
+			i++
 		case "--now":
 			if i+1 >= len(args) {
 				return parsed, fmt.Errorf("--now needs a value")
@@ -468,24 +493,28 @@ func parseHistoryArguments(args []string) (historyArguments, error) {
 	return parsed, nil
 }
 
-// discoverHistoryGroups groups transcripts by (slug, session_id) without
-// the mtime filter -- beacon entries can sit deep in a long transcript.
-func discoverHistoryGroups(root string) map[groupKey][]string {
+// discoverHistoryGroups groups transcripts by (slug, session_id) across all
+// roots without the mtime filter -- beacon entries can sit deep in a long
+// transcript. Same (slug, session_id) on two roots merges into one group.
+func discoverHistoryGroups(roots []string) map[groupKey][]string {
 	groups := make(map[groupKey][]string)
 
-	parentGlob := filepath.Join(root, "*", "*.jsonl")
-	parentMatches, err := filepath.Glob(parentGlob)
-	if err == nil {
-		for _, path := range parentMatches {
-			slug := filepath.Base(filepath.Dir(path))
-			sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
-			key := groupKey{slug: slug, sessionID: sessionID}
-			groups[key] = append(groups[key], path)
+	for _, root := range roots {
+		parentGlob := filepath.Join(root, "*", "*.jsonl")
+		parentMatches, err := filepath.Glob(parentGlob)
+		if err == nil {
+			for _, path := range parentMatches {
+				slug := filepath.Base(filepath.Dir(path))
+				sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+				key := groupKey{slug: slug, sessionID: sessionID}
+				groups[key] = append(groups[key], path)
+			}
 		}
-	}
 
-	slugEntries, err := os.ReadDir(root)
-	if err == nil {
+		slugEntries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
 		for _, slugEntry := range slugEntries {
 			if !slugEntry.IsDir() {
 				continue
@@ -570,12 +599,13 @@ func runBeaconsHistory(args []string) {
 	if parsed.winStartUnix > windowLo {
 		windowLo = parsed.winStartUnix
 	}
-	root := parsed.projectsRoot
-	if root == "" {
-		root = defaultProjectsRoot()
+	primary := parsed.projectsRoot
+	if primary == "" {
+		primary = defaultProjectsRoot()
 	}
+	roots := ResolveRoots(primary, parsed.extraProjectsRoots, parsed.readConfig)
 
-	groups := discoverHistoryGroups(root)
+	groups := discoverHistoryGroups(roots)
 	sessionCount := uint64(len(groups))
 
 	// Flatten group paths for the worker pool. Group identity does not

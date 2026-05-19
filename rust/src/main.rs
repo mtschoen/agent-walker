@@ -7,12 +7,13 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs::{metadata, File};
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 mod beacons;
 mod content;
 mod search;
+mod walker_roots;
 
 #[derive(Default)]
 struct Args {
@@ -20,10 +21,15 @@ struct Args {
     win_start_unix: f64,
     now_unix: Option<f64>,
     projects_root: Option<PathBuf>,
+    extra_projects_roots: Vec<PathBuf>,
+    read_config: bool,
 }
 
 fn parse_cost_args(args: &[String]) -> Result<Args, String> {
-    let mut result = Args::default();
+    let mut result = Args {
+        read_config: true,
+        ..Args::default()
+    };
     let mut iter = args.iter();
     while let Some(flag) = iter.next() {
         match flag.as_str() {
@@ -53,6 +59,14 @@ fn parse_cost_args(args: &[String]) -> Result<Args, String> {
                 result.projects_root = Some(PathBuf::from(
                     iter.next().ok_or("--projects-root needs a value")?,
                 ))
+            }
+            "--extra-projects-root" => {
+                result.extra_projects_roots.push(PathBuf::from(
+                    iter.next().ok_or("--extra-projects-root needs a value")?,
+                ));
+            }
+            "--no-config" => {
+                result.read_config = false;
             }
             "--version" => {
                 println!("rust/{}", env!("CARGO_PKG_VERSION"));
@@ -187,60 +201,61 @@ fn walk_group(paths: &[PathBuf], period_cutoff: f64, win_start_unix: f64) -> Gro
     GroupResult { trailing, window }
 }
 
-fn discover_groups(root: &Path, earliest: f64) -> HashMap<(String, String), Vec<PathBuf>> {
+fn discover_groups(roots: &[PathBuf], earliest: f64) -> HashMap<(String, String), Vec<PathBuf>> {
     let mut groups: HashMap<(String, String), Vec<PathBuf>> = HashMap::new();
 
-    // Parents: <root>/<slug>/<session_id>.jsonl
-    let parent_pattern = format!("{}/*/*.jsonl", root.display());
-    if let Ok(paths) = glob::glob(&parent_pattern) {
-        for entry in paths.flatten() {
-            if let Ok(meta) = metadata(&entry) {
-                if let Ok(mt) = meta.modified() {
-                    if let Ok(d) = mt.duration_since(UNIX_EPOCH) {
-                        if d.as_secs_f64() < earliest {
-                            continue;
+    for root in roots {
+        // Parents: <root>/<slug>/<session_id>.jsonl
+        let parent_pattern = format!("{}/*/*.jsonl", root.display());
+        if let Ok(paths) = glob::glob(&parent_pattern) {
+            for entry in paths.flatten() {
+                if let Ok(meta) = metadata(&entry) {
+                    if let Ok(mt) = meta.modified() {
+                        if let Ok(d) = mt.duration_since(UNIX_EPOCH) {
+                            if d.as_secs_f64() < earliest {
+                                continue;
+                            }
                         }
                     }
                 }
+                let slug = entry
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let sid = entry
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                groups.entry((slug, sid)).or_default().push(entry);
             }
-            let slug = entry
-                .parent()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let sid = entry
-                .file_stem()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            groups.entry((slug, sid)).or_default().push(entry);
         }
-    }
 
-    // Subagents: <root>/<slug>/<session_id>/subagents/agent-*.jsonl
-    let sub_pattern = format!("{}/*/*/subagents/agent-*.jsonl", root.display());
-    if let Ok(paths) = glob::glob(&sub_pattern) {
-        for entry in paths.flatten() {
-            if let Ok(meta) = metadata(&entry) {
-                if let Ok(mt) = meta.modified() {
-                    if let Ok(d) = mt.duration_since(UNIX_EPOCH) {
-                        if d.as_secs_f64() < earliest {
-                            continue;
+        // Subagents: <root>/<slug>/<session_id>/subagents/agent-*.jsonl
+        let sub_pattern = format!("{}/*/*/subagents/agent-*.jsonl", root.display());
+        if let Ok(paths) = glob::glob(&sub_pattern) {
+            for entry in paths.flatten() {
+                if let Ok(meta) = metadata(&entry) {
+                    if let Ok(mt) = meta.modified() {
+                        if let Ok(d) = mt.duration_since(UNIX_EPOCH) {
+                            if d.as_secs_f64() < earliest {
+                                continue;
+                            }
                         }
                     }
                 }
+                let session_dir = entry.parent().and_then(|p| p.parent());
+                let sid = session_dir
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let slug = session_dir
+                    .and_then(|p| p.parent())
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                groups.entry((slug, sid)).or_default().push(entry);
             }
-            // path = .../<slug>/<sid>/subagents/agent-*.jsonl
-            let session_dir = entry.parent().and_then(|p| p.parent());
-            let sid = session_dir
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let slug = session_dir
-                .and_then(|p| p.parent())
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            groups.entry((slug, sid)).or_default().push(entry);
         }
     }
 
@@ -303,9 +318,14 @@ fn run_cost(args: &[String]) {
     let now_unix = parsed.now_unix.unwrap_or_else(current_unix);
     let period_cutoff = now_unix - parsed.period_seconds as f64;
     let earliest = period_cutoff.min(parsed.win_start_unix);
-    let root = parsed.projects_root.unwrap_or_else(default_projects_root);
+    let primary = parsed.projects_root.unwrap_or_else(default_projects_root);
+    let roots = walker_roots::resolve_roots(
+        primary,
+        &parsed.extra_projects_roots,
+        parsed.read_config,
+    );
 
-    let groups = discover_groups(&root, earliest);
+    let groups = discover_groups(&roots, earliest);
     let total_files: usize = groups.values().map(|v| v.len()).sum();
     let total_groups = groups.len();
 

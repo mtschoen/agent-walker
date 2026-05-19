@@ -5,6 +5,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const main = @import("main.zig");
+const walker_roots = @import("walker_roots.zig");
 
 const is_windows = main.is_windows;
 const PATH_SEP = main.PATH_SEP;
@@ -471,11 +472,14 @@ fn computeIdleInWindow(events: []const Event, lo: f64, hi: f64) f64 {
 const LatestArgs = struct {
     session_id: []const u8 = "",
     projects_root: ?[]const u8 = null,
+    extra_roots: [][]const u8 = &.{},
+    read_config: bool = true,
     now_unix: ?f64 = null,
 };
 
-fn parseLatestArgs(args: [][]const u8) !LatestArgs {
+fn parseLatestArgs(alloc: Allocator, args: [][]const u8) !LatestArgs {
     var out = LatestArgs{};
+    var extras: std.ArrayList([]const u8) = .empty;
     var i: usize = 0;
     while (i < args.len) {
         const flag = args[i];
@@ -484,6 +488,10 @@ fn parseLatestArgs(args: [][]const u8) !LatestArgs {
             out.session_id = main.grab(args, &i, "--session-id");
         } else if (std.mem.eql(u8, flag, "--projects-root")) {
             out.projects_root = main.grab(args, &i, "--projects-root");
+        } else if (std.mem.eql(u8, flag, "--extra-projects-root")) {
+            try extras.append(alloc, main.grab(args, &i, "--extra-projects-root"));
+        } else if (std.mem.eql(u8, flag, "--no-config")) {
+            out.read_config = false;
         } else if (std.mem.eql(u8, flag, "--now")) {
             out.now_unix = std.fmt.parseFloat(f64, main.grab(args, &i, "--now")) catch main.die("--now: invalid");
         } else {
@@ -492,6 +500,7 @@ fn parseLatestArgs(args: [][]const u8) !LatestArgs {
         }
     }
     if (out.session_id.len == 0) main.die("beacons-latest: --session-id is required");
+    out.extra_roots = try extras.toOwnedSlice(alloc);
     return out;
 }
 
@@ -503,16 +512,18 @@ pub fn runLatest(gpa: Allocator, args: [][]const u8) !void {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const parsed = try parseLatestArgs(args);
-    const root = if (parsed.projects_root) |r| try alloc.dupe(u8, r) else try main.defaultRoot(alloc);
+    const parsed = try parseLatestArgs(alloc, args);
+    const primary = if (parsed.projects_root) |r| try alloc.dupe(u8, r) else try main.defaultRoot(alloc);
+    const roots = try walker_roots.resolveRoots(alloc, primary, parsed.extra_roots, parsed.read_config);
     const now_unix: f64 = parsed.now_unix orelse main.nowUnix();
 
-    const paths = try findSessionPaths(alloc, root, parsed.session_id);
-
     var best: ?Found = null;
-    for (paths.items) |p| {
-        if (findLatestInPath(alloc, p)) |f| {
-            if (best == null or f.ts >= best.?.ts) best = f;
+    for (roots) |root| {
+        const paths = try findSessionPaths(alloc, root, parsed.session_id);
+        for (paths.items) |p| {
+            if (findLatestInPath(alloc, p)) |f| {
+                if (best == null or f.ts >= best.?.ts) best = f;
+            }
         }
     }
 
@@ -540,11 +551,14 @@ const HistoryArgs = struct {
     period_seconds: u64 = 0,
     win_start_unix: f64 = 0.0,
     projects_root: ?[]const u8 = null,
+    extra_roots: [][]const u8 = &.{},
+    read_config: bool = true,
     now_unix: ?f64 = null,
 };
 
-fn parseHistoryArgs(args: [][]const u8) !HistoryArgs {
+fn parseHistoryArgs(alloc: Allocator, args: [][]const u8) !HistoryArgs {
     var out = HistoryArgs{};
+    var extras: std.ArrayList([]const u8) = .empty;
     var got_period = false;
     var i: usize = 0;
     while (i < args.len) {
@@ -557,6 +571,10 @@ fn parseHistoryArgs(args: [][]const u8) !HistoryArgs {
             out.win_start_unix = std.fmt.parseFloat(f64, main.grab(args, &i, "--win-start")) catch main.die("--win-start: invalid");
         } else if (std.mem.eql(u8, flag, "--projects-root")) {
             out.projects_root = main.grab(args, &i, "--projects-root");
+        } else if (std.mem.eql(u8, flag, "--extra-projects-root")) {
+            try extras.append(alloc, main.grab(args, &i, "--extra-projects-root"));
+        } else if (std.mem.eql(u8, flag, "--no-config")) {
+            out.read_config = false;
         } else if (std.mem.eql(u8, flag, "--now")) {
             out.now_unix = std.fmt.parseFloat(f64, main.grab(args, &i, "--now")) catch main.die("--now: invalid");
         } else {
@@ -565,6 +583,7 @@ fn parseHistoryArgs(args: [][]const u8) !HistoryArgs {
         }
     }
     if (!got_period) main.die("beacons-history: --period is required");
+    out.extra_roots = try extras.toOwnedSlice(alloc);
     return out;
 }
 
@@ -580,13 +599,14 @@ pub fn runHistory(gpa: Allocator, args: [][]const u8) !void {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const parsed = try parseHistoryArgs(args);
-    const root = if (parsed.projects_root) |r| try alloc.dupe(u8, r) else try main.defaultRoot(alloc);
+    const parsed = try parseHistoryArgs(alloc, args);
+    const primary = if (parsed.projects_root) |r| try alloc.dupe(u8, r) else try main.defaultRoot(alloc);
+    const roots = try walker_roots.resolveRoots(alloc, primary, parsed.extra_roots, parsed.read_config);
     const now_unix: f64 = parsed.now_unix orelse main.nowUnix();
     const period_cutoff = now_unix - @as(f64, @floatFromInt(parsed.period_seconds));
     const window_lo = @max(period_cutoff, parsed.win_start_unix);
 
-    var grp_map = try main.discover(alloc, root, -std.math.inf(f64));
+    var grp_map = try main.discover(alloc, roots, -std.math.inf(f64));
     const session_count = grp_map.count();
 
     var groups: std.ArrayList([]const []const u8) = .empty;

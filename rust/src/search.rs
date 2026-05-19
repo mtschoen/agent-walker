@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, UNIX_EPOCH};
 
 use crate::content::{extract_text, is_only_tool_blocks};
-use crate::{current_unix, default_projects_root, parse_iso8601};
+use crate::{current_unix, default_projects_root, parse_iso8601, walker_roots};
 
 // === Flag types ===
 
@@ -45,6 +45,8 @@ struct SearchArgs {
     format: Format,
     snippet_chars: u32,
     projects_root: PathBuf,
+    extra_projects_roots: Vec<PathBuf>,
+    read_config: bool,
 }
 
 // === Arg parsing ===
@@ -65,6 +67,8 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
     let mut format = Format::Pretty;
     let mut snippet_chars: u32 = 240;
     let mut projects_root: Option<PathBuf> = None;
+    let mut extra_projects_roots: Vec<PathBuf> = Vec::new();
+    let mut read_config = true;
     let mut now_override: Option<f64> = None;
 
     let mut iter = raw.iter();
@@ -116,6 +120,14 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
                     iter.next().ok_or("--projects-root needs a value")?,
                 ));
             }
+            "--extra-projects-root" => {
+                extra_projects_roots.push(PathBuf::from(
+                    iter.next().ok_or("--extra-projects-root needs a value")?,
+                ));
+            }
+            "--no-config" => {
+                read_config = false;
+            }
             "--now" => {
                 now_override = Some(iter.next().ok_or("--now needs a value")?
                     .parse().map_err(|e| format!("--now: {e}"))?);
@@ -152,6 +164,8 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
         pattern, regex, case_sensitive, role, since, until, cwd,
         context, limit, count_only, include_tool_blocks, format, snippet_chars,
         projects_root: projects_root.unwrap_or_else(default_projects_root),
+        extra_projects_roots,
+        read_config,
     })
 }
 
@@ -252,37 +266,46 @@ struct DiscoveredFile {
     path: PathBuf,
     slug: String,
     session_id: String,
+    host_root: String,
 }
 
 fn discover_files(
-    root: &Path,
+    roots: &[PathBuf],
     since: Option<f64>,
     cwd_slug: Option<&str>,
 ) -> Vec<DiscoveredFile> {
     let mut files: Vec<DiscoveredFile> = Vec::new();
     let slug_pat = cwd_slug.unwrap_or("*");
-    let parent_pattern = format!("{}/{}/*.jsonl", root.display(), slug_pat);
-    if let Ok(entries) = glob::glob(&parent_pattern) {
-        for entry in entries.flatten() {
-            if let Some(cutoff) = since {
-                if let Ok(meta) = metadata(&entry) {
-                    if let Ok(mt) = meta.modified() {
-                        if let Ok(d) = mt.duration_since(UNIX_EPOCH) {
-                            if d.as_secs_f64() < cutoff {
-                                continue;
+    for root in roots {
+        let host_root = root.display().to_string();
+        let parent_pattern = format!("{}/{}/*.jsonl", root.display(), slug_pat);
+        if let Ok(entries) = glob::glob(&parent_pattern) {
+            for entry in entries.flatten() {
+                if let Some(cutoff) = since {
+                    if let Ok(meta) = metadata(&entry) {
+                        if let Ok(mt) = meta.modified() {
+                            if let Ok(d) = mt.duration_since(UNIX_EPOCH) {
+                                if d.as_secs_f64() < cutoff {
+                                    continue;
+                                }
                             }
                         }
                     }
                 }
+                let slug = entry.parent()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let sid = entry.file_stem()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                files.push(DiscoveredFile {
+                    path: entry,
+                    slug,
+                    session_id: sid,
+                    host_root: host_root.clone(),
+                });
             }
-            let slug = entry.parent()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let sid = entry.file_stem()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            files.push(DiscoveredFile { path: entry, slug, session_id: sid });
         }
     }
     files
@@ -422,7 +445,6 @@ fn process_file(
     file: &DiscoveredFile,
     args: &SearchArgs,
     re: &Regex,
-    host_root: &str,
 ) -> Vec<Hit> {
     let messages = scan_file(&file.path);
     let mut hits: Vec<Hit> = Vec::new();
@@ -472,7 +494,7 @@ fn process_file(
             timestamp_str: m.timestamp_str.clone(),
             session_id: file.session_id.clone(),
             cwd_slug: file.slug.clone(),
-            host_root: host_root.to_string(),
+            host_root: file.host_root.clone(),
             file_path: file.path.display().to_string(),
             line_number: m.line_number,
             role: m.role.clone(),
@@ -616,21 +638,22 @@ pub fn run(raw: &[String]) {
         }
     };
 
-    let files = discover_files(&args.projects_root, args.since, args.cwd.as_deref());
+    let roots = walker_roots::resolve_roots(
+        args.projects_root.clone(),
+        &args.extra_projects_roots,
+        args.read_config,
+    );
+    let files = discover_files(&roots, args.since, args.cwd.as_deref());
     let files_walked = files.len();
-    let host_root = args.projects_root.display().to_string();
-    // v1: single root from --projects-root (default ~/.claude/projects). Reports 1
-    // whether or not the root produced files — that matches "roots walked" rather
-    // than "roots that yielded hits". walker-roots.json multi-root support is the
-    // follow-up tracked in PLAN.md.
-    let roots_walked = 1;
+    let roots_walked = roots.len();
 
     // Parallel per-file scan. Work unit = one file; each rayon task returns a
     // local Vec<Hit> which we concat via reduce. The sort below restores the
     // deterministic ordering required by SPEC. regex::Regex is Send+Sync for
     // read-only matching, and serde_json::from_str is per-call thread-safe,
-    // so the shared `re` and `&host_root` are fine. Mirrors the cost-mode
-    // pattern in main.rs::run_cost.
+    // so the shared `re` is fine. Each file carries its own host_root (the
+    // root it was discovered under). Mirrors the cost-mode pattern in
+    // main.rs::run_cost.
     let workers = std::cmp::min(
         8,
         std::thread::available_parallelism()
@@ -645,7 +668,7 @@ pub fn run(raw: &[String]) {
     let mut hits: Vec<Hit> = pool.install(|| {
         files
             .par_iter()
-            .map(|f| process_file(f, &args, &re, &host_root))
+            .map(|f| process_file(f, &args, &re))
             .reduce(Vec::new, |mut acc, mut next| {
                 if acc.is_empty() {
                     next

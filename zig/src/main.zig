@@ -6,6 +6,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const beacons = @import("beacons.zig");
 const search = @import("search.zig");
+const walker_roots = @import("walker_roots.zig");
 
 const VERSION = "zig/0.1.1";
 pub const is_windows = builtin.os.tag == .windows;
@@ -371,10 +372,13 @@ const Cli = struct {
     win_start: f64 = 0.0,
     now: ?f64 = null,
     root: ?[]const u8 = null,
+    extra_roots: [][]const u8 = &.{},
+    read_config: bool = true,
 };
 
-fn parseCli(argv: [][]const u8) !Cli {
+fn parseCli(alloc: Allocator, argv: [][]const u8) !Cli {
     var cli = Cli{};
+    var extras: std.ArrayList([]const u8) = .empty;
     var i: usize = 0;
     while (i < argv.len) {
         const flag = argv[i];
@@ -387,6 +391,10 @@ fn parseCli(argv: [][]const u8) !Cli {
             cli.now = std.fmt.parseFloat(f64, grab(argv, &i, "--now")) catch die("--now: invalid");
         } else if (std.mem.eql(u8, flag, "--projects-root")) {
             cli.root = grab(argv, &i, "--projects-root");
+        } else if (std.mem.eql(u8, flag, "--extra-projects-root")) {
+            try extras.append(alloc, grab(argv, &i, "--extra-projects-root"));
+        } else if (std.mem.eql(u8, flag, "--no-config")) {
+            cli.read_config = false;
         } else if (std.mem.eql(u8, flag, "--version")) {
             writeStdout(VERSION ++ "\n");
             std.process.exit(0);
@@ -396,6 +404,7 @@ fn parseCli(argv: [][]const u8) !Cli {
         }
     }
     if (cli.period == 0) die("--period is required");
+    cli.extra_roots = try extras.toOwnedSlice(alloc);
     return cli;
 }
 
@@ -694,7 +703,40 @@ pub fn defaultRoot(alloc: Allocator) ![]const u8 {
     return alloc.dupe(u8, ".claude/projects");
 }
 
-pub fn discover(alloc: Allocator, root_path: []const u8, earliest: f64) !FileMap {
+/// Multi-root discovery: walk every resolved root and merge entries into
+/// one (slug,sid) -> [paths] map. Groups from different roots that share a
+/// (slug,sid) are merged (seen_ids dedup at walk_group time handles
+/// duplicate entries).
+pub fn discover(alloc: Allocator, roots: []const []const u8, earliest: f64) !FileMap {
+    var map = FileMap.init(alloc);
+    for (roots) |root_path| {
+        var per_root = if (is_windows)
+            discoverWindows(alloc, root_path, earliest) catch continue
+        else
+            discoverLinux(alloc, root_path, earliest) catch continue;
+        defer per_root.deinit();
+
+        var it = per_root.iterator();
+        while (it.next()) |kv| {
+            // Need to give the merged map ownership of a fresh key string so
+            // it remains valid after per_root deinits its keys.
+            const new_key = try alloc.dupe(u8, kv.key_ptr.*);
+            const gop = try map.getOrPut(new_key);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = .empty;
+            } else {
+                alloc.free(new_key);
+            }
+            try gop.value_ptr.*.appendSlice(alloc, kv.value_ptr.*.items);
+        }
+    }
+    return map;
+}
+
+/// Single-root discovery (used by both the multi-root wrapper above and by
+/// callers in beacons.zig that want explicit single-root semantics for
+/// some operations).
+pub fn discoverOneRoot(alloc: Allocator, root_path: []const u8, earliest: f64) !FileMap {
     if (is_windows) {
         return discoverWindows(alloc, root_path, earliest);
     } else {
@@ -993,14 +1035,15 @@ fn runCost(gpa: Allocator, args: [][]const u8) !void {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const cli = try parseCli(args);
+    const cli = try parseCli(alloc, args);
     const now: f64 = cli.now orelse nowUnix();
     const pc = now - @as(f64, @floatFromInt(cli.period));
     const earliest = @min(pc, cli.win_start);
 
-    const root = if (cli.root) |r| try alloc.dupe(u8, r) else try defaultRoot(alloc);
+    const primary = if (cli.root) |r| try alloc.dupe(u8, r) else try defaultRoot(alloc);
+    const roots = try walker_roots.resolveRoots(alloc, primary, cli.extra_roots, cli.read_config);
 
-    var grp_map = try discover(alloc, root, earliest);
+    var grp_map = try discover(alloc, roots, earliest);
 
     const ngroups = grp_map.count();
     var nfiles: usize = 0;

@@ -8,6 +8,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const main = @import("main.zig");
+const walker_roots = @import("walker_roots.zig");
 
 const is_windows = main.is_windows;
 const PATH_SEP = main.PATH_SEP;
@@ -32,6 +33,8 @@ const SearchArgs = struct {
     format: Format,
     snippet_chars: u32,
     projects_root: []const u8,
+    extra_roots: [][]const u8,
+    read_config: bool,
     now_unix: f64,
 };
 
@@ -51,6 +54,8 @@ fn parseArgs(alloc: Allocator, raw: [][]const u8) !SearchArgs {
     var format: Format = .pretty;
     var snippet_chars: u32 = 240;
     var projects_root: ?[]const u8 = null;
+    var extra_roots: std.ArrayList([]const u8) = .empty;
+    var read_config = true;
     var now_override: ?f64 = null;
 
     var i: usize = 0;
@@ -107,6 +112,10 @@ fn parseArgs(alloc: Allocator, raw: [][]const u8) !SearchArgs {
             };
         } else if (std.mem.eql(u8, arg, "--projects-root")) {
             projects_root = main.grab(raw, &i, "--projects-root");
+        } else if (std.mem.eql(u8, arg, "--extra-projects-root")) {
+            try extra_roots.append(alloc, main.grab(raw, &i, "--extra-projects-root"));
+        } else if (std.mem.eql(u8, arg, "--no-config")) {
+            read_config = false;
         } else if (std.mem.eql(u8, arg, "--now")) {
             now_override = std.fmt.parseFloat(f64, main.grab(raw, &i, "--now")) catch {
                 writeStderrFmt(alloc, "walker: search: --now: invalid value\n", .{});
@@ -169,6 +178,8 @@ fn parseArgs(alloc: Allocator, raw: [][]const u8) !SearchArgs {
         .format = format,
         .snippet_chars = snippet_chars,
         .projects_root = projects_root orelse try main.defaultRoot(alloc),
+        .extra_roots = try extra_roots.toOwnedSlice(alloc),
+        .read_config = read_config,
         .now_unix = now,
     };
 }
@@ -926,16 +937,24 @@ const DiscoveredFile = struct {
     path: []const u8,
     slug: []const u8,
     session_id: []const u8,
+    host_root: []const u8,
 };
 
-fn discoverFiles(alloc: Allocator, root: []const u8, since: ?f64, cwd_filter: ?[]const u8) ![]DiscoveredFile {
+fn discoverFiles(
+    alloc: Allocator,
+    roots: []const []const u8,
+    since: ?f64,
+    cwd_filter: ?[]const u8,
+) ![]DiscoveredFile {
     var out: std.ArrayList(DiscoveredFile) = .empty;
     errdefer out.deinit(alloc);
 
-    if (is_windows) {
-        try discoverWindows(alloc, &out, root, since, cwd_filter);
-    } else {
-        try discoverLinux(alloc, &out, root, since, cwd_filter);
+    for (roots) |root| {
+        if (is_windows) {
+            try discoverWindows(alloc, &out, root, since, cwd_filter);
+        } else {
+            try discoverLinux(alloc, &out, root, since, cwd_filter);
+        }
     }
     return out.toOwnedSlice(alloc);
 }
@@ -1012,6 +1031,7 @@ fn scanSlugJsonlWindows(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), r
                     .path = path,
                     .slug = slug,
                     .session_id = sid_owned,
+                    .host_root = root,
                 });
             }
             alloc.free(name);
@@ -1095,6 +1115,7 @@ fn scanSlugJsonlLinux(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), roo
                 .path = path,
                 .slug = slug,
                 .session_id = sid,
+                .host_root = root,
             });
         }
     }
@@ -1159,6 +1180,7 @@ const Hit = struct {
     timestamp_str: []const u8,
     session_id: []const u8,
     cwd_slug: []const u8,
+    host_root: []const u8,
     file_path: []const u8,
     line_number: u32,
     role: []const u8,
@@ -1239,6 +1261,7 @@ fn processFile(
             .timestamp_str = m.timestamp_str,
             .session_id = file.session_id,
             .cwd_slug = file.slug,
+            .host_root = file.host_root,
             .file_path = file.path,
             .line_number = m.line_number,
             .role = m.role,
@@ -1284,13 +1307,13 @@ fn hitLessThan(_: void, a: Hit, b: Hit) bool {
 
 // ─── Output ──────────────────────────────────────────────────────────────────
 
-fn writeHitJson(w: *Buf, h: Hit, host_root: []const u8) !void {
+fn writeHitJson(w: *Buf, h: Hit) !void {
     try w.appendStr("{\"type\":\"hit\",\"session_id\":");
     try writeJsonString(w, h.session_id);
     try w.appendStr(",\"cwd_slug\":");
     try writeJsonString(w, h.cwd_slug);
     try w.appendStr(",\"host_root\":");
-    try writeJsonString(w, host_root);
+    try writeJsonString(w, h.host_root);
     try w.appendStr(",\"file_path\":");
     try writeJsonString(w, h.file_path);
     try w.appendFmt(",\"line_number\":{d}", .{h.line_number});
@@ -1353,10 +1376,10 @@ pub fn run(gpa: Allocator, argv: [][]const u8) !void {
     };
     defer pattern.deinit();
 
-    const files = try discoverFiles(alloc, args.projects_root, args.since, args.cwd);
+    const roots = try walker_roots.resolveRoots(alloc, args.projects_root, args.extra_roots, args.read_config);
+    const files = try discoverFiles(alloc, roots, args.since, args.cwd);
     const files_walked: u64 = files.len;
-    const host_root = args.projects_root;
-    const roots_walked: u64 = 1;
+    const roots_walked: u64 = roots.len;
 
     // Worker pool: each worker scans a subset of files using its own arena
     // (arena allocators are not thread-safe). Worker arenas hold the Hit
@@ -1411,7 +1434,7 @@ pub fn run(gpa: Allocator, argv: [][]const u8) !void {
         .jsonl => {
             if (!args.count_only) {
                 for (hits.items) |h| {
-                    try writeHitJson(&w, h, host_root);
+                    try writeHitJson(&w, h);
                     try w.appendStr("\n");
                 }
             }

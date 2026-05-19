@@ -45,11 +45,6 @@ SEARCH_HIT_STRIP_KEYS = {"host_root", "file_path"}
 # Summary fields that vary per run — strip before compare.
 SEARCH_SUMMARY_STRIP_KEYS = {"elapsed_ms", "files_walked"}
 
-# Flags only some impls accept. --no-config and --extra-projects-root were
-# introduced cpp-only (walker-roots.json discovery is a cpp feature today);
-# passing them to rust/go/zig errors with "unknown flag".
-IMPLS_WITH_NO_CONFIG = {"cpp"}
-IMPLS_WITH_EXTRA_ROOTS = {"cpp"}
 # Impls that have implemented the `search` subcommand. Add languages here as
 # their search ports land. Until the set contains an impl, its search check
 # is skipped (rather than reported as failure).
@@ -91,12 +86,10 @@ def run_walker(lang: str, binary: Path, meta: dict, projects_root: Path, extras:
         "--win-start", repr(meta["win_start_unix"]),
         "--now", repr(meta["now_unix"]),
         "--projects-root", str(projects_root),
+        "--no-config",
     ]
-    if lang in IMPLS_WITH_NO_CONFIG:
-        cmd.append("--no-config")
-    if lang in IMPLS_WITH_EXTRA_ROOTS:
-        for extra in extras or []:
-            cmd.extend(["--extra-projects-root", str(extra)])
+    for extra in extras or []:
+        cmd.extend(["--extra-projects-root", str(extra)])
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
     if result.returncode != 0:
         raise RuntimeError(
@@ -168,9 +161,7 @@ def check_implementation(lang: str, binary: Path, expected: dict) -> bool:
 
 def run_walker_subcommand(lang: str, binary: Path, subcommand: str, args: list[str]) -> dict:
     """Invoke a walker subcommand, return parsed JSON of last stdout line."""
-    cmd = [str(binary), subcommand, *args]
-    if lang in IMPLS_WITH_NO_CONFIG:
-        cmd.append("--no-config")
+    cmd = [str(binary), subcommand, *args, "--no-config"]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
     if result.returncode != 0:
         raise RuntimeError(
@@ -286,9 +277,6 @@ def check_multi_root(lang: str, binary: Path) -> bool:
     """Run each multi-root scenario; assert binary sums match expected.json."""
     if not MULTI_ROOT_CORPUS.is_dir():
         return True  # no scenarios — skip cleanly
-    if lang not in IMPLS_WITH_EXTRA_ROOTS:
-        print(f"  [{lang:>4s}] multi-root scenarios -- skipping (impl lacks --extra-projects-root)")
-        return True
     all_ok = True
     for scenario_dir in sorted(MULTI_ROOT_CORPUS.iterdir()):
         if not scenario_dir.is_dir():
@@ -338,10 +326,9 @@ def run_walker_search(
         "--projects-root", str(projects_root),
         "--now", repr(now_unix),
         "--format", "jsonl",
+        "--no-config",
         *flags,
     ]
-    if lang in IMPLS_WITH_NO_CONFIG:
-        cmd.append("--no-config")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
     if result.returncode != 0:
         raise RuntimeError(

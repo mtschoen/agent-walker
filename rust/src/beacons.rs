@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::content::{extract_text, user_content_is_tool_result};
-use crate::{current_unix, default_projects_root, parse_iso8601};
+use crate::{current_unix, default_projects_root, parse_iso8601, walker_roots};
 
 #[derive(Deserialize)]
 struct Entry {
@@ -207,12 +207,16 @@ fn compute_idle_in_window(events: &[(f64, bool)], lo: f64, hi: f64) -> f64 {
 struct LatestArgs {
     session_id: String,
     projects_root: Option<PathBuf>,
+    extra_projects_roots: Vec<PathBuf>,
+    read_config: bool,
     now_unix: Option<f64>,
 }
 
 fn parse_latest_args(args: &[String]) -> Result<LatestArgs, String> {
     let mut session_id: Option<String> = None;
     let mut projects_root: Option<PathBuf> = None;
+    let mut extra_projects_roots: Vec<PathBuf> = Vec::new();
+    let mut read_config = true;
     let mut now_unix: Option<f64> = None;
     let mut iter = args.iter();
     while let Some(flag) = iter.next() {
@@ -224,6 +228,14 @@ fn parse_latest_args(args: &[String]) -> Result<LatestArgs, String> {
                 projects_root = Some(PathBuf::from(
                     iter.next().ok_or("--projects-root needs a value")?,
                 ));
+            }
+            "--extra-projects-root" => {
+                extra_projects_roots.push(PathBuf::from(
+                    iter.next().ok_or("--extra-projects-root needs a value")?,
+                ));
+            }
+            "--no-config" => {
+                read_config = false;
             }
             "--now" => {
                 now_unix = Some(
@@ -240,6 +252,8 @@ fn parse_latest_args(args: &[String]) -> Result<LatestArgs, String> {
     Ok(LatestArgs {
         session_id,
         projects_root,
+        extra_projects_roots,
+        read_config,
         now_unix,
     })
 }
@@ -253,20 +267,28 @@ pub fn run_latest(args: &[String]) {
             std::process::exit(2);
         }
     };
-    let root = parsed.projects_root.unwrap_or_else(default_projects_root);
+    let primary = parsed.projects_root.unwrap_or_else(default_projects_root);
+    let roots = walker_roots::resolve_roots(
+        primary,
+        &parsed.extra_projects_roots,
+        parsed.read_config,
+    );
     let now_unix = parsed.now_unix.unwrap_or_else(current_unix);
 
-    // Try parent transcript first, then any subagent transcript.
-    let parent_pattern = format!("{}/*/{}.jsonl", root.display(), parsed.session_id);
-    let sub_pattern = format!(
-        "{}/*/*/subagents/agent-{}.jsonl",
-        root.display(),
-        parsed.session_id
-    );
+    // Try parent transcript first, then any subagent transcript, across
+    // every resolved root.
     let mut paths: Vec<PathBuf> = Vec::new();
-    for pattern in [&parent_pattern, &sub_pattern] {
-        if let Ok(entries) = glob::glob(pattern) {
-            paths.extend(entries.flatten());
+    for root in &roots {
+        let parent_pattern = format!("{}/*/{}.jsonl", root.display(), parsed.session_id);
+        let sub_pattern = format!(
+            "{}/*/*/subagents/agent-{}.jsonl",
+            root.display(),
+            parsed.session_id
+        );
+        for pattern in [&parent_pattern, &sub_pattern] {
+            if let Ok(entries) = glob::glob(pattern) {
+                paths.extend(entries.flatten());
+            }
         }
     }
 
@@ -299,6 +321,8 @@ struct HistoryArgs {
     period_seconds: u64,
     win_start_unix: f64,
     projects_root: Option<PathBuf>,
+    extra_projects_roots: Vec<PathBuf>,
+    read_config: bool,
     now_unix: Option<f64>,
 }
 
@@ -306,6 +330,8 @@ fn parse_history_args(args: &[String]) -> Result<HistoryArgs, String> {
     let mut period_seconds: Option<u64> = None;
     let mut win_start_unix: Option<f64> = None;
     let mut projects_root: Option<PathBuf> = None;
+    let mut extra_projects_roots: Vec<PathBuf> = Vec::new();
+    let mut read_config = true;
     let mut now_unix: Option<f64> = None;
     let mut iter = args.iter();
     while let Some(flag) = iter.next() {
@@ -331,6 +357,14 @@ fn parse_history_args(args: &[String]) -> Result<HistoryArgs, String> {
                     iter.next().ok_or("--projects-root needs a value")?,
                 ));
             }
+            "--extra-projects-root" => {
+                extra_projects_roots.push(PathBuf::from(
+                    iter.next().ok_or("--extra-projects-root needs a value")?,
+                ));
+            }
+            "--no-config" => {
+                read_config = false;
+            }
             "--now" => {
                 now_unix = Some(
                     iter.next()
@@ -346,43 +380,47 @@ fn parse_history_args(args: &[String]) -> Result<HistoryArgs, String> {
         period_seconds: period_seconds.ok_or("--period is required")?,
         win_start_unix: win_start_unix.unwrap_or(0.0),
         projects_root,
+        extra_projects_roots,
+        read_config,
         now_unix,
     })
 }
 
-fn discover_history_groups(root: &Path) -> HashMap<(String, String), Vec<PathBuf>> {
+fn discover_history_groups(roots: &[PathBuf]) -> HashMap<(String, String), Vec<PathBuf>> {
     let mut groups: HashMap<(String, String), Vec<PathBuf>> = HashMap::new();
 
-    let parent_pattern = format!("{}/*/*.jsonl", root.display());
-    if let Ok(paths) = glob::glob(&parent_pattern) {
-        for entry in paths.flatten() {
-            let slug = entry
-                .parent()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let sid = entry
-                .file_stem()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            groups.entry((slug, sid)).or_default().push(entry);
+    for root in roots {
+        let parent_pattern = format!("{}/*/*.jsonl", root.display());
+        if let Ok(paths) = glob::glob(&parent_pattern) {
+            for entry in paths.flatten() {
+                let slug = entry
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let sid = entry
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                groups.entry((slug, sid)).or_default().push(entry);
+            }
         }
-    }
 
-    let sub_pattern = format!("{}/*/*/subagents/agent-*.jsonl", root.display());
-    if let Ok(paths) = glob::glob(&sub_pattern) {
-        for entry in paths.flatten() {
-            let session_dir = entry.parent().and_then(|p| p.parent());
-            let sid = session_dir
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let slug = session_dir
-                .and_then(|p| p.parent())
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            groups.entry((slug, sid)).or_default().push(entry);
+        let sub_pattern = format!("{}/*/*/subagents/agent-*.jsonl", root.display());
+        if let Ok(paths) = glob::glob(&sub_pattern) {
+            for entry in paths.flatten() {
+                let session_dir = entry.parent().and_then(|p| p.parent());
+                let sid = session_dir
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let slug = session_dir
+                    .and_then(|p| p.parent())
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                groups.entry((slug, sid)).or_default().push(entry);
+            }
         }
     }
 
@@ -423,9 +461,14 @@ pub fn run_history(args: &[String]) {
     let period_cutoff = now_unix - parsed.period_seconds as f64;
     // Pairs are emitted only when both begin AND end fall within the window.
     let window_lo = period_cutoff.max(parsed.win_start_unix);
-    let root = parsed.projects_root.unwrap_or_else(default_projects_root);
+    let primary = parsed.projects_root.unwrap_or_else(default_projects_root);
+    let roots = walker_roots::resolve_roots(
+        primary,
+        &parsed.extra_projects_roots,
+        parsed.read_config,
+    );
 
-    let groups = discover_history_groups(&root);
+    let groups = discover_history_groups(&roots);
     let session_count = groups.len();
     let re = beacon_re();
 
