@@ -20,3 +20,27 @@ rather than on which JSON library it shipped with.
 Lots of work for "fairness," and the practical answer (use the fastest
 JSON lib in each language) is what production code would do anyway.
 File this under "fun exercise for a rainy day."
+
+### Promote `bench-interleaved.py` to a checked-in script + standard report
+
+`.claude/scripts/bench-interleaved.py` is currently an untracked 89-line
+one-off used during PR #8 (cpp perf-pass-2) for the 11-round interleaved
+median measurements. The logic is generic and worth keeping, but per
+CLAUDE.md `.claude/scripts/` is for delete-after-use one-offs.
+
+**Promote to a real script:**
+
+- Move to `shared/bench-interleaved.py` (or `shared/perf-report.py`) and
+  commit. It already covers all four impls × `cost` / `beacons-history` /
+  `search` modes with round-robin scheduling + outlier trim. `shared/bench.py`
+  stays as the live-fleet quick-check; this is the disciplined perf-report
+  generator.
+- Define a standard output format — either a new `BENCH-RESULTS.md` (timestamped
+  table per run) or append-style entries to `RESULTS.md`. Lean toward a separate
+  file so `RESULTS.md` stays narrative.
+- Document when to re-run: at minimum, before/after any perf-affecting PR;
+  consider a CI invocation on `workflow_dispatch` (don't gate merges on it —
+  cross-impl perf varies per runner).
+- The script currently prints walker `elapsed_ms` alongside wall-clock —
+  preserve that, it's the per-process-startup-overhead vs in-binary-work
+  signal that diagnosed PR #8.
