@@ -14,10 +14,8 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
-#include <functional>
 #include <iomanip>
 #include <iostream>
-#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -99,12 +97,20 @@ struct Rates {
     double output;  // per MTok
 };
 
-static Rates rates_for(const std::string& model) {
-    // Lowercase the model string for matching
-    std::string low = model;
-    std::transform(low.begin(), low.end(), low.begin(), ::tolower);
-    if (low.find("opus") != std::string::npos)   return {5.0, 25.0};
-    if (low.find("haiku") != std::string::npos)  return {1.0, 5.0};
+static Rates rates_for(std::string_view model) {
+    // Case-insensitive substring scan without copying or lowercasing the
+    // model string. tolower-comparing only the needle bytes is fine since
+    // "opus"/"haiku" are ASCII.
+    auto contains_ci = [&](std::string_view needle) {
+        if (needle.size() > model.size()) return false;
+        auto eq = [](unsigned char a, unsigned char b) {
+            return std::tolower(a) == std::tolower(b);
+        };
+        return std::search(model.begin(), model.end(),
+                           needle.begin(), needle.end(), eq) != model.end();
+    };
+    if (contains_ci("opus"))  return {5.0, 25.0};
+    if (contains_ci("haiku")) return {1.0, 5.0};
     // sonnet or unknown -> sonnet rates
     return {3.0, 15.0};
 }
@@ -114,7 +120,7 @@ static double cost_for(
     uint64_t output_tokens,
     uint64_t cache_read_tokens,
     uint64_t cache_write_tokens,
-    const std::string& model)
+    std::string_view model)
 {
     auto [i_rate, o_rate] = rates_for(model);
     return (
@@ -144,8 +150,10 @@ struct GroupResult {
 // Why per-line iterate() and not iterate_many(): iterate_many bails the
 // entire document_stream on the first malformed line and can't resume,
 // so we'd lose every line after a bad one. Per-line iterate skips bad
-// lines naturally. Cost: one padded_string allocation per line — same
-// shape as the previous std::getline + std::string_view code path.
+// lines naturally. Zero per-line allocation: we hand simdjson a
+// padded_string_view that points into the whole-file `data` buffer
+// (padded_string::load guarantees SIMDJSON_PADDING bytes of tail zero
+// padding), so the parser never sees a fresh heap allocation.
 static GroupResult walk_group(
     const std::vector<fs::path>& paths,
     double period_cutoff,
@@ -178,9 +186,12 @@ static GroupResult walk_group(
             }
             if (blank) continue;
 
-            sj::padded_string padded(line);
+            size_t line_off = static_cast<size_t>(line.data() - buffer.data());
+            sj::padded_string_view view(
+                line.data(), line.size(),
+                buffer.size() - line_off + sj::SIMDJSON_PADDING);
             sj::ondemand::document doc;
-            if (parser.iterate(padded).get(doc) != sj::SUCCESS) continue;
+            if (parser.iterate(view).get(doc) != sj::SUCCESS) continue;
 
             sj::ondemand::object root;
             if (doc.get_object().get(root) != sj::SUCCESS) continue;
@@ -352,92 +363,6 @@ static GroupMap discover_groups(
 
     return groups;
 }
-
-// ---------------------------------------------------------------------------
-// Thread pool (simple work-stealing style)
-// ---------------------------------------------------------------------------
-
-class ThreadPool {
-public:
-    explicit ThreadPool(size_t num_threads)
-        : stop_(false), task_index_(0)
-    {
-        threads_.reserve(num_threads);
-        for (size_t i = 0; i < num_threads; ++i) {
-            threads_.emplace_back([this] { worker(); });
-        }
-    }
-
-    ~ThreadPool() {
-        {
-            std::unique_lock<std::mutex> lock(mutex_);
-            stop_ = true;
-        }
-        cv_.notify_all();
-        for (auto& t : threads_) t.join();
-    }
-
-    // Run tasks in parallel, return when all done
-    void run(std::vector<std::function<void()>>& tasks) {
-        {
-            std::unique_lock<std::mutex> lock(mutex_);
-            tasks_ = &tasks;
-            task_index_ = 0;
-            done_count_ = 0;
-        }
-        cv_.notify_all();
-
-        // Also let the calling thread do work
-        while (true) {
-            size_t idx;
-            {
-                std::unique_lock<std::mutex> lock(mutex_);
-                if (task_index_ >= tasks.size()) break;
-                idx = task_index_++;
-            }
-            tasks[idx]();
-            {
-                std::unique_lock<std::mutex> lock(mutex_);
-                ++done_count_;
-            }
-            done_cv_.notify_one();
-        }
-
-        // Wait for all workers to finish
-        {
-            std::unique_lock<std::mutex> lock(mutex_);
-            done_cv_.wait(lock, [&] { return done_count_ >= tasks.size(); });
-        }
-    }
-
-private:
-    void worker() {
-        while (true) {
-            std::unique_lock<std::mutex> lock(mutex_);
-            cv_.wait(lock, [this] { return stop_ || (tasks_ && task_index_ < tasks_->size()); });
-            if (stop_ && (!tasks_ || task_index_ >= tasks_->size())) break;
-
-            if (!tasks_ || task_index_ >= tasks_->size()) continue;
-            size_t idx = task_index_++;
-            lock.unlock();
-
-            (*tasks_)[idx]();
-
-            lock.lock();
-            ++done_count_;
-            lock.unlock();
-            done_cv_.notify_one();
-        }
-    }
-
-    std::vector<std::thread> threads_;
-    std::mutex mutex_;
-    std::condition_variable cv_, done_cv_;
-    bool stop_;
-    std::vector<std::function<void()>>* tasks_ = nullptr;
-    size_t task_index_;
-    size_t done_count_ = 0;
-};
 
 // ---------------------------------------------------------------------------
 // Subcommand: cost (the original, default-shape walker behavior)

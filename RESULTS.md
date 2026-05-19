@@ -34,40 +34,58 @@ land in the corpus, but every impl in a single pass agrees).
 ## Cross-mode performance
 
 The status line drives three different walker subcommands. Numbers here
-are 5-run medians on the same live fleet (~300 files survive the weekly
-mtime filter; ~130 distinct session groups; ~10× larger when search
-ignores the mtime filter).
+are interleaved 11-round wall-clock medians on the same live fleet
+(365 distinct session groups, 1118 files post-mtime-filter). Wall-clock
+includes process startup + filesystem discovery + walk + output — i.e.
+what a status-line caller actually feels.
 
-| Mode                         | rust       | cpp     | go      | zig     |
-| ---------------------------- | ---------: | ------: | ------: | ------: |
-| cost (8 workers)             | **206ms**  | 333ms   | 306ms   | 681ms   |
-| beacons-history (8 workers)  | **227ms**  | 286ms   | 580ms   | 695ms   |
-| search `TODO --count-only`   | **218ms**  | 352ms   | 384ms   | 567ms   |
+| Mode                          | cpp        | rust       | go       | zig      |
+| ----------------------------- | ---------: | ---------: | -------: | -------: |
+| cost (8 workers)              | **139ms**  | 218ms      | 321ms    | 723ms    |
+| beacons-history (8 workers)   | **146ms**  | 232ms      | 642ms    | 743ms    |
+| search `"TODO" --limit 1`     | **103ms**  | 225ms      | 397ms    | 584ms    |
 
-Rust now leads in every mode after the cpp/rust/go parallelization pass
-landed (commits `98dd5d6`, `69bd1c2`, `87c4e24`, merged into main as
-`f971156` + `730518a`). The previous table — with cpp leading cost mode
-at 81ms and zig leading search at 573ms — was measured before three of
-the four impls had worker pools in search and beacons-history; this pass
-closed that asymmetry. All four impls are now parallel in all three hot
-modes.
+cpp leads every mode after the perf-pass-2 cleanup (zero per-line
+allocation via `padded_string_view`, search mmap rewrite, hand-rolled
+scanner for the beacon envelope, regex-free search literal path; see
+"What changed in cpp perf-pass-2" below for the breakdown). rust is
+second in all three modes. go and zig swap last/3rd by mode — go is
+faster on search/cost, zig on neither.
 
-Methodology: 11 interleaved rounds (one round = run every (impl, mode)
-back-to-back, so background noise hits everyone equally), drop the
-single highest + single lowest sample per cell, report median of the
-remaining 9. Variance ranges don't overlap across the rust/cpp gap in
-any mode (e.g. beacons-history rust max 259ms vs cpp min 267ms), so the
-ranking is robust to noise.
+Methodology: 11 interleaved rounds, one round = run every (impl, mode)
+cell back-to-back, so background noise hits all cells equally. Drop
+the single highest + lowest sample per cell, report median of the
+remaining 9. Trimmed ranges (min..max of the kept 9):
 
-Important caveat on the cpp regression: cpp is NOT slower per unit
-work than it was pre-pass. Pre-pass cpp ran 81ms over ~130 session
-groups (0.62ms/group); post-pass cpp runs 333ms over ~900 session
-groups (0.37ms/group) — actually faster per-group. The absolute number
-went up because the fleet grew ~7×. Rust just happens to scale better
-at this corpus size: typed `serde_json::Deserialize` has lower per-line
-allocation cost than `simdjson::ondemand::parser::iterate(padded_string)`,
-which allocates a padded buffer per line. With ~90K lines parsed instead
-of ~13K, that constant adds up.
+| Mode             | cpp range | rust range | go range  | zig range |
+| ---------------- | --------: | ---------: | --------: | --------: |
+| cost             |  134-152  |  210-242   |  309-348  |  674-755  |
+| beacons-history  |  140-152  |  220-257   |  596-662  |  692-812  |
+| search           |  101-109  |  216-229   |  386-410  |  564-608  |
+
+Ranges do not overlap between any two adjacent impls in any mode, so
+the ranking is robust to noise. All four impls report identical
+trailing/window/files/groups/n_pairs/bias_factor on the same fleet
+under the same `--now` (sanity-checked before bench).
+
+Bench harness was an ad-hoc PowerShell script (interleaved rounds,
+wall-clock via `System.Diagnostics.Stopwatch`, one warm-up round per
+cell, drop top+bottom). `shared/bench.py` runs sequentially and is
+fine for single-impl tuning but doesn't isolate cross-impl noise the
+same way; promote to a tracked harness on next refresh.
+
+### Historical: rust leadership window
+
+For the period between the cpp/rust/go parallelization pass and
+cpp perf-pass-2, rust briefly led every mode. Rust's typed
+`serde_json::Deserialize` had lower per-line allocation cost than
+cpp's `simdjson::ondemand::parser::iterate(padded_string(line))` —
+because cpp was allocating a fresh `padded_string` per JSONL line,
+copying the line bytes and padding them. That allocation was not
+inherent to simdjson (it accepts `padded_string_view` pointing into
+an already-padded buffer), just a quirk of how the code had been
+written. Removing it (perf-pass-2 commit `b8705ec`) restored cpp's
+lead and then some. See "What changed in cpp perf-pass-2" below.
 
 ## What changed since the first pass
 
@@ -172,19 +190,87 @@ walker's internal work — the rest is subprocess launch + filesystem
 discovery) hits the floor where per-process startup dominates; further
 in-binary wins would be invisible to status-line callers.
 
+## What changed in cpp perf-pass-2
+
+After the parallelize pass, rust led cpp in every mode (see the
+"Historical: rust leadership window" subsection above for the
+working theory at the time). That theory was that `simdjson::ondemand::
+parser::iterate(padded_string)` had to allocate a padded buffer per
+line — which turned out to be true but **not inherent to simdjson**.
+The
+parser also accepts a `padded_string_view` that points into an
+already-padded buffer (e.g., the whole-file `padded_string` we load
+with `padded_string::load()`), and `simdjson::SIMDJSON_PADDING` tail
+bytes of zero-padding live just past `data.size()`. So for any line
+at offset `o`, we can hand simdjson a view with capacity `data.size() -
+o + SIMDJSON_PADDING` — zero allocation, same per-line iterate
+semantics (which we need to keep, since `iterate_many` aborts the
+stream on a single malformed line per the `03-malformed-lines`
+fixture).
+
+A pass on the three hot paths (cost / beacons-{latest,history}) plus a
+collection of smaller wins on search:
+
+| Fix                                                | mode             | before → after |
+| -------------------------------------------------- | ---------------- | -------------: |
+| `padded_string_view` into whole-file buffer        | cost             |   186 → 148ms  |
+|                                                    | beacons-history  |   193 → 148ms  |
+| search: `padded_string::load` + view (was getline) | search           |   357 → 136ms  |
+| search: skip `text_with_tools` when not requested  | search           |   136 → 118ms  |
+| Hand-rolled scanners (replace `std::regex`)        | search           |   118 →  99ms  |
+|                                                    | beacons-history  |   ~ no change  |
+| `parse_iso8601` / `rates_for` zero-alloc           | all              |  within noise  |
+| Remove dead `ThreadPool` (code health)             | n/a              |  −88 LoC       |
+
+Cumulative on ~900-group live fleet (9-round interleaved bench, drop
+top+bottom, median of 7 — variance ranges do not overlap):
+
+| Mode             | baseline | perf-pass-2 |  Δ   | speedup |
+| ---------------- | -------: | ----------: | ---: | ------: |
+| cost             |  201ms   |     149ms   | −26% |  1.35×  |
+| beacons-history  |  187ms   |     138ms   | −26% |  1.36×  |
+| search           |  356ms   |      97ms   | −73% |  3.67×  |
+
+**Patterns:** every per-line `sj::padded_string padded(line)` got
+replaced with a `sj::padded_string_view` pointing into the whole-file
+buffer. The `<progress-beacon>{...}</progress-beacon>` regex got
+replaced with a `find` of the OPEN tag, `find` of the CLOSE tag, and
+whitespace-trimmed `{...}` shape check — equivalent to the original
+regex's non-greedy `\{[\s\S]*?\}` semantics (the non-greedy `*?`
+expands until `\s*</tag>` matches, which IS "shortest body ending in
+`}` immediately before the close tag"). The search literal path
+(default, no `--regex`) now uses `std::string_view::find` or
+`std::search + tolower` instead of compiling a regex with all
+meta-chars escaped.
+
+**Surprise:** beacons-history barely moved from replacing `std::regex`
+specifically (~158 vs 148ms before), because most assistant texts
+don't contain `<progress-beacon>` at all; `text.find("<progress-beacon>",
+pos)` short-circuits to `npos` faster than even a compiled regex's
+prefix scan. The big beacons-history win came from the per-line
+allocation fix, not the regex fix. The hand-rolled scanner is still
+worth keeping for clarity and to avoid MSVC `std::regex` compile
+overhead on hot paths.
+
+**Conformance:** all 7 cost fixtures + 4 beacons-latest scenarios +
+beacons-history + 2 multi-root + 16 search combos green before AND
+after each individual commit. No tolerance changes.
+
 ## Surprises
 
-**Once everything is parallel, rust wins everything.** Pre-parallelization
-cpp on simdjson was the fastest in cost mode (88ms vs rust 115ms), and
-the working assumption was that cpp would extend that lead across all
-three modes after parallelization. It didn't: after this pass rust is
-fastest in cost (221ms), beacons-history (242ms), and search (220ms).
-Rust's typed `serde_json::Deserialize` has lower per-line parse cost
-than cpp's simdjson DOM/on-demand walks, and rayon's `par_iter().reduce()`
-plus the lack of any iterator-safety overhead at the per-field level
-adds up. cpp pays its full price for forward-only on-demand
-extraction (every field is an error-checked match), and that price is
-not free at 8× concurrency.
+**Rust briefly won everything, then cpp took it back.** Pre-parallelization,
+cpp on simdjson was fastest in cost mode (88ms vs rust 115ms). After
+the parallelize pass, rust pulled ahead in every mode (cost 221, beacons
+242, search 220 vs cpp 333/286/352). The diagnosis was that rust's
+typed `serde_json::Deserialize` had lower per-line allocation cost than
+cpp's simdjson on-demand walks. That diagnosis was half right — cpp's
+real problem was that the simdjson code was allocating a
+`padded_string` per JSONL line instead of using `padded_string_view`
+into the whole-file buffer (an avoidable quirk, not inherent to the
+parser). perf-pass-2 fixed it and cpp now leads every mode again
+(139ms cost, 146 beacons, 103 search). The lesson: when a parser
+"can't beat" another, check whether you're paying for the
+*implementation choice* or the parser itself.
 
 **The C++ → simdjson rewrite is more code, not less.** 545 LoC →
 599 LoC. simdjson's on-demand API is forward-only, so each field has
@@ -201,10 +287,11 @@ config files at startup.
 The handoff doc suggested `iterate_many` for the perf win of single-allocation
 batched parsing. In practice `iterate_many` aborts the entire stream on
 the first malformed line and can't resume, which kills the
-`03-malformed-lines` conformance fixture. Per-line `parser.iterate(padded_string(line))`
-is structurally identical to the original nlohmann code and lands at 88ms
-anyway — the on-demand parse skipping 99% of fields by name is what we
-were paying for, not the batching.
+`03-malformed-lines` conformance fixture. Per-line `parser.iterate(view)`
+is structurally identical to the original nlohmann code, recovers from
+bad lines, and (since perf-pass-2) costs zero allocations per line by
+feeding the parser a `padded_string_view` into the whole-file buffer
+rather than a fresh `padded_string` copy of each line.
 
 **JSON parser choice still dominates language choice.** With every
 implementation now on a non-allocating hot path (serde_json typed structs,
@@ -336,12 +423,25 @@ python3 shared/bench.py --runs 5 --no-python
       result: rust pulls ahead of cpp in every mode; absolute floor in
       search hit by all impls (~200-400ms is now per-process startup
       plus discovery, not in-binary work).
+- [x] ~~Close cpp's per-line allocation gap.~~ Done — see "What changed
+      in cpp perf-pass-2" above. cpp cost −26%, beacons-history −26%,
+      search −73% on the same fleet.
+- [x] ~~Refresh the Cross-mode performance table by re-benching rust /
+      go / zig under identical conditions to the perf-pass-2 cpp
+      numbers.~~ Done — see refreshed "Cross-mode performance" table
+      above. cpp leads every mode; rust second in all three; go and
+      zig swap last/3rd by mode. Ranges don't overlap, so the
+      ranking is robust.
 - [ ] Tune Rust further: try `simd-json` instead of `serde_json` (the
       tradeoff for small per-line objects is mixed; worth measuring).
-- [ ] Wire the winner (C++ now, was Rust) back into
-      schoen-claude-status's `_walk_pace_buckets` as an optional
-      detection: if `~/.claude/walker` exists and is executable, use
-      it; otherwise the existing Python parallel walker stands.
+      Pass-2 result raises the question of whether rust could also
+      pull back ahead by switching parsers, or whether forward-only
+      simdjson on-demand has a structural advantage for this access
+      pattern.
+- [ ] Wire the winner (C++) back into schoen-claude-status's
+      `_walk_pace_buckets` as an optional detection: if
+      `~/.claude/walker` exists and is executable, use it; otherwise
+      the existing Python parallel walker stands.
 - [x] ~~Verify all four implementations build on Linux.~~ Done — see
       "Linux verification" above. Zig needed a cross-platform rewrite
       (Win32 → conditional compile w/ Linux syscall path).

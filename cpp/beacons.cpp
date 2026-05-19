@@ -25,12 +25,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
 #include <optional>
-#include <regex>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -56,12 +56,44 @@ struct Beacon {
     std::optional<int64_t> beats_left;
 };
 
-const std::regex& beacon_re() {
-    // [\s\S] matches any char including newlines (std::regex's `.` does not).
-    // Non-greedy {[\s\S]*?} so two beacons in one text don't merge.
-    static const std::regex re(
-        R"(<progress-beacon>\s*(\{[\s\S]*?\})\s*</progress-beacon>)");
-    return re;
+// Hand-rolled scanner replaces std::regex (MSVC's std::regex on the
+// <progress-beacon>{...}</progress-beacon> envelope dominated beacons-history
+// CPU time). Behaviorally equivalent to the original regex
+// `<progress-beacon>\s*(\{[\s\S]*?\})\s*</progress-beacon>`: the non-greedy
+// `[\s\S]*?` backtracks until the suffix `\s*</progress-beacon>` matches,
+// which is exactly "shortest body ending in `}` immediately before the close
+// tag (whitespace permitted between)". We achieve that by finding the next
+// close tag after the open, trimming whitespace inward from both ends of
+// the inner span, and requiring `{...}` shape.
+//
+// Emits view-only matches (no allocation per match); body points into the
+// caller's text buffer, which must outlive the returned views.
+struct BeaconMatch {
+    std::string_view body;  // the {...} JSON body
+    size_t end_pos;         // position just past </progress-beacon>
+};
+
+std::vector<BeaconMatch> find_beacon_envelopes(std::string_view text) {
+    static constexpr std::string_view OPEN = "<progress-beacon>";
+    static constexpr std::string_view CLOSE = "</progress-beacon>";
+    std::vector<BeaconMatch> out;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t a = text.find(OPEN, pos);
+        if (a == std::string_view::npos) break;
+        size_t inner_start = a + OPEN.size();
+        size_t c = text.find(CLOSE, inner_start);
+        if (c == std::string_view::npos) break;
+        size_t b_lo = inner_start;
+        while (b_lo < c && std::isspace(static_cast<unsigned char>(text[b_lo]))) ++b_lo;
+        size_t b_hi = c;
+        while (b_hi > b_lo && std::isspace(static_cast<unsigned char>(text[b_hi - 1]))) --b_hi;
+        if (b_hi > b_lo && text[b_lo] == '{' && text[b_hi - 1] == '}') {
+            out.push_back({text.substr(b_lo, b_hi - b_lo), c + CLOSE.size()});
+        }
+        pos = c + CLOSE.size();
+    }
+    return out;
 }
 
 // Try to parse a JSON beacon body. All four required fields must be present
@@ -149,9 +181,14 @@ void walk_assistant_entries(const fs::path& path, Callback&& cb) {
         }
         if (blank) continue;
 
-        sj::padded_string padded(line);
+        // Zero-alloc per-line iterate: padded_string_view into the whole-file
+        // buffer instead of a fresh padded_string copy. See main.cpp::walk_group.
+        size_t line_off = static_cast<size_t>(line.data() - buffer.data());
+        sj::padded_string_view view(
+            line.data(), line.size(),
+            buffer.size() - line_off + sj::SIMDJSON_PADDING);
         sj::ondemand::document doc;
-        if (parser.iterate(padded).get(doc) != sj::SUCCESS) continue;
+        if (parser.iterate(view).get(doc) != sj::SUCCESS) continue;
         sj::ondemand::object root;
         if (doc.get_object().get(root) != sj::SUCCESS) continue;
 
@@ -278,9 +315,13 @@ void walk_entries_for_history(const fs::path& path, AssistantCb&& assistant_cb, 
         }
         if (blank) continue;
 
-        sj::padded_string padded(line);
+        // Zero-alloc per-line iterate: see walk_assistant_entries above.
+        size_t line_off = static_cast<size_t>(line.data() - buffer.data());
+        sj::padded_string_view view(
+            line.data(), line.size(),
+            buffer.size() - line_off + sj::SIMDJSON_PADDING);
         sj::ondemand::document doc;
-        if (parser.iterate(padded).get(doc) != sj::SUCCESS) continue;
+        if (parser.iterate(view).get(doc) != sj::SUCCESS) continue;
         sj::ondemand::object root;
         if (doc.get_object().get(root) != sj::SUCCESS) continue;
 
@@ -407,15 +448,9 @@ void walk_entries_for_history(const fs::path& path, AssistantCb&& assistant_cb, 
 
 // Find the LAST well-formed beacon in `text`.
 std::optional<Beacon> last_beacon_in(const std::string& text) {
-    const std::regex& re = beacon_re();
     std::optional<Beacon> result;
-    auto begin = std::sregex_iterator(text.begin(), text.end(), re);
-    auto end = std::sregex_iterator();
-    for (auto it = begin; it != end; ++it) {
-        const std::smatch& m = *it;
-        if (m.size() < 2) continue;
-        std::string body = m[1].str();
-        auto parsed = parse_beacon_body(body);
+    for (const auto& env : find_beacon_envelopes(text)) {
+        auto parsed = parse_beacon_body(env.body);
         if (parsed) result = std::move(parsed);
     }
     return result;
@@ -423,15 +458,9 @@ std::optional<Beacon> last_beacon_in(const std::string& text) {
 
 // All well-formed beacons in `text`, in order.
 std::vector<Beacon> all_beacons_in(const std::string& text) {
-    const std::regex& re = beacon_re();
     std::vector<Beacon> out;
-    auto begin = std::sregex_iterator(text.begin(), text.end(), re);
-    auto end = std::sregex_iterator();
-    for (auto it = begin; it != end; ++it) {
-        const std::smatch& m = *it;
-        if (m.size() < 2) continue;
-        std::string body = m[1].str();
-        auto parsed = parse_beacon_body(body);
+    for (const auto& env : find_beacon_envelopes(text)) {
+        auto parsed = parse_beacon_body(env.body);
         if (parsed) out.push_back(std::move(*parsed));
     }
     return out;

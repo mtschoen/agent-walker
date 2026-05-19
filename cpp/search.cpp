@@ -111,18 +111,42 @@ struct ScanMessage {
     bool is_only_tool_blocks = false;
 };
 
-static std::vector<ScanMessage> scanFile(const fs::path& path) {
+// `extract_with_tools` controls whether we materialize text_with_tools.
+// When the caller asks for the default (no tool blocks), context turns
+// also use text_default — so text_with_tools is never read and we skip
+// the extra content-array traversal it would cost.
+static std::vector<ScanMessage> scanFile(const fs::path& path, bool extract_with_tools) {
     std::vector<ScanMessage> out;
-    std::ifstream file(path);
-    if (!file) return out;
+
+    // Memory-map (via padded_string::load) instead of std::ifstream::getline,
+    // and feed simdjson a padded_string_view that points into the whole-file
+    // buffer instead of per-line std::string copies. Mirrors the I/O shape
+    // used by cost mode and the beacons walkers. DOM parser reuses its
+    // internal buffers across parse() calls, so this is allocation-light.
+    simdjson::padded_string data;
+    if (simdjson::padded_string::load(path.string()).get(data) != simdjson::SUCCESS) return out;
+
     simdjson::dom::parser parser;
-    std::string line;
+    std::string_view buffer(data);
+    size_t pos = 0;
     uint32_t idx = 0;
-    while (std::getline(file, line)) {
+    while (pos < buffer.size()) {
+        size_t newline = buffer.find('\n', pos);
+        size_t end = (newline == std::string_view::npos) ? buffer.size() : newline;
+        size_t line_end = end;
+        if (line_end > pos && buffer[line_end - 1] == '\r') --line_end;
+        std::string_view line = buffer.substr(pos, line_end - pos);
+        pos = (newline == std::string_view::npos) ? buffer.size() : newline + 1;
+
         ++idx;
         if (line.empty()) continue;
+
+        size_t line_off = static_cast<size_t>(line.data() - buffer.data());
+        simdjson::padded_string_view view(
+            line.data(), line.size(),
+            buffer.size() - line_off + simdjson::SIMDJSON_PADDING);
         simdjson::dom::element doc;
-        if (parser.parse(line).get(doc) != simdjson::SUCCESS) continue;
+        if (parser.parse(view).get(doc) != simdjson::SUCCESS) continue;
         simdjson::dom::object obj;
         if (doc["message"].get_object().get(obj) != simdjson::SUCCESS) continue;
         std::string_view role;
@@ -137,7 +161,9 @@ static std::vector<ScanMessage> scanFile(const fs::path& path) {
         m.line_number = idx;
         m.role = std::string(role);
         m.text_default = extractText(content, false);
-        m.text_with_tools = extractText(content, true);
+        if (extract_with_tools) {
+            m.text_with_tools = extractText(content, true);
+        }
         m.is_only_tool_blocks = isOnlyToolBlocks(content);
         if (!ts_str.empty()) {
             m.timestamp_str = std::string(ts_str);
@@ -420,15 +446,73 @@ static Args parseArgs(const std::vector<std::string>& raw) {
     return args;
 }
 
+// === Matcher ===
+//
+// MSVC's std::regex is materially slow even for trivial literal patterns,
+// and the default search invocation is a literal substring (regex_replace
+// escapes regex meta-chars at search.cpp:run). Use a small Matcher that
+// branches: literal substring fast path (std::string_view::find for
+// case-sensitive, std::search + tolower comparator for case-insensitive)
+// and std::regex only when --regex was passed.
+//
+// Non-overlapping match semantics match std::sregex_iterator (advance by
+// match length after each hit).
+struct Matcher {
+    bool is_regex = false;
+    bool case_sensitive = false;
+    std::string pattern;   // literal pattern when !is_regex
+    std::regex re;         // compiled regex when is_regex
+
+    std::vector<std::pair<size_t, size_t>> find_all(std::string_view text) const {
+        std::vector<std::pair<size_t, size_t>> out;
+        if (is_regex) {
+            // std::regex_iterator requires a contiguous string with iterators;
+            // construct a string view-backed string only here (rare path).
+            std::string txt(text);
+            for (auto it = std::sregex_iterator(txt.begin(), txt.end(), re);
+                 it != std::sregex_iterator(); ++it) {
+                out.emplace_back((size_t)it->position(),
+                                 (size_t)(it->position() + it->length()));
+            }
+            return out;
+        }
+        if (pattern.empty() || text.size() < pattern.size()) return out;
+        if (case_sensitive) {
+            size_t pos = 0;
+            while (true) {
+                size_t hit = text.find(pattern, pos);
+                if (hit == std::string_view::npos) break;
+                out.emplace_back(hit, hit + pattern.size());
+                pos = hit + pattern.size();
+            }
+        } else {
+            auto eq = [](unsigned char a, unsigned char b) {
+                return std::tolower(a) == std::tolower(b);
+            };
+            auto begin = text.begin();
+            auto cursor = begin;
+            while (true) {
+                auto it = std::search(cursor, text.end(),
+                                      pattern.begin(), pattern.end(), eq);
+                if (it == text.end()) break;
+                size_t hit = static_cast<size_t>(it - begin);
+                out.emplace_back(hit, hit + pattern.size());
+                cursor = it + pattern.size();
+            }
+        }
+        return out;
+    }
+};
+
 // === File processing ===
 
 static std::vector<Hit> processFile(
     const DiscoveredFile& f,
     const Args& args,
-    const std::regex& re,
+    const Matcher& matcher,
     const std::string& host_root)
 {
-    auto messages = scanFile(f.path);
+    auto messages = scanFile(f.path, args.include_tool_blocks);
     std::vector<Hit> hits;
     for (size_t idx = 0; idx < messages.size(); ++idx) {
         auto& m = messages[idx];
@@ -442,21 +526,11 @@ static std::vector<Hit> processFile(
             : std::string_view(m.text_default.data(), m.text_default.size());
         if (text.empty()) continue;
 
-        // Convert to std::string for regex iteration
-        std::string txt(text);
-        std::vector<std::pair<size_t, size_t>> matches;
-        for (auto it = std::sregex_iterator(txt.begin(), txt.end(), re);
-             it != std::sregex_iterator(); ++it) {
-            matches.push_back({(size_t)it->position(), (size_t)(it->position() + it->length())});
-        }
+        std::vector<std::pair<size_t, size_t>> matches = matcher.find_all(text);
         if (matches.empty()) continue;
 
-        std::string snip = makeSnippet(txt, matches[0], args.snippet_chars);
-        std::vector<std::pair<size_t, size_t>> snippet_matches;
-        for (auto it = std::sregex_iterator(snip.begin(), snip.end(), re);
-             it != std::sregex_iterator(); ++it) {
-            snippet_matches.push_back({(size_t)it->position(), (size_t)(it->position() + it->length())});
-        }
+        std::string snip = makeSnippet(text, matches[0], args.snippet_chars);
+        std::vector<std::pair<size_t, size_t>> snippet_matches = matcher.find_all(snip);
 
         auto [ctx_before, ctx_after] = buildContextTurns(messages, idx, args.context);
 
@@ -537,16 +611,23 @@ int run(const std::vector<std::string>& argv) {
         return 2;
     }
 
-    // Build regex
-    std::regex re;
-    try {
-        std::string pattern = args.regex ? args.pattern
-            : std::regex_replace(args.pattern, std::regex(R"([.^$|(){}*+?\\])"), R"(\$&)");
-        re = std::regex(pattern, args.case_sensitive ? std::regex::ECMAScript
-            : (std::regex::ECMAScript | std::regex::icase));
-    } catch (const std::exception& e) {
-        std::cerr << "walker: search: bad regex: " << e.what() << "\n";
-        return 2;
+    // Build matcher. Literal patterns get the fast substring path; --regex
+    // compiles std::regex with the requested case-sensitivity. We compile
+    // regex up-front (rather than per-file) so a bad pattern fails once.
+    Matcher matcher;
+    matcher.is_regex = args.regex;
+    matcher.case_sensitive = args.case_sensitive;
+    if (!args.regex) {
+        matcher.pattern = args.pattern;
+    } else {
+        try {
+            matcher.re = std::regex(args.pattern,
+                args.case_sensitive ? std::regex::ECMAScript
+                                    : (std::regex::ECMAScript | std::regex::icase));
+        } catch (const std::exception& e) {
+            std::cerr << "walker: search: bad regex: " << e.what() << "\n";
+            return 2;
+        }
     }
 
     // Discover files
@@ -558,9 +639,9 @@ int run(const std::vector<std::string>& argv) {
     // Process files in parallel. Work unit = one file; each worker owns a
     // local hits list to avoid contention; merge after join, then sort.
     // simdjson::dom::parser is constructed locally inside scanFile() per
-    // call, so no parser-state sharing across threads. std::regex const
-    // operations are thread-safe per the standard, so one shared `re` is
-    // fine for parallel iteration. Mirrors the cost-mode pattern in
+    // call, so no parser-state sharing across threads. Matcher::find_all
+    // is const and does not mutate the regex/pattern state, so one shared
+    // matcher is safe across threads. Mirrors the cost-mode pattern in
     // main.cpp::run_cost.
     size_t num_workers = std::min<size_t>(8, std::thread::hardware_concurrency());
     if (num_workers == 0) num_workers = 4;
@@ -573,7 +654,7 @@ int run(const std::vector<std::string>& argv) {
         while (true) {
             size_t idx = task_index.fetch_add(1, std::memory_order_relaxed);
             if (idx >= files.size()) break;
-            auto hs = processFile(files[idx], args, re, host_root);
+            auto hs = processFile(files[idx], args, matcher, host_root);
             local.insert(local.end(),
                          std::make_move_iterator(hs.begin()),
                          std::make_move_iterator(hs.end()));
