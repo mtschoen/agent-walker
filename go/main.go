@@ -4,7 +4,6 @@ package main
 
 import (
 	"bufio"
-	"flag"
 	"fmt"
 	"math"
 	"os"
@@ -21,67 +20,112 @@ const version = "go/0.1.1"
 
 // CLI arguments.
 type arguments struct {
-	periodSeconds uint64
-	winStartUnix  float64
-	nowUnix       float64
-	projectsRoot  string
+	periodSeconds      uint64
+	winStartUnix       float64
+	nowUnix            float64
+	projectsRoot       string
+	extraProjectsRoots []string
+	readConfig         bool
 }
 
 func parseArguments(rawArgs []string) (arguments, error) {
-	var (
-		period   uint64
-		winStart float64
-		now      float64
-		root     string
-		ver      bool
-	)
+	// Manual parse loop so we can support repeatable --extra-projects-root
+	// and the boolean --no-config flag alongside the standard ones. Go's
+	// stdlib `flag` package doesn't have a repeatable-string flavor without
+	// a custom Value, so a hand-rolled loop is cleaner.
+	out := arguments{readConfig: true}
+	periodSet := false
+	winStartSet := false
+	nowSet := false
 
-	// Use a custom FlagSet so we control error output.
-	flags := flag.NewFlagSet("walker", flag.ContinueOnError)
-	flags.Uint64Var(&period, "period", 0, "trailing window in seconds (required)")
-	flags.Float64Var(&winStart, "win-start", 0, "window start as Unix epoch (required)")
-	flags.Float64Var(&now, "now", 0, "pin 'now' (optional; default = wall clock)")
-	flags.StringVar(&root, "projects-root", "", "path to Claude projects root")
-	flags.BoolVar(&ver, "version", false, "print version and exit")
+	for i := 0; i < len(rawArgs); i++ {
+		switch rawArgs[i] {
+		case "--period":
+			if i+1 >= len(rawArgs) {
+				return arguments{}, fmt.Errorf("--period needs a value")
+			}
+			i++
+			value, err := parseUint64(rawArgs[i])
+			if err != nil {
+				return arguments{}, fmt.Errorf("--period: %v", err)
+			}
+			out.periodSeconds = value
+			periodSet = true
+		case "--win-start":
+			if i+1 >= len(rawArgs) {
+				return arguments{}, fmt.Errorf("--win-start needs a value")
+			}
+			i++
+			value, err := parseFloat64(rawArgs[i])
+			if err != nil {
+				return arguments{}, fmt.Errorf("--win-start: %v", err)
+			}
+			out.winStartUnix = value
+			winStartSet = true
+		case "--now":
+			if i+1 >= len(rawArgs) {
+				return arguments{}, fmt.Errorf("--now needs a value")
+			}
+			i++
+			value, err := parseFloat64(rawArgs[i])
+			if err != nil {
+				return arguments{}, fmt.Errorf("--now: %v", err)
+			}
+			out.nowUnix = value
+			nowSet = true
+		case "--projects-root":
+			if i+1 >= len(rawArgs) {
+				return arguments{}, fmt.Errorf("--projects-root needs a value")
+			}
+			i++
+			out.projectsRoot = rawArgs[i]
+		case "--extra-projects-root":
+			if i+1 >= len(rawArgs) {
+				return arguments{}, fmt.Errorf("--extra-projects-root needs a value")
+			}
+			i++
+			out.extraProjectsRoots = append(out.extraProjectsRoots, rawArgs[i])
+		case "--no-config":
+			out.readConfig = false
+		case "--version":
+			fmt.Println(version)
+			os.Exit(0)
+		default:
+			return arguments{}, fmt.Errorf("unknown flag: %s", rawArgs[i])
+		}
+	}
 
-	if err := flags.Parse(rawArgs); err != nil {
-		return arguments{}, err
-	}
-	if ver {
-		fmt.Println(version)
-		os.Exit(0)
-	}
-	if period == 0 {
+	if !periodSet || out.periodSeconds == 0 {
 		return arguments{}, fmt.Errorf("--period is required and must be > 0")
 	}
-	if winStart == 0 && !flagExplicitlySet(flags, "win-start") {
+	if !winStartSet {
 		return arguments{}, fmt.Errorf("--win-start is required")
 	}
 
-	if now == 0 && !flagExplicitlySet(flags, "now") {
-		now = float64(time.Now().UnixNano()) / 1e9
+	if !nowSet {
+		out.nowUnix = float64(time.Now().UnixNano()) / 1e9
 	}
-	if root == "" {
-		root = defaultProjectsRoot()
+	if out.projectsRoot == "" {
+		out.projectsRoot = defaultProjectsRoot()
 	}
 
-	return arguments{
-		periodSeconds: period,
-		winStartUnix:  winStart,
-		nowUnix:       now,
-		projectsRoot:  root,
-	}, nil
+	return out, nil
 }
 
-// flagExplicitlySet reports whether a flag was passed on the command line.
-func flagExplicitlySet(flags *flag.FlagSet, name string) bool {
-	found := false
-	flags.Visit(func(f *flag.Flag) {
-		if f.Name == name {
-			found = true
-		}
-	})
-	return found
+func parseUint64(s string) (uint64, error) {
+	var v uint64
+	if _, err := fmt.Sscanf(s, "%d", &v); err != nil {
+		return 0, fmt.Errorf("invalid integer: %s", s)
+	}
+	return v, nil
+}
+
+func parseFloat64(s string) (float64, error) {
+	var v float64
+	if _, err := fmt.Sscanf(s, "%g", &v); err != nil {
+		return 0, fmt.Errorf("invalid number: %s", s)
+	}
+	return v, nil
 }
 
 func defaultProjectsRoot() string {
@@ -235,35 +279,40 @@ type groupKey struct {
 	sessionID string
 }
 
-// discoverGroups finds all JSONL files under root, applies the mtime filter,
-// and groups them by (slug, session_id).
-func discoverGroups(root string, earliest float64) map[groupKey][]string {
+// discoverGroups finds all JSONL files under every root, applies the mtime
+// filter, and groups them by (slug, session_id). Groups merge naturally
+// across roots: same (slug, session_id) on two roots concatenates the path
+// lists, and dedup happens later in walkGroup via seenIDs on message.id.
+func discoverGroups(roots []string, earliest float64) map[groupKey][]string {
 	groups := make(map[groupKey][]string)
 	earliestTime := time.Unix(0, int64(earliest*1e9))
 
-	// Parents: <root>/<slug>/<session_id>.jsonl
-	parentGlob := filepath.Join(root, "*", "*.jsonl")
-	parentMatches, err := filepath.Glob(parentGlob)
-	if err == nil {
-		for _, path := range parentMatches {
-			info, err := os.Stat(path)
-			if err != nil {
-				continue
+	for _, root := range roots {
+		// Parents: <root>/<slug>/<session_id>.jsonl
+		parentGlob := filepath.Join(root, "*", "*.jsonl")
+		parentMatches, err := filepath.Glob(parentGlob)
+		if err == nil {
+			for _, path := range parentMatches {
+				info, err := os.Stat(path)
+				if err != nil {
+					continue
+				}
+				if info.ModTime().Before(earliestTime) {
+					continue
+				}
+				slug := filepath.Base(filepath.Dir(path))
+				sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+				key := groupKey{slug: slug, sessionID: sessionID}
+				groups[key] = append(groups[key], path)
 			}
-			if info.ModTime().Before(earliestTime) {
-				continue
-			}
-			slug := filepath.Base(filepath.Dir(path))
-			sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
-			key := groupKey{slug: slug, sessionID: sessionID}
-			groups[key] = append(groups[key], path)
 		}
-	}
 
-	// Subagents: <root>/<slug>/<session_id>/subagents/agent-*.jsonl
-	// filepath.Glob doesn't support **, so we walk two levels.
-	slugEntries, err := os.ReadDir(root)
-	if err == nil {
+		// Subagents: <root>/<slug>/<session_id>/subagents/agent-*.jsonl
+		// filepath.Glob doesn't support **, so we walk two levels.
+		slugEntries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
 		for _, slugEntry := range slugEntries {
 			if !slugEntry.IsDir() {
 				continue
@@ -332,6 +381,9 @@ func main() {
 		case "beacons-history":
 			runBeaconsHistory(raw[1:])
 			return
+		case "search":
+			runSearch(raw[1:])
+			return
 		}
 		first := raw[0]
 		// Any non-flag first positional that didn't match a subcommand is
@@ -356,7 +408,8 @@ func runCost(rawArgs []string) {
 	periodCutoff := args.nowUnix - float64(args.periodSeconds)
 	earliest := math.Min(periodCutoff, args.winStartUnix)
 
-	groups := discoverGroups(args.projectsRoot, earliest)
+	roots := ResolveRoots(args.projectsRoot, args.extraProjectsRoots, args.readConfig)
+	groups := discoverGroups(roots, earliest)
 
 	// Count totals before we consume the map.
 	totalGroups := uint64(len(groups))

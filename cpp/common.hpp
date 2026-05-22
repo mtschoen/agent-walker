@@ -30,15 +30,11 @@ inline double current_unix() {
 }
 
 // ISO 8601 timestamp parsing — accepts "...Z" or "+HH:MM" offset.
-// Returns seconds since Unix epoch, or nullopt on failure.
-inline std::optional<double> parse_iso8601(std::string_view ts_view) {
-    std::string ts(ts_view);
-
+// Returns seconds since Unix epoch, or nullopt on failure. Operates on
+// the input string_view directly — no allocation.
+inline std::optional<double> parse_iso8601(std::string_view ts) {
     bool had_z = (!ts.empty() && ts.back() == 'Z');
-    if (had_z) {
-        ts.back() = '+';
-        ts += "00:00";
-    }
+    if (had_z) ts.remove_suffix(1);
 
     if (ts.size() < 19) return std::nullopt;
 
@@ -51,12 +47,12 @@ inline std::optional<double> parse_iso8601(std::string_view ts_view) {
         return v;
     };
 
-    int year   = parse_int(ts.c_str() + 0, 4);
-    int month  = parse_int(ts.c_str() + 5, 2);
-    int day    = parse_int(ts.c_str() + 8, 2);
-    int hour   = parse_int(ts.c_str() + 11, 2);
-    int minute = parse_int(ts.c_str() + 14, 2);
-    int sec    = parse_int(ts.c_str() + 17, 2);
+    int year   = parse_int(ts.data() + 0, 4);
+    int month  = parse_int(ts.data() + 5, 2);
+    int day    = parse_int(ts.data() + 8, 2);
+    int hour   = parse_int(ts.data() + 11, 2);
+    int minute = parse_int(ts.data() + 14, 2);
+    int sec    = parse_int(ts.data() + 17, 2);
 
     if (year < 0 || month < 0 || day < 0 || hour < 0 || minute < 0 || sec < 0)
         return std::nullopt;
@@ -76,12 +72,12 @@ inline std::optional<double> parse_iso8601(std::string_view ts_view) {
     }
 
     int tz_offset_sec = 0;
-    if (pos < ts.size()) {
+    if (!had_z && pos < ts.size()) {
         char sign = ts[pos];
         if (sign == '+' || sign == '-') {
             if (pos + 5 < ts.size() + 1) {
-                int tz_h = parse_int(ts.c_str() + pos + 1, 2);
-                int tz_m = parse_int(ts.c_str() + pos + 4, 2);
+                int tz_h = parse_int(ts.data() + pos + 1, 2);
+                int tz_m = parse_int(ts.data() + pos + 4, 2);
                 if (tz_h < 0 || tz_m < 0) return std::nullopt;
                 tz_offset_sec = (tz_h * 3600 + tz_m * 60) * (sign == '-' ? -1 : 1);
             }

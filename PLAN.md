@@ -2,23 +2,6 @@
 
 ## Done
 
-- [x] Conformance corpus + harness (`shared/corpus/`, `shared/conformance.py`)
-- [x] Live-fleet bench (`shared/bench.py`)
-- [x] Rust impl (`rust/`)
-- [x] Go impl (`go/`) — stdlib `encoding/json`, then upgraded to
-      `bytedance/sonic` v1.15.1 (373ms → 141ms)
-- [x] C++ impl (`cpp/`) — `nlohmann/json`, then upgraded to `simdjson`
-      v4.6.4 on-demand (402ms → 88ms; now the fastest implementation)
-- [x] Zig impl (`zig/`)
-- [x] `RESULTS.md` comparison table (rerun after C++/Go upgrades)
-- [x] Port idle-exclusion in `bias_factor` from Rust to C++/Go/Zig.
-      All four impls now share `active_elapsed / begin_eta` median for
-      `bias_factor` and expose `idle_excluded` / `active_elapsed` in
-      pair JSON. Live 14d corpus produces identical `bias=1.7645675...`
-      across rust/cpp/zig and a 4e-10 delta from go (JSON-roundtrip
-      noise, well inside the 0.001 tolerance). Conformance harness
-      gained per-impl scoping for `--no-config` / `--extra-projects-root`
-      so rust/go/zig stop erroring on cpp-only flags.
 - [x] Add macOS support to C++ and Zig impls. Apple
       Clang's libc++ lacks std::chrono::clock_cast; cpp
       uses a portable file_clock→system_clock offset trick.
@@ -49,13 +32,26 @@ Lots of work for "fairness," and the practical answer (use the fastest
 JSON lib in each language) is what production code would do anyway.
 File this under "fun exercise for a rainy day."
 
-### Standing item
+### Promote `bench-interleaved.py` to a checked-in script + standard report
 
-- [ ] Wire optional native-walker detection into
-      [schoen-claude-status](https://github.com/mtschoen/schoen-claude-status)'s
-      `_walk_pace_buckets`: if `~/.claude/walker` exists and is
-      executable, subprocess it; on any failure fall back to the
-      existing Python parallel walker. Stays optional — no install
-      friction added to schoen-claude-status. **Winner is C++** (88ms
-      median); package as `~/.claude/walker.exe` from
-      `cpp/build/Release/walker.exe`.
+`.claude/scripts/bench-interleaved.py` is currently an untracked 89-line
+one-off used during PR #8 (cpp perf-pass-2) for the 11-round interleaved
+median measurements. The logic is generic and worth keeping, but per
+CLAUDE.md `.claude/scripts/` is for delete-after-use one-offs.
+
+**Promote to a real script:**
+
+- Move to `shared/bench-interleaved.py` (or `shared/perf-report.py`) and
+  commit. It already covers all four impls × `cost` / `beacons-history` /
+  `search` modes with round-robin scheduling + outlier trim. `shared/bench.py`
+  stays as the live-fleet quick-check; this is the disciplined perf-report
+  generator.
+- Define a standard output format — either a new `BENCH-RESULTS.md` (timestamped
+  table per run) or append-style entries to `RESULTS.md`. Lean toward a separate
+  file so `RESULTS.md` stays narrative.
+- Document when to re-run: at minimum, before/after any perf-affecting PR;
+  consider a CI invocation on `workflow_dispatch` (don't gate merges on it —
+  cross-impl perf varies per runner).
+- The script currently prints walker `elapsed_ms` alongside wall-clock —
+  preserve that, it's the per-process-startup-overhead vs in-binary-work
+  signal that diagnosed PR #8.

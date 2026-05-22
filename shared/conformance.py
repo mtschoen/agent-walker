@@ -34,16 +34,21 @@ CORPUS = ROOT / "shared" / "corpus"
 EXPECTED = ROOT / "shared" / "expected.json"
 BEACON_CORPUS = ROOT / "shared" / "corpus" / "beacons"
 MULTI_ROOT_CORPUS = ROOT / "shared" / "corpus" / "multi_root"
+SEARCH_CORPUS = ROOT / "shared" / "corpus" / "search"
 EXPECTED_LATEST = BEACON_CORPUS / "expected_latest.json"
 EXPECTED_HISTORY = BEACON_CORPUS / "expected_history.json"
 TOLERANCE = 0.01  # $
 BIAS_TOLERANCE = 0.001
 
-# Flags only some impls accept. --no-config and --extra-projects-root were
-# introduced cpp-only (walker-roots.json discovery is a cpp feature today);
-# passing them to rust/go/zig errors with "unknown flag".
-IMPLS_WITH_NO_CONFIG = {"cpp"}
-IMPLS_WITH_EXTRA_ROOTS = {"cpp"}
+# Hit fields that vary per run (absolute tempdir paths) — strip before compare.
+SEARCH_HIT_STRIP_KEYS = {"host_root", "file_path"}
+# Summary fields that vary per run — strip before compare.
+SEARCH_SUMMARY_STRIP_KEYS = {"elapsed_ms", "files_walked"}
+
+# Impls that have implemented the `search` subcommand. Add languages here as
+# their search ports land. Until the set contains an impl, its search check
+# is skipped (rather than reported as failure).
+IMPLS_WITH_SEARCH: set[str] = {"rust", "cpp", "go", "zig"}
 
 CANDIDATES = {
     "rust": [
@@ -81,12 +86,10 @@ def run_walker(lang: str, binary: Path, meta: dict, projects_root: Path, extras:
         "--win-start", repr(meta["win_start_unix"]),
         "--now", repr(meta["now_unix"]),
         "--projects-root", str(projects_root),
+        "--no-config",
     ]
-    if lang in IMPLS_WITH_NO_CONFIG:
-        cmd.append("--no-config")
-    if lang in IMPLS_WITH_EXTRA_ROOTS:
-        for extra in extras or []:
-            cmd.extend(["--extra-projects-root", str(extra)])
+    for extra in extras or []:
+        cmd.extend(["--extra-projects-root", str(extra)])
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
     if result.returncode != 0:
         raise RuntimeError(
@@ -158,9 +161,7 @@ def check_implementation(lang: str, binary: Path, expected: dict) -> bool:
 
 def run_walker_subcommand(lang: str, binary: Path, subcommand: str, args: list[str]) -> dict:
     """Invoke a walker subcommand, return parsed JSON of last stdout line."""
-    cmd = [str(binary), subcommand, *args]
-    if lang in IMPLS_WITH_NO_CONFIG:
-        cmd.append("--no-config")
+    cmd = [str(binary), subcommand, *args, "--no-config"]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
     if result.returncode != 0:
         raise RuntimeError(
@@ -276,9 +277,6 @@ def check_multi_root(lang: str, binary: Path) -> bool:
     """Run each multi-root scenario; assert binary sums match expected.json."""
     if not MULTI_ROOT_CORPUS.is_dir():
         return True  # no scenarios — skip cleanly
-    if lang not in IMPLS_WITH_EXTRA_ROOTS:
-        print(f"  [{lang:>4s}] multi-root scenarios -- skipping (impl lacks --extra-projects-root)")
-        return True
     all_ok = True
     for scenario_dir in sorted(MULTI_ROOT_CORPUS.iterdir()):
         if not scenario_dir.is_dir():
@@ -309,6 +307,126 @@ def check_multi_root(lang: str, binary: Path) -> bool:
     return all_ok
 
 
+def run_walker_search(
+    lang: str,
+    binary: Path,
+    projects_root: Path,
+    pattern: str,
+    flags: list[str],
+    now_unix: float,
+) -> tuple[list[dict], dict | None]:
+    """Invoke `walker search <pattern> <flags> --format jsonl ...`.
+
+    Returns (hits, summary). Hits are stripped of per-run path fields
+    (host_root, file_path); summary is stripped of elapsed_ms / files_walked.
+    Raises RuntimeError on non-zero exit.
+    """
+    cmd = [
+        str(binary), "search", pattern,
+        "--projects-root", str(projects_root),
+        "--now", repr(now_unix),
+        "--format", "jsonl",
+        "--no-config",
+        *flags,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{binary.name} search exited {result.returncode}\n"
+            f"cmd: {' '.join(cmd)}\n"
+            f"stderr:\n{result.stderr}"
+        )
+    hits: list[dict] = []
+    summary: dict | None = None
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"non-JSON line on stdout: {line!r} ({e})")
+        kind = obj.get("type")
+        if kind == "hit":
+            for key in SEARCH_HIT_STRIP_KEYS:
+                obj.pop(key, None)
+            hits.append(obj)
+        elif kind == "summary":
+            for key in SEARCH_SUMMARY_STRIP_KEYS:
+                obj.pop(key, None)
+            summary = obj
+        else:
+            raise RuntimeError(f"unknown record type on stdout: {obj!r}")
+    return hits, summary
+
+
+def assert_search_combo(
+    lang: str,
+    binary: Path,
+    scenario_name: str,
+    combo_name: str,
+    combo: dict,
+    now_unix: float,
+) -> bool:
+    """Run one (scenario, combo) and structurally compare to expected output."""
+    label = f"search/{scenario_name}/{combo_name}"
+    with tempfile.TemporaryDirectory(prefix=f"walker-search-{scenario_name}-") as tmp:
+        shutil.copytree(SEARCH_CORPUS / scenario_name, Path(tmp) / scenario_name)
+        try:
+            got_hits, got_summary = run_walker_search(
+                lang, binary, Path(tmp),
+                combo["pattern"], combo["flags"], now_unix,
+            )
+        except Exception as e:
+            print(f"  [{lang:>4s}] {label:48s} FAIL  {e}")
+            return False
+
+    exp_hits = combo["hits"]
+    exp_summary = combo["summary"]
+    hits_ok = got_hits == exp_hits
+    summary_ok = got_summary == exp_summary
+    ok = hits_ok and summary_ok
+    badge = " OK " if ok else "FAIL"
+    print(f"  [{lang:>4s}] {label:48s} {badge}  hits={len(got_hits)}")
+    if not hits_ok:
+        print(f"        hits mismatch: got {len(got_hits)}, expected {len(exp_hits)}")
+        for i in range(max(len(got_hits), len(exp_hits))):
+            g = got_hits[i] if i < len(got_hits) else None
+            e = exp_hits[i] if i < len(exp_hits) else None
+            if g != e:
+                print(f"          hit[{i}] got:      {json.dumps(g, sort_keys=True)}")
+                print(f"          hit[{i}] expected: {json.dumps(e, sort_keys=True)}")
+                break
+    if not summary_ok:
+        print(f"        summary mismatch:")
+        print(f"          got:      {json.dumps(got_summary, sort_keys=True)}")
+        print(f"          expected: {json.dumps(exp_summary, sort_keys=True)}")
+    return ok
+
+
+def check_search(lang: str, binary: Path) -> bool:
+    """Run every scenario/combo in shared/corpus/search/."""
+    if not SEARCH_CORPUS.is_dir():
+        return True  # corpus missing -- nothing to test
+    if lang not in IMPLS_WITH_SEARCH:
+        print(f"  [{lang:>4s}] search subcommand -- skipping (not in IMPLS_WITH_SEARCH)")
+        return True
+    all_ok = True
+    for scenario_dir in sorted(SEARCH_CORPUS.iterdir()):
+        if not scenario_dir.is_dir():
+            continue
+        expected_file = scenario_dir / "expected.json"
+        if not expected_file.is_file():
+            continue
+        data = json.loads(expected_file.read_text(encoding="utf-8"))
+        now_unix = data["_meta"]["now_unix"]
+        for combo_name, combo in data["combos"].items():
+            if not assert_search_combo(
+                lang, binary, scenario_dir.name, combo_name, combo, now_unix,
+            ):
+                all_ok = False
+    return all_ok
+
+
 def main():
     if not EXPECTED.is_file():
         print(f"missing {EXPECTED} -- run shared/generate_corpus.py first")
@@ -334,6 +452,8 @@ def main():
         if not check_beacons(lang, binary):
             overall_ok = False
         if not check_multi_root(lang, binary):
+            overall_ok = False
+        if not check_search(lang, binary):
             overall_ok = False
         print()
 

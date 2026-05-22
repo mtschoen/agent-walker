@@ -10,9 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bytedance/sonic"
@@ -293,14 +295,16 @@ func computeIdleInWindow(events []event, lo, hi float64) float64 {
 // === beacons-latest ===
 
 type latestArguments struct {
-	sessionID    string
-	projectsRoot string
-	nowUnix      float64
-	nowSet       bool
+	sessionID          string
+	projectsRoot       string
+	extraProjectsRoots []string
+	readConfig         bool
+	nowUnix            float64
+	nowSet             bool
 }
 
 func parseLatestArguments(args []string) (latestArguments, error) {
-	var parsed latestArguments
+	parsed := latestArguments{readConfig: true}
 	i := 0
 	for i < len(args) {
 		flag := args[i]
@@ -317,6 +321,15 @@ func parseLatestArguments(args []string) (latestArguments, error) {
 			}
 			parsed.projectsRoot = args[i+1]
 			i += 2
+		case "--extra-projects-root":
+			if i+1 >= len(args) {
+				return parsed, fmt.Errorf("--extra-projects-root needs a value")
+			}
+			parsed.extraProjectsRoots = append(parsed.extraProjectsRoots, args[i+1])
+			i += 2
+		case "--no-config":
+			parsed.readConfig = false
+			i++
 		case "--now":
 			if i+1 >= len(args) {
 				return parsed, fmt.Errorf("--now needs a value")
@@ -345,22 +358,25 @@ func runBeaconsLatest(args []string) {
 		fmt.Fprintf(os.Stderr, "walker: beacons-latest: %v\n", err)
 		os.Exit(2)
 	}
-	root := parsed.projectsRoot
-	if root == "" {
-		root = defaultProjectsRoot()
+	primary := parsed.projectsRoot
+	if primary == "" {
+		primary = defaultProjectsRoot()
 	}
 	nowUnix := parsed.nowUnix
 	if !parsed.nowSet {
 		nowUnix = float64(time.Now().UnixNano()) / 1e9
 	}
 
-	parentPattern := filepath.Join(root, "*", parsed.sessionID+".jsonl")
-	subPattern := filepath.Join(root, "*", "*", "subagents", "agent-"+parsed.sessionID+".jsonl")
+	roots := ResolveRoots(primary, parsed.extraProjectsRoots, parsed.readConfig)
 	var paths []string
-	for _, pattern := range []string{parentPattern, subPattern} {
-		matches, err := filepath.Glob(pattern)
-		if err == nil {
-			paths = append(paths, matches...)
+	for _, root := range roots {
+		parentPattern := filepath.Join(root, "*", parsed.sessionID+".jsonl")
+		subPattern := filepath.Join(root, "*", "*", "subagents", "agent-"+parsed.sessionID+".jsonl")
+		for _, pattern := range []string{parentPattern, subPattern} {
+			matches, err := filepath.Glob(pattern)
+			if err == nil {
+				paths = append(paths, matches...)
+			}
 		}
 	}
 
@@ -404,15 +420,17 @@ func formatFloat(value float64) string {
 // === beacons-history ===
 
 type historyArguments struct {
-	periodSeconds uint64
-	winStartUnix  float64
-	projectsRoot  string
-	nowUnix       float64
-	nowSet        bool
+	periodSeconds      uint64
+	winStartUnix       float64
+	projectsRoot       string
+	extraProjectsRoots []string
+	readConfig         bool
+	nowUnix            float64
+	nowSet             bool
 }
 
 func parseHistoryArguments(args []string) (historyArguments, error) {
-	var parsed historyArguments
+	parsed := historyArguments{readConfig: true}
 	periodSet := false
 	i := 0
 	for i < len(args) {
@@ -445,6 +463,15 @@ func parseHistoryArguments(args []string) (historyArguments, error) {
 			}
 			parsed.projectsRoot = args[i+1]
 			i += 2
+		case "--extra-projects-root":
+			if i+1 >= len(args) {
+				return parsed, fmt.Errorf("--extra-projects-root needs a value")
+			}
+			parsed.extraProjectsRoots = append(parsed.extraProjectsRoots, args[i+1])
+			i += 2
+		case "--no-config":
+			parsed.readConfig = false
+			i++
 		case "--now":
 			if i+1 >= len(args) {
 				return parsed, fmt.Errorf("--now needs a value")
@@ -466,24 +493,28 @@ func parseHistoryArguments(args []string) (historyArguments, error) {
 	return parsed, nil
 }
 
-// discoverHistoryGroups groups transcripts by (slug, session_id) without
-// the mtime filter -- beacon entries can sit deep in a long transcript.
-func discoverHistoryGroups(root string) map[groupKey][]string {
+// discoverHistoryGroups groups transcripts by (slug, session_id) across all
+// roots without the mtime filter -- beacon entries can sit deep in a long
+// transcript. Same (slug, session_id) on two roots merges into one group.
+func discoverHistoryGroups(roots []string) map[groupKey][]string {
 	groups := make(map[groupKey][]string)
 
-	parentGlob := filepath.Join(root, "*", "*.jsonl")
-	parentMatches, err := filepath.Glob(parentGlob)
-	if err == nil {
-		for _, path := range parentMatches {
-			slug := filepath.Base(filepath.Dir(path))
-			sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
-			key := groupKey{slug: slug, sessionID: sessionID}
-			groups[key] = append(groups[key], path)
+	for _, root := range roots {
+		parentGlob := filepath.Join(root, "*", "*.jsonl")
+		parentMatches, err := filepath.Glob(parentGlob)
+		if err == nil {
+			for _, path := range parentMatches {
+				slug := filepath.Base(filepath.Dir(path))
+				sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+				key := groupKey{slug: slug, sessionID: sessionID}
+				groups[key] = append(groups[key], path)
+			}
 		}
-	}
 
-	slugEntries, err := os.ReadDir(root)
-	if err == nil {
+		slugEntries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
 		for _, slugEntry := range slugEntries {
 			if !slugEntry.IsDir() {
 				continue
@@ -568,61 +599,109 @@ func runBeaconsHistory(args []string) {
 	if parsed.winStartUnix > windowLo {
 		windowLo = parsed.winStartUnix
 	}
-	root := parsed.projectsRoot
-	if root == "" {
-		root = defaultProjectsRoot()
+	primary := parsed.projectsRoot
+	if primary == "" {
+		primary = defaultProjectsRoot()
 	}
+	roots := ResolveRoots(primary, parsed.extraProjectsRoots, parsed.readConfig)
 
-	groups := discoverHistoryGroups(root)
+	groups := discoverHistoryGroups(roots)
 	sessionCount := uint64(len(groups))
 
-	var pairs []historyPair
+	// Flatten group paths for the worker pool. Group identity does not
+	// matter past this point: pair order doesn't matter (conformance
+	// sorts pairs before comparing), so we don't need a stable key.
+	groupSlices := make([][]string, 0, len(groups))
 	for _, paths := range groups {
-		var beaconsAll []beaconWithTimestamp
-		var eventsAll []event
-		for _, path := range paths {
-			se := collectSessionEventsInPath(path)
-			beaconsAll = append(beaconsAll, se.beacons...)
-			eventsAll = append(eventsAll, se.events...)
-		}
-		sort.Slice(eventsAll, func(i, j int) bool {
-			return eventsAll[i].timestamp < eventsAll[j].timestamp
-		})
-		var inside []beaconWithTimestamp
-		for _, b := range beaconsAll {
-			if b.timestamp >= windowLo {
-				inside = append(inside, b)
-			}
-		}
+		groupSlices = append(groupSlices, paths)
+	}
 
-		var begin, end *beaconWithTimestamp
-		for index := range inside {
-			b := &inside[index]
-			switch b.beacon.Kind {
-			case "begin":
-				if begin == nil || b.timestamp < begin.timestamp {
-					begin = b
+	// Parallel per-group walk. Work unit = one session group; each worker
+	// owns a local pairs slice merged after all workers exit. The shared
+	// beaconRegex is safe for concurrent use (regexp.Regexp is documented
+	// thread-safe for its Find/Match methods). sonic.Unmarshal is also
+	// documented thread-safe. Mirrors the cost-mode pattern in main.go.
+	numWorkers := runtime.NumCPU()
+	if numWorkers > 8 {
+		numWorkers = 8
+	}
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+
+	work := make(chan []string, len(groupSlices))
+	perWorkerPairs := make([][]historyPair, numWorkers)
+
+	var wg sync.WaitGroup
+	for workerIndex := 0; workerIndex < numWorkers; workerIndex++ {
+		wg.Add(1)
+		go func(tid int) {
+			defer wg.Done()
+			local := perWorkerPairs[tid][:0]
+			for paths := range work {
+				var beaconsAll []beaconWithTimestamp
+				var eventsAll []event
+				for _, path := range paths {
+					se := collectSessionEventsInPath(path)
+					beaconsAll = append(beaconsAll, se.beacons...)
+					eventsAll = append(eventsAll, se.events...)
 				}
-			case "end":
-				if end == nil || b.timestamp > end.timestamp {
-					end = b
+				sort.Slice(eventsAll, func(i, j int) bool {
+					return eventsAll[i].timestamp < eventsAll[j].timestamp
+				})
+				var inside []beaconWithTimestamp
+				for _, b := range beaconsAll {
+					if b.timestamp >= windowLo {
+						inside = append(inside, b)
+					}
+				}
+
+				var begin, end *beaconWithTimestamp
+				for index := range inside {
+					b := &inside[index]
+					switch b.beacon.Kind {
+					case "begin":
+						if begin == nil || b.timestamp < begin.timestamp {
+							begin = b
+						}
+					case "end":
+						if end == nil || b.timestamp > end.timestamp {
+							end = b
+						}
+					}
+				}
+				if begin != nil && end != nil && end.timestamp > begin.timestamp {
+					wall := end.timestamp - begin.timestamp
+					idle := computeIdleInWindow(eventsAll, begin.timestamp, end.timestamp)
+					active := wall - idle
+					if active < 0 {
+						active = 0
+					}
+					local = append(local, historyPair{
+						beginEta:      begin.beacon.EtaSeconds,
+						actualElapsed: wall,
+						idleExcluded:  idle,
+						activeElapsed: active,
+					})
 				}
 			}
-		}
-		if begin != nil && end != nil && end.timestamp > begin.timestamp {
-			wall := end.timestamp - begin.timestamp
-			idle := computeIdleInWindow(eventsAll, begin.timestamp, end.timestamp)
-			active := wall - idle
-			if active < 0 {
-				active = 0
-			}
-			pairs = append(pairs, historyPair{
-				beginEta:      begin.beacon.EtaSeconds,
-				actualElapsed: wall,
-				idleExcluded:  idle,
-				activeElapsed: active,
-			})
-		}
+			perWorkerPairs[tid] = local
+		}(workerIndex)
+	}
+	for _, paths := range groupSlices {
+		work <- paths
+	}
+	close(work)
+	wg.Wait()
+
+	// Merge per-worker pairs
+	total := 0
+	for _, v := range perWorkerPairs {
+		total += len(v)
+	}
+	pairs := make([]historyPair, 0, total)
+	for _, v := range perWorkerPairs {
+		pairs = append(pairs, v...)
 	}
 
 	bias, biasOK := biasFactor(pairs)

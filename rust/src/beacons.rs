@@ -1,6 +1,7 @@
 // Beacon-mode subcommands: beacons-latest and beacons-history.
 // See ../SPEC.md "Subcommands" for the contract.
 
+use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -10,7 +11,8 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crate::{current_unix, default_projects_root, parse_iso8601};
+use crate::content::{extract_text, user_content_is_tool_result};
+use crate::{current_unix, default_projects_root, parse_iso8601, walker_roots};
 
 #[derive(Deserialize)]
 struct Entry {
@@ -44,36 +46,6 @@ fn beacon_re() -> Regex {
     // Non-greedy {.*?} so two beacons in one text don't merge.
     Regex::new(r"(?s)<progress-beacon>\s*(\{.*?\})\s*</progress-beacon>")
         .expect("static regex compiles")
-}
-
-fn extract_text(content: &Value) -> String {
-    let arr = match content.as_array() {
-        Some(a) => a,
-        None => return String::new(),
-    };
-    let mut parts: Vec<&str> = Vec::new();
-    for block in arr {
-        if block.get("type").and_then(|v| v.as_str()) == Some("text") {
-            if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
-                parts.push(t);
-            }
-        }
-    }
-    parts.join("\n")
-}
-
-/// True when a `type: "user"` message's content contains tool_result blocks
-/// (tool output coming back from the agent's own tool calls), NOT a real
-/// user prompt. Tool-result entries are agent-active time waiting on tools,
-/// not user-idle time.
-fn user_content_is_tool_result(content: Option<&Value>) -> bool {
-    let arr = match content.and_then(|v| v.as_array()) {
-        Some(a) => a,
-        None => return false,
-    };
-    arr.iter().any(|block| {
-        block.get("type").and_then(|v| v.as_str()) == Some("tool_result")
-    })
 }
 
 /// Walk one transcript file. For each assistant entry, parse the latest
@@ -113,7 +85,7 @@ fn find_latest_in_path(path: &Path, re: &Regex) -> Option<(Beacon, f64)> {
             Some(t) => t,
             None => continue,
         };
-        let combined = extract_text(&content);
+        let combined = extract_text(&content, false);
         // Pick the last well-formed beacon in this entry, then update
         // `latest` if this entry's timestamp is the highest seen.
         let mut entry_beacon: Option<Beacon> = None;
@@ -193,7 +165,7 @@ fn collect_session_events_in_path(path: &Path, re: &Regex) -> SessionEvents {
             None => continue,
         };
         events.push((ts, false));
-        let combined = extract_text(&content);
+        let combined = extract_text(&content, false);
         for caps in re.captures_iter(&combined) {
             if let Some(m) = caps.get(1) {
                 if let Ok(b) = serde_json::from_str::<Beacon>(m.as_str()) {
@@ -235,12 +207,16 @@ fn compute_idle_in_window(events: &[(f64, bool)], lo: f64, hi: f64) -> f64 {
 struct LatestArgs {
     session_id: String,
     projects_root: Option<PathBuf>,
+    extra_projects_roots: Vec<PathBuf>,
+    read_config: bool,
     now_unix: Option<f64>,
 }
 
 fn parse_latest_args(args: &[String]) -> Result<LatestArgs, String> {
     let mut session_id: Option<String> = None;
     let mut projects_root: Option<PathBuf> = None;
+    let mut extra_projects_roots: Vec<PathBuf> = Vec::new();
+    let mut read_config = true;
     let mut now_unix: Option<f64> = None;
     let mut iter = args.iter();
     while let Some(flag) = iter.next() {
@@ -252,6 +228,14 @@ fn parse_latest_args(args: &[String]) -> Result<LatestArgs, String> {
                 projects_root = Some(PathBuf::from(
                     iter.next().ok_or("--projects-root needs a value")?,
                 ));
+            }
+            "--extra-projects-root" => {
+                extra_projects_roots.push(PathBuf::from(
+                    iter.next().ok_or("--extra-projects-root needs a value")?,
+                ));
+            }
+            "--no-config" => {
+                read_config = false;
             }
             "--now" => {
                 now_unix = Some(
@@ -268,6 +252,8 @@ fn parse_latest_args(args: &[String]) -> Result<LatestArgs, String> {
     Ok(LatestArgs {
         session_id,
         projects_root,
+        extra_projects_roots,
+        read_config,
         now_unix,
     })
 }
@@ -281,20 +267,28 @@ pub fn run_latest(args: &[String]) {
             std::process::exit(2);
         }
     };
-    let root = parsed.projects_root.unwrap_or_else(default_projects_root);
+    let primary = parsed.projects_root.unwrap_or_else(default_projects_root);
+    let roots = walker_roots::resolve_roots(
+        primary,
+        &parsed.extra_projects_roots,
+        parsed.read_config,
+    );
     let now_unix = parsed.now_unix.unwrap_or_else(current_unix);
 
-    // Try parent transcript first, then any subagent transcript.
-    let parent_pattern = format!("{}/*/{}.jsonl", root.display(), parsed.session_id);
-    let sub_pattern = format!(
-        "{}/*/*/subagents/agent-{}.jsonl",
-        root.display(),
-        parsed.session_id
-    );
+    // Try parent transcript first, then any subagent transcript, across
+    // every resolved root.
     let mut paths: Vec<PathBuf> = Vec::new();
-    for pattern in [&parent_pattern, &sub_pattern] {
-        if let Ok(entries) = glob::glob(pattern) {
-            paths.extend(entries.flatten());
+    for root in &roots {
+        let parent_pattern = format!("{}/*/{}.jsonl", root.display(), parsed.session_id);
+        let sub_pattern = format!(
+            "{}/*/*/subagents/agent-{}.jsonl",
+            root.display(),
+            parsed.session_id
+        );
+        for pattern in [&parent_pattern, &sub_pattern] {
+            if let Ok(entries) = glob::glob(pattern) {
+                paths.extend(entries.flatten());
+            }
         }
     }
 
@@ -327,6 +321,8 @@ struct HistoryArgs {
     period_seconds: u64,
     win_start_unix: f64,
     projects_root: Option<PathBuf>,
+    extra_projects_roots: Vec<PathBuf>,
+    read_config: bool,
     now_unix: Option<f64>,
 }
 
@@ -334,6 +330,8 @@ fn parse_history_args(args: &[String]) -> Result<HistoryArgs, String> {
     let mut period_seconds: Option<u64> = None;
     let mut win_start_unix: Option<f64> = None;
     let mut projects_root: Option<PathBuf> = None;
+    let mut extra_projects_roots: Vec<PathBuf> = Vec::new();
+    let mut read_config = true;
     let mut now_unix: Option<f64> = None;
     let mut iter = args.iter();
     while let Some(flag) = iter.next() {
@@ -359,6 +357,14 @@ fn parse_history_args(args: &[String]) -> Result<HistoryArgs, String> {
                     iter.next().ok_or("--projects-root needs a value")?,
                 ));
             }
+            "--extra-projects-root" => {
+                extra_projects_roots.push(PathBuf::from(
+                    iter.next().ok_or("--extra-projects-root needs a value")?,
+                ));
+            }
+            "--no-config" => {
+                read_config = false;
+            }
             "--now" => {
                 now_unix = Some(
                     iter.next()
@@ -374,43 +380,47 @@ fn parse_history_args(args: &[String]) -> Result<HistoryArgs, String> {
         period_seconds: period_seconds.ok_or("--period is required")?,
         win_start_unix: win_start_unix.unwrap_or(0.0),
         projects_root,
+        extra_projects_roots,
+        read_config,
         now_unix,
     })
 }
 
-fn discover_history_groups(root: &Path) -> HashMap<(String, String), Vec<PathBuf>> {
+fn discover_history_groups(roots: &[PathBuf]) -> HashMap<(String, String), Vec<PathBuf>> {
     let mut groups: HashMap<(String, String), Vec<PathBuf>> = HashMap::new();
 
-    let parent_pattern = format!("{}/*/*.jsonl", root.display());
-    if let Ok(paths) = glob::glob(&parent_pattern) {
-        for entry in paths.flatten() {
-            let slug = entry
-                .parent()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let sid = entry
-                .file_stem()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            groups.entry((slug, sid)).or_default().push(entry);
+    for root in roots {
+        let parent_pattern = format!("{}/*/*.jsonl", root.display());
+        if let Ok(paths) = glob::glob(&parent_pattern) {
+            for entry in paths.flatten() {
+                let slug = entry
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let sid = entry
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                groups.entry((slug, sid)).or_default().push(entry);
+            }
         }
-    }
 
-    let sub_pattern = format!("{}/*/*/subagents/agent-*.jsonl", root.display());
-    if let Ok(paths) = glob::glob(&sub_pattern) {
-        for entry in paths.flatten() {
-            let session_dir = entry.parent().and_then(|p| p.parent());
-            let sid = session_dir
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let slug = session_dir
-                .and_then(|p| p.parent())
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            groups.entry((slug, sid)).or_default().push(entry);
+        let sub_pattern = format!("{}/*/*/subagents/agent-*.jsonl", root.display());
+        if let Ok(paths) = glob::glob(&sub_pattern) {
+            for entry in paths.flatten() {
+                let session_dir = entry.parent().and_then(|p| p.parent());
+                let sid = session_dir
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let slug = session_dir
+                    .and_then(|p| p.parent())
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                groups.entry((slug, sid)).or_default().push(entry);
+            }
         }
     }
 
@@ -451,47 +461,84 @@ pub fn run_history(args: &[String]) {
     let period_cutoff = now_unix - parsed.period_seconds as f64;
     // Pairs are emitted only when both begin AND end fall within the window.
     let window_lo = period_cutoff.max(parsed.win_start_unix);
-    let root = parsed.projects_root.unwrap_or_else(default_projects_root);
+    let primary = parsed.projects_root.unwrap_or_else(default_projects_root);
+    let roots = walker_roots::resolve_roots(
+        primary,
+        &parsed.extra_projects_roots,
+        parsed.read_config,
+    );
 
-    let groups = discover_history_groups(&root);
+    let groups = discover_history_groups(&roots);
     let session_count = groups.len();
     let re = beacon_re();
 
+    // Flatten group paths into an indexable list so rayon can fan out one task
+    // per group. Group identity (slug, sid) no longer matters past this point —
+    // pair output is keyed by (eta, active) and conformance sorts pairs before
+    // comparing. Mirrors the cost-mode and cpp parallel patterns.
+    let group_paths: Vec<Vec<PathBuf>> = groups.into_values().collect();
+
+    let workers = std::cmp::min(
+        8,
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4),
+    );
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build()
+        .expect("rayon pool");
+
     // Pairs feed bias_factor as (begin_eta, active_elapsed). pair_meta carries
     // the (wall, idle, active) breakdown for the JSON output, parallel-indexed.
-    let mut pairs: Vec<(f64, f64)> = Vec::new();
-    let mut pair_meta: Vec<(f64, f64, f64)> = Vec::new();
-    for paths in groups.values() {
-        let mut beacons_all: Vec<(Beacon, f64)> = Vec::new();
-        let mut events_all: Vec<(f64, bool)> = Vec::new();
-        for path in paths {
-            let se = collect_session_events_in_path(path, &re);
-            beacons_all.extend(se.beacons);
-            events_all.extend(se.events);
-        }
-        events_all.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-        // Filter to beacons inside the window.
-        beacons_all.retain(|(_, ts)| *ts >= window_lo);
+    // regex::Regex is Send+Sync for read-only matching, so the shared `re`
+    // works across workers. Each task gets local beacons/events buffers; final
+    // pair tuples are concatenated via reduce.
+    let (pairs, pair_meta): (Vec<(f64, f64)>, Vec<(f64, f64, f64)>) = pool.install(|| {
+        group_paths
+            .par_iter()
+            .map(|paths| {
+                let mut beacons_all: Vec<(Beacon, f64)> = Vec::new();
+                let mut events_all: Vec<(f64, bool)> = Vec::new();
+                for path in paths {
+                    let se = collect_session_events_in_path(path, &re);
+                    beacons_all.extend(se.beacons);
+                    events_all.extend(se.events);
+                }
+                events_all.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+                // Filter to beacons inside the window.
+                beacons_all.retain(|(_, ts)| *ts >= window_lo);
 
-        // Earliest "begin" and latest "end" in the window.
-        let begin = beacons_all
-            .iter()
-            .filter(|(b, _)| b.kind == "begin")
-            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
-        let end = beacons_all
-            .iter()
-            .filter(|(b, _)| b.kind == "end")
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
-        if let (Some((begin_b, begin_ts)), Some((_end_b, end_ts))) = (begin, end) {
-            if *end_ts > *begin_ts {
-                let wall = *end_ts - *begin_ts;
-                let idle = compute_idle_in_window(&events_all, *begin_ts, *end_ts);
-                let active = (wall - idle).max(0.0);
-                pairs.push((begin_b.eta_seconds, active));
-                pair_meta.push((wall, idle, active));
-            }
-        }
-    }
+                let begin = beacons_all
+                    .iter()
+                    .filter(|(b, _)| b.kind == "begin")
+                    .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
+                let end = beacons_all
+                    .iter()
+                    .filter(|(b, _)| b.kind == "end")
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
+                let mut local_pairs: Vec<(f64, f64)> = Vec::new();
+                let mut local_meta: Vec<(f64, f64, f64)> = Vec::new();
+                if let (Some((begin_b, begin_ts)), Some((_end_b, end_ts))) = (begin, end) {
+                    if *end_ts > *begin_ts {
+                        let wall = *end_ts - *begin_ts;
+                        let idle = compute_idle_in_window(&events_all, *begin_ts, *end_ts);
+                        let active = (wall - idle).max(0.0);
+                        local_pairs.push((begin_b.eta_seconds, active));
+                        local_meta.push((wall, idle, active));
+                    }
+                }
+                (local_pairs, local_meta)
+            })
+            .reduce(
+                || (Vec::new(), Vec::new()),
+                |(mut ap, mut am), (mut bp, mut bm)| {
+                    ap.append(&mut bp);
+                    am.append(&mut bm);
+                    (ap, am)
+                },
+            )
+    });
 
     let bias = bias_factor(&pairs);
     let elapsed_ms = started.elapsed().as_millis() as u64;
