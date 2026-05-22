@@ -783,6 +783,8 @@ pub fn discover(alloc: Allocator, roots: []const []const u8, earliest: f64) !Fil
     for (roots) |root_path| {
         var per_root = if (is_windows)
             discoverWindows(alloc, root_path, earliest) catch continue
+        else if (is_darwin)
+            discoverDarwin(alloc, root_path, earliest) catch continue
         else
             discoverLinux(alloc, root_path, earliest) catch continue;
         defer per_root.deinit();

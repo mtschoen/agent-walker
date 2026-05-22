@@ -15,6 +15,7 @@ const Allocator = std.mem.Allocator;
 const main = @import("main.zig");
 
 const is_windows = main.is_windows;
+const is_darwin = main.is_darwin;
 const PATH_SEP = main.PATH_SEP;
 
 /// Return the path to ~/.claude/walker-roots.json (USERPROFILE on Windows).
@@ -162,6 +163,12 @@ fn isExistingDir(alloc: Allocator, path: []const u8) bool {
         var info: platform.WIN32_FILE_ATTRIBUTE_DATA = undefined;
         if (platform.GetFileAttributesExW(wpath.ptr, 0, &info) == 0) return false;
         return (info.dwFileAttributes & platform.FILE_ATTRIBUTE_DIRECTORY) != 0;
+    } else if (is_darwin) {
+        const zpath = alloc.dupeZ(u8, path) catch return false;
+        defer alloc.free(zpath);
+        var st: std.c.Stat = undefined;
+        if (std.c.fstatat(std.c.AT.FDCWD, zpath, &st, 0) != 0) return false;
+        return (st.mode & 0o170000) == 0o040000;
     } else {
         const linux = main.platform.linux;
         const zpath = alloc.dupeZ(u8, path) catch return false;

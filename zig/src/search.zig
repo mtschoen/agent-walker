@@ -11,6 +11,7 @@ const main = @import("main.zig");
 const walker_roots = @import("walker_roots.zig");
 
 const is_windows = main.is_windows;
+const is_darwin = main.is_darwin;
 const PATH_SEP = main.PATH_SEP;
 
 // ─── Args ────────────────────────────────────────────────────────────────────
@@ -952,6 +953,8 @@ fn discoverFiles(
     for (roots) |root| {
         if (is_windows) {
             try discoverWindows(alloc, &out, root, since, cwd_filter);
+        } else if (is_darwin) {
+            try discoverDarwin(alloc, &out, root, since, cwd_filter);
         } else {
             try discoverLinux(alloc, &out, root, since, cwd_filter);
         }
@@ -1038,6 +1041,71 @@ fn scanSlugJsonlWindows(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), r
         }
         if (platform.FindNextFileW(h, &fd) == 0) break;
     }
+}
+
+fn discoverDarwin(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), root: []const u8, since: ?f64, cwd_filter: ?[]const u8) !void {
+    const root_z = try alloc.dupeZ(u8, root);
+    defer alloc.free(root_z);
+    const root_dir = std.c.opendir(root_z) orelse return;
+    defer _ = std.c.closedir(root_dir);
+
+    while (std.c.readdir(root_dir)) |ent| {
+        if (ent.type != std.c.DT.DIR) continue;
+        const name_ptr: [*:0]const u8 = @ptrCast(&ent.name);
+        const slug = std.mem.span(name_ptr);
+        if (slug.len == 0) continue;
+        if (slug[0] == '.' and (slug.len == 1 or (slug.len == 2 and slug[1] == '.'))) continue;
+
+        if (cwd_filter) |f| {
+            if (!std.mem.eql(u8, slug, f)) continue;
+        }
+        const slug_owned = try alloc.dupe(u8, slug);
+        try scanSlugJsonlDarwin(alloc, out, root, slug_owned, since);
+    }
+}
+
+fn scanSlugJsonlDarwin(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), root: []const u8, slug: []const u8, since: ?f64) !void {
+    const slug_dir = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ root, slug });
+    const slug_z = try alloc.dupeZ(u8, slug_dir);
+    defer alloc.free(slug_z);
+    const dir = std.c.opendir(slug_z) orelse {
+        alloc.free(slug_dir);
+        return;
+    };
+    defer _ = std.c.closedir(dir);
+
+    while (std.c.readdir(dir)) |ent| {
+        if (ent.type != std.c.DT.REG and ent.type != std.c.DT.UNKNOWN) continue;
+        const name_ptr: [*:0]const u8 = @ptrCast(&ent.name);
+        const name = std.mem.span(name_ptr);
+        if (!std.mem.endsWith(u8, name, ".jsonl")) continue;
+
+        const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ slug_dir, name });
+        if (since) |cutoff| {
+            if (!mtimeOkDarwin(alloc, path, cutoff)) {
+                alloc.free(path);
+                continue;
+            }
+        }
+        const sid = try alloc.dupe(u8, name[0 .. name.len - 6]);
+        try out.append(alloc, .{
+            .path = path,
+            .slug = slug,
+            .session_id = sid,
+            .host_root = root,
+        });
+    }
+}
+
+fn mtimeOkDarwin(alloc: Allocator, path: []const u8, earliest: f64) bool {
+    const zpath = alloc.dupeZ(u8, path) catch return true;
+    defer alloc.free(zpath);
+    var st: std.c.Stat = undefined;
+    if (std.c.fstatat(std.c.AT.FDCWD, zpath, &st, 0) != 0) return true;
+    const mt = st.mtime();
+    const mtime = @as(f64, @floatFromInt(mt.sec)) +
+        @as(f64, @floatFromInt(mt.nsec)) / 1_000_000_000.0;
+    return mtime >= earliest;
 }
 
 fn discoverLinux(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), root: []const u8, since: ?f64, cwd_filter: ?[]const u8) !void {
