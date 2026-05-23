@@ -74,6 +74,20 @@ green run. The workflow has an explicit "Verify all binaries built"
 step that `test -f` / `Test-Path`s every expected artifact before
 invoking the harness. Keep that step intact if you ever rework CI.
 
+## macOS
+
+CI only runs on `ubuntu-latest` + `windows-latest` — there is no macOS
+runner. Local conformance on macOS is the only check. After every
+`origin/main` merge, run `python shared/conformance.py rust cpp go zig`
+on macOS and grep new zig files for `linux\.openat|linux\.statx|linux\.getdents|main\.platform\.linux`
+sitting in the `else` branch of `is_windows` checks. Raw `std.os.linux.*`
+calls on Darwin compile but invoke whatever Darwin syscall shares that
+number, returning empty results silently. Fix: mirror the existing
+Darwin family in `zig/src/main.zig` (`discoverDarwin`, `scanSlugDirDarwin`,
+`mtimeOk` Darwin branch) using `std.c.opendir/readdir/fstatat/closedir`.
+C++ macOS quirks (no `std::chrono::clock_cast` in Apple Clang's libc++)
+are documented inline in `cpp/main.cpp`.
+
 ## Install
 
 `bash install.sh` (Linux/git-bash) or `install.bat` (cmd) builds the

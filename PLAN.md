@@ -8,8 +8,15 @@
       Zig adds a parallel Darwin code path via std.c
       (libSystem) alongside the existing Linux raw-syscall
       path; build.zig links libc only on macOS targets.
-      All four impls pass shared/conformance.py on macOS
-      arm64 (54/54).
+- [x] Close macOS gaps surfaced by merging origin/main
+      (search subcommand + walker_roots port). Three new
+      sites called raw `std.os.linux.*` syscalls on the
+      `else` branch of `is_windows` checks (main.discover,
+      search.discoverFiles, walker_roots.isExistingDir),
+      which aborts silently on Darwin. Added Darwin branches
+      using std.c opendir/readdir/fstatat, mirroring the
+      existing discoverDarwin family. All four impls pass
+      shared/conformance.py on macOS arm64 (128/128).
 
 ## Inbox
 
