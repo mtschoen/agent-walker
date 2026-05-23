@@ -1,0 +1,60 @@
+{
+  "pin_now": 1747900000.0,
+  "pin_period": 86400,
+  "pin_win_start": 1747813600.0,
+  "fixtures": {
+    "01-empty": [],
+    "02-single": [
+      {
+        "ts": 1747899940.0,
+        "usd": 0.0045,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-002",
+        "slug": "project-beta"
+      }
+    ],
+    "03-dedup": [
+      {
+        "ts": 1747899940.0,
+        "usd": 0.0045,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-003",
+        "slug": "project-gamma"
+      }
+    ],
+    "04-multi-session": [
+      {
+        "ts": 1747899940.0,
+        "usd": 0.0175,
+        "model": "claude-opus-4-7",
+        "session_id": "sess-004a",
+        "slug": "project-delta"
+      },
+      {
+        "ts": 1747899940.0,
+        "usd": 0.0042,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-004b",
+        "slug": "project-delta"
+      }
+    ],
+    "05-cache-mix": [
+      {
+        "ts": 1747899940.0,
+        "usd": 0.00975,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-005",
+        "slug": "project-epsilon"
+      }
+    ],
+    "06-malformed-mixed": [
+      {
+        "ts": 1747899940.0,
+        "usd": 0.00075,
+        "model": "claude-haiku-4-5",
+        "session_id": "sess-006",
+        "slug": "project-zeta"
+      }
+    ]
+  }
+}
