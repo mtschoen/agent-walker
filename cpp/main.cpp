@@ -5,6 +5,7 @@
 // beacons.cpp and shared helpers (ISO 8601, default root) in common.hpp.
 
 #include "beacons.hpp"
+#include "events.hpp"
 #include "search.hpp"
 #include "common.hpp"
 #include "walker_roots.hpp"
@@ -462,7 +463,7 @@ int main(int argc, char* argv[]) {
     std::vector<std::string> rest;
     if (!raw.empty()) {
         const std::string& first = raw.front();
-        if (first == "cost" || first == "beacons-latest" || first == "beacons-history" || first == "search") {
+        if (first == "cost" || first == "beacons-latest" || first == "beacons-history" || first == "search" || first == "events") {
             subcommand = first;
             rest.assign(raw.begin() + 1, raw.end());
         } else if (!first.empty() && first.front() == '-') {
@@ -477,5 +478,6 @@ int main(int argc, char* argv[]) {
     if (subcommand == "beacons-latest") return walker::beacons::run_latest(rest);
     if (subcommand == "beacons-history") return walker::beacons::run_history(rest);
     if (subcommand == "search") return walker::search::run(rest);
+    if (subcommand == "events") return walker::events::run(rest);
     return 2;  // unreachable
 }

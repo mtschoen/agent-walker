@@ -17,7 +17,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(simdjson)
 
-add_executable(walker main.cpp beacons.cpp search.cpp)
+add_executable(walker main.cpp beacons.cpp events.cpp search.cpp)
 target_link_libraries(walker PRIVATE simdjson::simdjson)
 
 if(MSVC)
