@@ -242,6 +242,67 @@ Output:
 
 If `n_pairs == 0`, `bias_factor` is `null`.
 
+### `events --period <seconds> [--win-start <unix>] [--projects-root <path>] [--no-config] [--extra-projects-root <path>...] [--now <unix>]`
+
+Emits one JSON object per line (NDJSON) on stdout — one entry per
+accepted assistant turn. Reuses cost-mode's parse, dedup, filter, and
+pricing logic verbatim; only aggregation differs (per-turn output
+instead of accumulated totals).
+
+Flag summary:
+
+| Flag                    | Required | Type    | Default              |
+| ----------------------- | -------- | ------- | -------------------- |
+| `--period`              | yes      | u64     | —                    |
+| `--win-start`           | no       | f64     | `now - period`       |
+| `--projects-root`       | no       | path    | `~/.claude/projects` |
+| `--no-config`           | no       | bool    | false                |
+| `--extra-projects-root` | no       | path[]  | (empty)              |
+| `--now`                 | no       | f64     | current wall clock   |
+
+`--no-config` suppresses loading `~/.claude/walker-roots.json`.
+`--extra-projects-root` may be repeated; each value appends an extra
+root (same semantics as cost mode). `--now` exists for conformance
+determinism; production callers omit it.
+
+**Window predicate.** A turn is emitted iff:
+
+```
+ts >= min(now - period, win_start)
+```
+
+When `--win-start` is omitted, `win_start` defaults to `now - period`,
+so the predicate simplifies to `ts >= now - period`.
+
+Every turn that passes this predicate (the same one used by cost
+mode's step-5 line filter) is emitted as its own NDJSON line. There
+is no further bucketing into `trailing` vs `window` totals — that
+split is cost mode's aggregation, not events'.
+
+**Output format.** One JSON object per accepted turn, field order
+fixed (matters for line-equality conformance):
+
+```json
+{"ts": 1716480000.123, "usd": 0.004217, "model": "claude-sonnet-4-6", "session_id": "abc123", "slug": "C--Users-mtsch--claude-projects--myproject"}
+```
+
+Fields:
+
+| Field        | Type   | Notes                                                        |
+| ------------ | ------ | ------------------------------------------------------------ |
+| `ts`         | f64    | Unix epoch (seconds, fractional) of the assistant turn       |
+| `usd`        | f64    | Cost of this turn in USD, computed by the Pricing formula    |
+| `model`      | string | Lowercased model id from the transcript; empty string if absent |
+| `session_id` | string | Session identifier — same grouping key as cost mode          |
+| `slug`       | string | Parent directory name of the `.jsonl` file                   |
+
+No summary or final line is emitted. The consumer reads until EOF.
+Exit 0 even when the output stream is empty.
+
+**Ordering.** Implementations MAY emit lines in any order. Conformance
+compares event sets as a multiset, sorted by `(ts, session_id, model)`
+for tie-breaking stability.
+
 ## Conformance fixtures
 
 `shared/corpus/<NN>-<name>/<sid>.jsonl` (and optional `<NN>-<name>/subagents/`)
