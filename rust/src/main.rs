@@ -8,10 +8,11 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use transcript::{cost_for, discover_groups, Entry};
+use crate::transcript::{cost_for, discover_groups, Entry};
 
 mod beacons;
 mod content;
+mod events;
 mod search;
 mod transcript;
 mod walker_roots;
