@@ -3,16 +3,17 @@
 
 use chrono::DateTime;
 use rayon::prelude::*;
-use serde::Deserialize;
-use std::collections::HashMap;
-use std::fs::{metadata, File};
+use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use transcript::{cost_for, discover_groups, Entry};
+
 mod beacons;
 mod content;
 mod search;
+mod transcript;
 mod walker_roots;
 
 #[derive(Default)]
@@ -81,54 +82,6 @@ fn parse_cost_args(args: &[String]) -> Result<Args, String> {
     Ok(result)
 }
 
-#[derive(Deserialize)]
-struct Entry {
-    timestamp: Option<String>,
-    message: Option<Message>,
-}
-
-#[derive(Deserialize)]
-struct Message {
-    role: Option<String>,
-    id: Option<String>,
-    model: Option<String>,
-    usage: Option<Usage>,
-}
-
-#[derive(Deserialize, Default)]
-struct Usage {
-    #[serde(default)]
-    input_tokens: u64,
-    #[serde(default)]
-    output_tokens: u64,
-    #[serde(default)]
-    cache_read_input_tokens: u64,
-    #[serde(default)]
-    cache_creation_input_tokens: u64,
-}
-
-// (input_per_mtok, output_per_mtok). Match SPEC.md exactly.
-fn rates_for(model: &str) -> (f64, f64) {
-    let m = model.to_ascii_lowercase();
-    if m.contains("opus") {
-        (5.0, 25.0)
-    } else if m.contains("haiku") {
-        (1.0, 5.0)
-    } else if m.contains("sonnet") {
-        (3.0, 15.0)
-    } else {
-        (3.0, 15.0) // unknown -> sonnet, per spec
-    }
-}
-
-fn cost_for(usage: &Usage, model: &str) -> f64 {
-    let (i_rate, o_rate) = rates_for(model);
-    (usage.input_tokens as f64 * i_rate
-        + usage.cache_read_input_tokens as f64 * i_rate * 0.10
-        + usage.cache_creation_input_tokens as f64 * i_rate * 1.25
-        + usage.output_tokens as f64 * o_rate)
-        / 1_000_000.0
-}
 
 pub(crate) fn parse_iso8601(ts: &str) -> Option<f64> {
     // Accept "...Z" or any RFC3339 variant.
@@ -201,66 +154,6 @@ fn walk_group(paths: &[PathBuf], period_cutoff: f64, win_start_unix: f64) -> Gro
     GroupResult { trailing, window }
 }
 
-fn discover_groups(roots: &[PathBuf], earliest: f64) -> HashMap<(String, String), Vec<PathBuf>> {
-    let mut groups: HashMap<(String, String), Vec<PathBuf>> = HashMap::new();
-
-    for root in roots {
-        // Parents: <root>/<slug>/<session_id>.jsonl
-        let parent_pattern = format!("{}/*/*.jsonl", root.display());
-        if let Ok(paths) = glob::glob(&parent_pattern) {
-            for entry in paths.flatten() {
-                if let Ok(meta) = metadata(&entry) {
-                    if let Ok(mt) = meta.modified() {
-                        if let Ok(d) = mt.duration_since(UNIX_EPOCH) {
-                            if d.as_secs_f64() < earliest {
-                                continue;
-                            }
-                        }
-                    }
-                }
-                let slug = entry
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let sid = entry
-                    .file_stem()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                groups.entry((slug, sid)).or_default().push(entry);
-            }
-        }
-
-        // Subagents: <root>/<slug>/<session_id>/subagents/agent-*.jsonl
-        let sub_pattern = format!("{}/*/*/subagents/agent-*.jsonl", root.display());
-        if let Ok(paths) = glob::glob(&sub_pattern) {
-            for entry in paths.flatten() {
-                if let Ok(meta) = metadata(&entry) {
-                    if let Ok(mt) = meta.modified() {
-                        if let Ok(d) = mt.duration_since(UNIX_EPOCH) {
-                            if d.as_secs_f64() < earliest {
-                                continue;
-                            }
-                        }
-                    }
-                }
-                let session_dir = entry.parent().and_then(|p| p.parent());
-                let sid = session_dir
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let slug = session_dir
-                    .and_then(|p| p.parent())
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                groups.entry((slug, sid)).or_default().push(entry);
-            }
-        }
-    }
-
-    groups
-}
 
 pub(crate) fn default_projects_root() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
