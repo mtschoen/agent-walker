@@ -35,10 +35,14 @@ EXPECTED = ROOT / "shared" / "expected.json"
 BEACON_CORPUS = ROOT / "shared" / "corpus" / "beacons"
 MULTI_ROOT_CORPUS = ROOT / "shared" / "corpus" / "multi_root"
 SEARCH_CORPUS = ROOT / "shared" / "corpus" / "search"
+EVENTS_CORPUS = ROOT / "shared" / "corpus" / "events"
+EVENTS_EXPECTED = EVENTS_CORPUS / "expected_events.json"
 EXPECTED_LATEST = BEACON_CORPUS / "expected_latest.json"
 EXPECTED_HISTORY = BEACON_CORPUS / "expected_history.json"
 TOLERANCE = 0.01  # $
 BIAS_TOLERANCE = 0.001
+EVENTS_USD_TOLERANCE = 1e-4
+EVENTS_TS_TOLERANCE = 1e-6
 
 # Hit fields that vary per run (absolute tempdir paths) — strip before compare.
 SEARCH_HIT_STRIP_KEYS = {"host_root", "file_path"}
@@ -49,6 +53,11 @@ SEARCH_SUMMARY_STRIP_KEYS = {"elapsed_ms", "files_walked"}
 # their search ports land. Until the set contains an impl, its search check
 # is skipped (rather than reported as failure).
 IMPLS_WITH_SEARCH: set[str] = {"rust", "cpp", "go", "zig"}
+
+# Impls that have implemented the `events` subcommand. Add languages here as
+# their events ports land. Until the set contains an impl, its events check
+# is skipped (rather than reported as failure).
+IMPLS_WITH_EVENTS: set[str] = {"rust", "cpp", "go", "zig"}
 
 CANDIDATES = {
     "rust": [
@@ -427,6 +436,115 @@ def check_search(lang: str, binary: Path) -> bool:
     return all_ok
 
 
+def _events_sort_key(record: dict) -> tuple:
+    """Stable sort key for events-mode NDJSON records (multiset comparison)."""
+    return (
+        record.get("ts", 0.0),
+        record.get("session_id", ""),
+        record.get("model", ""),
+    )
+
+
+def check_events(lang: str, binary: Path) -> bool:
+    """Run events subcommand against each fixture; compare NDJSON output to expected."""
+    if not EVENTS_EXPECTED.is_file():
+        print(f"  [{lang:>4s}] events expected file missing -- skipping events assertions")
+        return True
+    if lang not in IMPLS_WITH_EVENTS:
+        print(f"  [{lang:>4s}] events subcommand -- skipping (not in IMPLS_WITH_EVENTS)")
+        return True
+
+    expected_data = json.loads(EVENTS_EXPECTED.read_text(encoding="utf-8"))
+    pin_now = expected_data["pin_now"]
+    pin_period = expected_data["pin_period"]
+    pin_win_start = expected_data["pin_win_start"]
+    all_ok = True
+
+    for fixture_name, target_records in sorted(expected_data["fixtures"].items()):
+        fixture_root = EVENTS_CORPUS / fixture_name
+        if not fixture_root.is_dir():
+            print(f"  [{lang:>4s}] events/{fixture_name:20s} FAIL  fixture dir missing")
+            all_ok = False
+            continue
+
+        label = f"events/{fixture_name}"
+        cmd = [
+            str(binary), "events",
+            "--period", repr(pin_period),
+            "--win-start", repr(pin_win_start),
+            "--projects-root", str(fixture_root),
+            "--now", repr(pin_now),
+            "--no-config",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            print(
+                f"  [{lang:>4s}] {label:30s} FAIL  "
+                f"exit {result.returncode}: {result.stderr.strip()[:120]}"
+            )
+            all_ok = False
+            continue
+
+        # Parse NDJSON output — one JSON object per non-blank line.
+        got_records: list[dict] = []
+        parse_error: str | None = None
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            try:
+                got_records.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                parse_error = f"non-JSON line: {line!r} ({exc})"
+                break
+
+        if parse_error:
+            print(f"  [{lang:>4s}] {label:30s} FAIL  {parse_error}")
+            all_ok = False
+            continue
+
+        # Sort both lists by (ts, session_id, model) for stable multiset comparison.
+        got_sorted = sorted(got_records, key=_events_sort_key)
+        target_sorted = sorted(target_records, key=_events_sort_key)
+
+        if len(got_sorted) != len(target_sorted):
+            print(
+                f"  [{lang:>4s}] {label:30s} FAIL  "
+                f"length mismatch: got {len(got_sorted)}, expected {len(target_sorted)}"
+            )
+            all_ok = False
+            continue
+
+        first_diff: str | None = None
+        records_ok = True
+        for index, (got, target) in enumerate(zip(got_sorted, target_sorted)):
+            ts_ok = abs(got.get("ts", 0.0) - target.get("ts", 0.0)) <= EVENTS_TS_TOLERANCE
+            usd_ok = abs(got.get("usd", 0.0) - target.get("usd", 0.0)) <= EVENTS_USD_TOLERANCE
+            fields_ok = (
+                got.get("model") == target.get("model")
+                and got.get("session_id") == target.get("session_id")
+                and got.get("slug") == target.get("slug")
+            )
+            if not (ts_ok and usd_ok and fields_ok):
+                records_ok = False
+                first_diff = (
+                    f"record[{index}] mismatch: "
+                    f"got {json.dumps(got, sort_keys=True)} "
+                    f"expected {json.dumps(target, sort_keys=True)}"
+                )
+                break
+
+        badge = " OK " if records_ok else "FAIL"
+        print(
+            f"  [{lang:>4s}] {label:30s} {badge}  "
+            f"records={len(got_sorted)}"
+        )
+        if first_diff:
+            print(f"        {first_diff}")
+            all_ok = False
+
+    return all_ok
+
+
 def main():
     if not EXPECTED.is_file():
         print(f"missing {EXPECTED} -- run shared/generate_corpus.py first")
@@ -454,6 +572,8 @@ def main():
         if not check_multi_root(lang, binary):
             overall_ok = False
         if not check_search(lang, binary):
+            overall_ok = False
+        if not check_events(lang, binary):
             overall_ok = False
         print()
 
