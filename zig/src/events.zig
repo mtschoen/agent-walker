@@ -46,7 +46,7 @@ fn parseArgs(alloc: Allocator, raw: [][]const u8) !EventsArgs {
         } else if (std.mem.eql(u8, flag, "--no-config")) {
             read_config = false;
         } else if (std.mem.eql(u8, flag, "--version")) {
-            main.writeStdout("zig/0.1.1\n");
+            main.writeStdout(main.VERSION ++ "\n");
             std.process.exit(0);
         } else {
             std.debug.print("walker: events: unknown flag: {s}\n", .{flag});

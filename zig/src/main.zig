@@ -12,7 +12,7 @@ const search = @import("search.zig");
 const events = @import("events.zig");
 const walker_roots = @import("walker_roots.zig");
 
-const VERSION = "zig/0.1.1";
+pub const VERSION = "zig/0.1.1";
 pub const is_windows = builtin.os.tag == .windows;
 pub const is_darwin = builtin.os.tag == .macos;
 
