@@ -302,6 +302,84 @@ Exit 0 even when the output stream is empty.
 **Ordering.** Implementations MAY emit lines in any order. Conformance
 compares event sets as a multiset, sorted by `(ts, session_id, model)`
 for tie-breaking stability.
+### `search <pattern> [flags]`
+
+Content search over transcripts for the recall problem ("you said X a few
+sessions ago, but didn't commit it to memory"). The differentiator is
+**cross-root / cross-machine** lookup: search inherits the multi-root
+resolution from `## Roots`, so a query reaches into mounted remote-host
+transcripts when configured. Read-only — search MUST NOT write to a
+transcript or to memory. `<pattern>` is required and positional; an empty
+pattern is an error.
+
+| Flag | Default | Notes |
+| ---- | ------- | ----- |
+| `--regex` | false | Treat pattern as an RE2 regex (no lookaround/backreferences). |
+| `--case-sensitive` | false | Default is case-insensitive (the usual recall case). |
+| `--role <user\|assistant\|both>` | both | Restrict by message role. |
+| `--since <t>` / `--until <t>` | none / now | RFC3339 timestamp or relative (`7d`, `12h`). |
+| `--cwd <slug>` | any | Restrict to one project slug (the `~/.claude/projects/<slug>` dir name). |
+| `--context <N>` | 1 | Turns of context before AND after each hit (`0` = hit only). |
+| `--limit <N>` | 50 | Soft cap; overflow sets `truncated` and emits a stderr narrowing hint. |
+| `--count-only` | false | Emit only the summary record — a cheap pre-flight to size a query. |
+| `--include-tool-blocks` | false | Also search inside `tool_use` / `tool_result` blocks. |
+| `--format <pretty\|jsonl>` | pretty | `jsonl` is agent-consumable (one record per line). |
+| `--snippet-chars <N>` | 240 | Max snippet preview chars per hit. |
+
+Filters apply cheapest-first per `## Filters`: file mtime, slug, role,
+tool-block exclusion, time window, then the pattern match.
+
+**Content extraction.** `message.content` is sometimes a bare string (older
+user-prompt format) and sometimes an array of content blocks; parse it untyped
+and concatenate the `{"type":"text"}` blocks — strict typed deserialization
+silently drops ~10% of older user prompts. Search reaches `role: user` and
+`role: assistant` messages only.
+
+Output (`--format jsonl`): one hit record per line, a summary record last.
+
+```json
+{"type":"hit","session_id":"...","cwd_slug":"...","host_root":"...","file_path":"...","line_number":147,"timestamp":"...","role":"assistant","snippet":"...","match_offsets":[[1,16]],"context_before":[{"role":"...","text":"...","timestamp":"..."}],"context_after":[{"role":"...","text":"...","timestamp":"..."}]}
+{"type":"summary","hits":3,"sessions_matched":4,"roots_walked":2,"files_walked":218,"truncated":false,"elapsed_ms":142}
+```
+
+`host_root` is the killer field — it names which machine's mount the hit came
+from, closing the "agent didn't think to check the other host" gap. Ordering
+is newest-first, tiebroken by `(timestamp DESC, session_id ASC, line_number
+ASC)`. `pretty` mode renders the same data human-readably.
+
+Errors (exit 2, stderr diagnostic): empty pattern (`pattern must be
+non-empty`), unparseable regex (`bad regex: <why>`), unparseable
+`--since`/`--until` (`bad time: ...`). Malformed JSONL lines are skipped, never
+a panic.
+
+Decided constraints: the regex surface is RE2 (no lookaround/backreferences)
+across all four impls; substring matching treats newlines as whitespace and
+regex honors an explicit `(?m)` in the pattern. No on-disk index, no semantic
+search, no mutation.
+
+## MCP shim
+
+`mcp/server.py` is a FastMCP stdio server exposing one tool,
+`claude_walker_search`, that subprocesses `walker search ... --format jsonl`
+and reshapes the output into `{hits, summary, note}`. It exists so agents get
+auto-discovered, cross-cwd recall without constructing a CLI string — the
+cross-machine miss is exactly what an always-present tool closes.
+
+- **Binary discovery** (first hit wins): `$CLAUDE_WALKER_BINARY`,
+  `~/.claude/walker[.exe]`, `~/.local/bin/claude-walker[.exe]`, then `PATH`.
+- **Tool parameters** mirror the CLI flags: `pattern` (required), `regex`,
+  `case_sensitive`, `role`, `since`, `until`, `cwd_slug`, `context_turns`,
+  `limit`, `count_only`, `include_tool_blocks`.
+- **Errors:** a non-zero walker exit (bad input) or a 30 s subprocess timeout
+  raises an MCP tool error carrying the walker's stderr; the truncation hint
+  from a successful run is passed through as `note`.
+- **Logging:** one JSONL event per call (`session_start`/`call`/`return`/
+  `error`) at `~/.claude-walker-mcp.log`, mirroring projdash — tail it to trace
+  a hang.
+- **Registration:** user-scope via
+  `claude mcp add --scope user claude-walker -- python <repo>/mcp/server.py`,
+  so it's available from every cwd. Launched by absolute script path, not
+  `python -m mcp`, to avoid colliding with the `mcp` SDK package name.
 
 ## Conformance fixtures
 
@@ -309,7 +387,10 @@ for tie-breaking stability.
 plus `shared/corpus/expected.json` mapping fixture name → expected
 output for cost mode. Beacon fixtures live under
 `shared/corpus/beacons/<scenario>/<sid>.jsonl` with sibling
-`expected_latest.json` and `expected_history.json`. The harness
+`expected_latest.json` and `expected_history.json`. Search fixtures live under
+`shared/corpus/search/<scenario>/` with sibling `expected.json`; the harness
+structurally compares the JSONL hit/summary records, ignoring `elapsed_ms` and
+`files_walked` (they vary per run). The harness
 invokes each binary against the corpus and asserts agreement to
 ±$0.01 for cost and ±0.001 for `bias_factor`.
 
