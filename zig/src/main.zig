@@ -9,6 +9,7 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const beacons = @import("beacons.zig");
 const search = @import("search.zig");
+const events = @import("events.zig");
 const walker_roots = @import("walker_roots.zig");
 
 const VERSION = "zig/0.1.1";
@@ -495,7 +496,7 @@ pub fn die(msg: []const u8) noreturn {
 
 // ─── Pricing ─────────────────────────────────────────────────────────────────
 
-fn modelCost(inp: u64, out_: u64, cr: u64, cw: u64, model: []const u8) f64 {
+pub fn modelCost(inp: u64, out_: u64, cr: u64, cw: u64, model: []const u8) f64 {
     var buf: [256]u8 = undefined;
     const n = @min(model.len, buf.len);
     const lo = std.ascii.lowerString(buf[0..n], model[0..n]);
@@ -1154,6 +1155,7 @@ pub fn main() !void {
         if (std.mem.eql(u8, first, "beacons-latest")) break :blk "beacons-latest";
         if (std.mem.eql(u8, first, "beacons-history")) break :blk "beacons-history";
         if (std.mem.eql(u8, first, "search")) break :blk "search";
+        if (std.mem.eql(u8, first, "events")) break :blk "events";
         if (first.len > 0 and first[0] == '-') break :blk "cost";
         std.debug.print("walker: unknown subcommand: {s}\n", .{first});
         std.process.exit(2);
@@ -1171,6 +1173,9 @@ pub fn main() !void {
     }
     if (std.mem.eql(u8, subcommand, "search")) {
         return search.run(gpa, rest);
+    }
+    if (std.mem.eql(u8, subcommand, "events")) {
+        return events.run(gpa, rest);
     }
     return runCost(gpa, rest);
 }

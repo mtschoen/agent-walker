@@ -384,6 +384,9 @@ func main() {
 		case "search":
 			runSearch(raw[1:])
 			return
+		case "events":
+			runEvents(raw[1:])
+			return
 		}
 		first := raw[0]
 		// Any non-flag first positional that didn't match a subcommand is
