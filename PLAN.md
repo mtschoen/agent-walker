@@ -66,26 +66,53 @@ Lots of work for "fairness," and the practical answer (use the fastest
 JSON lib in each language) is what production code would do anyway.
 File this under "fun exercise for a rainy day."
 
-### Promote `bench-interleaved.py` to a checked-in script + standard report
+### Interleaved perf report -- standard output format (partly done)
 
-`.claude/scripts/bench-interleaved.py` is currently an untracked 89-line
-one-off used during PR #8 (cpp perf-pass-2) for the 11-round interleaved
-median measurements. The logic is generic and worth keeping, but per
-CLAUDE.md `.claude/scripts/` is for delete-after-use one-offs.
+DONE (commit ba22515): the round-robin interleaving + walker `elapsed_ms`
+column from the old `.claude/scripts/bench-interleaved.py` are merged into
+`shared/bench.py` as a `--interleave` flag (with an untimed warm-up); the
+throwaway script is deleted. `bench.py` now also passes `--no-config` to ALL
+impls so the comparison is apples-to-apples (was cpp-only, which compared
+unequal work and made go/zig look slow when they were just walking the SMB
+drive cpp skipped).
 
-**Promote to a real script:**
+Still open:
 
-- Move to `shared/bench-interleaved.py` (or `shared/perf-report.py`) and
-  commit. It already covers all four impls × `cost` / `beacons-history` /
-  `search` modes with round-robin scheduling + outlier trim. `shared/bench.py`
-  stays as the live-fleet quick-check; this is the disciplined perf-report
-  generator.
-- Define a standard output format — either a new `BENCH-RESULTS.md` (timestamped
-  table per run) or append-style entries to `RESULTS.md`. Lean toward a separate
-  file so `RESULTS.md` stays narrative.
-- Document when to re-run: at minimum, before/after any perf-affecting PR;
-  consider a CI invocation on `workflow_dispatch` (don't gate merges on it —
-  cross-impl perf varies per runner).
-- The script currently prints walker `elapsed_ms` alongside wall-clock —
-  preserve that, it's the per-process-startup-overhead vs in-binary-work
-  signal that diagnosed PR #8.
+- Define a standard output format for perf runs: a timestamped `BENCH-RESULTS.md`
+  table (keep `RESULTS.md` narrative). `bench.py` is the live-fleet quick-check,
+  not a disciplined report generator.
+- Document when to re-run: before/after any perf-affecting PR; optionally a CI
+  `workflow_dispatch` invocation (do not gate merges on it; cross-impl perf
+  varies per runner).
+
+### Finish root-resolution fix rollout (commit ba22515, local/unpushed)
+
+Three root-discovery bugs fixed in-tree on `main` this session:
+
+1. rust silently dropped mapped network-drive roots (the `fs::canonicalize`
+   verbatim/UNC trap broke the `glob` discovery). Fixed by walking the original
+   path and using canonical only as the dedup key.
+2. HOME-vs-USERPROFILE precedence was Windows-wrong (rust+cpp HOME-first for
+   both default root and config; go internally inconsistent). Unified on a
+   platform-gated helper: Windows -> USERPROFILE then HOME, else HOME then
+   USERPROFILE, in all four impls + SPEC.md.
+3. conformance never exercised config/home resolution (every runner forced
+   `--no-config`). Added `check_config_resolution`.
+
+All four pass `python shared/conformance.py rust cpp go zig` locally on Windows.
+See `~/.claude/notes/idioms_windows_home_and_canonicalize.md` for the reusable
+gotchas. Remaining:
+
+- **Push** ba22515 (+ the wrap-hygiene commit) to `origin` (GitHub) AND `gitea`.
+  Remotes are SWAPPED vs skills-dev: `git remote -v` first.
+- **Watch CI** (ubuntu + windows runners): the new config-resolution test is the
+  cross-platform guard for the precedence fix; Bug B's Windows failure only
+  reproduces on the windows-latest runner.
+- **macOS:** after pulling, run `python shared/conformance.py rust cpp go zig`
+  (no macOS CI runner; per CLAUDE.md macOS section).
+- **Bug A (mapped drive) has NO CI guard** (no mapped network drive on runners).
+  Its only regression check is local/live: `python shared/bench.py` against the
+  live fleet, or `walker --projects-root Y:\.claude\projects --no-config` must
+  walk >0 files in rust. Re-verify after any `walker_roots`/discovery change.
+- **Check `RESULTS.md`** for now-stale bench numbers (predates the fair
+  `--no-config`-for-all fix; go/zig were never actually 3-12x slower).
