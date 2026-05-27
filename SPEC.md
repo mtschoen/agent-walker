@@ -274,8 +274,11 @@ a known name; otherwise the bare-flag invocation is treated as `cost`.
 Walks the matching transcript (parent or `subagents/agent-<id>.jsonl`)
 backwards, finds the most recent assistant message containing a
 `<progress-beacon>...</progress-beacon>` block. The JSON inside must
-parse and contain `kind`, `eta_seconds`, `summary`, and `drift` (plus
-optional `beats_left`).
+parse and contain the required fields `kind`, `eta_seconds`, and
+`summary`. `drift` is **optional** — accepted and passed through when
+present, but its absence no longer rejects the beacon (`beats_left` is
+likewise optional). When the source beacon omits `drift`, the returned
+`beacon` object omits it too.
 
 Output:
 
@@ -293,20 +296,41 @@ varies per wall clock); production callers omit it.
 ### `beacons-history --period <seconds> [--win-start <unix>] [--projects-root <path>] [--now <unix>]`
 
 Walks the full fleet under the time window. For each session group
-(same grouping as `cost` mode) that contains both a `kind: "begin"`
-AND a `kind: "end"` beacon within the window, emits a pair with three
-elapsed fields:
+(same grouping as `cost` mode), iterate that group's beacons in
+**timestamp-ascending order** (stable on ties), tracking a single
+in-flight `pending_begin` (a `(timestamp, beacon)` or null):
+
+- On `kind: "begin"`: if a `pending_begin` is already held, **orphan
+  it** (emit no pair for that prior begin) and replace it with this
+  one; otherwise just record it.
+- On `kind: "end"`: if a `pending_begin` is held and the end's
+  `timestamp > pending_begin.timestamp`, emit one pair (fields below)
+  and clear `pending_begin`. An `end` with no held begin is
+  **orphaned** (no pair).
+- On `kind: "report"` (or any other kind): ignored for pairing.
+
+This emits **one pair per properly-closed begin→end lifecycle**, so a
+session with N lifecycles yields up to N pairs. (The previous rule —
+"earliest begin + latest end per group" — collapsed every lifecycle in
+a session into one oversized span, dividing whole-session wall-clock by
+the first lifecycle's eta; this replaces that bug.) Each emitted pair
+has three elapsed fields:
 
 - `actual_elapsed = end_timestamp - begin_timestamp` (wall-clock)
-- `idle_excluded` = sum of gaps inside `[begin_ts, end_ts]` that
-  immediately precede a real user prompt (`type: "user"` entries with
-  non-`tool_result` content). Tool-result entries don't count as idle
-  because they're agent-active time waiting on tool execution.
+- `idle_excluded` = sum of gaps inside that pair's `[begin_ts, end_ts]`
+  that immediately precede a real user prompt (`type: "user"` entries
+  with non-`tool_result` content). Tool-result entries don't count as
+  idle because they're agent-active time waiting on tool execution.
 - `active_elapsed = max(0, actual_elapsed - idle_excluded)`
 
+A pair qualifies for the window when its `begin_ts` survives the
+per-beacon collection filter `begin_ts >= window_lo`, where
+`window_lo = max(now - period, win_start)`. The window filters on the
+begin timestamp; the derived span may extend past it.
+
 Computes `bias_factor = median(active_elapsed / begin_eta)` across all
-pairs. Even-count median is the mean of the two middle values. The
-calculation excludes user-idle time because including it makes the
+emitted pairs. Even-count median is the mean of the two middle values.
+The calculation excludes user-idle time because including it makes the
 bias unrepresentative of the agent's actual estimation accuracy — a
 session where the user walked away for an hour shouldn't punish the
 agent's ETA the same as one where the agent genuinely worked an hour.
