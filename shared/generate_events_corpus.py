@@ -36,6 +36,8 @@ RATES = {
     "haiku": (1.0, 5.0),
 }
 
+WEB_SEARCH_COST_USD = 0.01  # flat charge per server-side web search request
+
 
 def _rates_for(model_id: str) -> tuple[float, float]:
     name = (model_id or "").lower()
@@ -46,15 +48,17 @@ def _rates_for(model_id: str) -> tuple[float, float]:
 
 
 def cost(model: str, in_tok: int, out_tok: int,
-         cache_read: int = 0, cache_write: int = 0) -> float:
+         cache_read: int = 0, cache_write: int = 0,
+         web_search_requests: int = 0) -> float:
     """Compute USD cost for one assistant turn per SPEC.md §Pricing."""
     input_rate, output_rate = _rates_for(model)
-    return (
+    token_cost = (
         in_tok * input_rate
         + cache_read * input_rate * 0.10
         + cache_write * input_rate * 1.25
         + out_tok * output_rate
     ) / 1_000_000
+    return token_cost + web_search_requests * WEB_SEARCH_COST_USD
 
 
 # ---------------------------------------------------------------------------
@@ -70,8 +74,17 @@ def iso_z(unix: float) -> str:
 
 def turn(message_id: str, ts: float, model: str,
          in_tok: int, out_tok: int,
-         cache_read: int = 0, cache_write: int = 0) -> dict:
+         cache_read: int = 0, cache_write: int = 0,
+         web_search_requests: int = 0) -> dict:
     """Build an assistant-turn dict matching the JSONL schema."""
+    usage: dict = {
+        "input_tokens": in_tok,
+        "output_tokens": out_tok,
+        "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": cache_write,
+    }
+    if web_search_requests:
+        usage["server_tool_use"] = {"web_search_requests": web_search_requests}
     return {
         "type": "assistant",
         "timestamp": iso_z(ts),
@@ -79,12 +92,7 @@ def turn(message_id: str, ts: float, model: str,
             "id": message_id,
             "role": "assistant",
             "model": model,
-            "usage": {
-                "input_tokens": in_tok,
-                "output_tokens": out_tok,
-                "cache_read_input_tokens": cache_read,
-                "cache_creation_input_tokens": cache_write,
-            },
+            "usage": usage,
         },
     }
 
@@ -119,6 +127,7 @@ def expected_record(turn_dict: dict, slug: str, session_id: str) -> dict:
         int(usage.get("output_tokens") or 0),
         int(usage.get("cache_read_input_tokens") or 0),
         int(usage.get("cache_creation_input_tokens") or 0),
+        int((usage.get("server_tool_use") or {}).get("web_search_requests") or 0),
     )
     # Field order fixed: ts, usd, model, session_id, slug
     return {
@@ -213,6 +222,23 @@ def fixture_06_malformed_mixed():
     return name, [expected_record(good, slug, session_id)]
 
 
+def fixture_07_web_search():
+    """One in-window opus turn with server-side web searches.
+
+    usd must include $0.01 per request on top of token cost. Exercises the
+    events-mode usage parser's descent into the nested server_tool_use object
+    (cpp/events.cpp and zig/events.zig parse usage separately from cost mode,
+    so this is the only conformance check covering that event-path code).
+    """
+    name = "07-web-search"
+    slug = "project-eta"
+    session_id = "sess-007"
+    t = turn("msg-007", _IN_WINDOW, "claude-opus-4-7",
+             in_tok=1000, out_tok=500, web_search_requests=4)
+    write_fixture(name, slug, session_id, [t])
+    return name, [expected_record(t, slug, session_id)]
+
+
 FIXTURES = [
     fixture_01_empty,
     fixture_02_single,
@@ -220,6 +246,7 @@ FIXTURES = [
     fixture_04_multi_session,
     fixture_05_cache_mix,
     fixture_06_malformed_mixed,
+    fixture_07_web_search,
 ]
 
 

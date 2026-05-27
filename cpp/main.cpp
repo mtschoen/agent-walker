@@ -215,7 +215,8 @@ static GroupResult walk_group(
             bool has_message_id = false;
             std::string model;
             uint64_t input_tokens = 0, output_tokens = 0,
-                     cache_read_tokens = 0, cache_write_tokens = 0;
+                     cache_read_tokens = 0, cache_write_tokens = 0,
+                     web_search_requests = 0;
             bool message_seen = false;
 
             for (auto root_field : root) {
@@ -261,6 +262,22 @@ static GroupResult walk_group(
                                 std::string_view usage_key;
                                 if (usage_field.unescaped_key().get(usage_key) != sj::SUCCESS) continue;
 
+                                // server_tool_use is a nested object, not a scalar.
+                                // Descend for web_search_requests before the scalar
+                                // get_uint64 below (which would skip a non-uint value).
+                                if (usage_key == "server_tool_use") {
+                                    sj::ondemand::object stu_obj;
+                                    if (usage_field.value().get_object().get(stu_obj) != sj::SUCCESS) continue;
+                                    for (auto stu_field : stu_obj) {
+                                        std::string_view stu_key;
+                                        if (stu_field.unescaped_key().get(stu_key) != sj::SUCCESS) continue;
+                                        uint64_t stu_value = 0;
+                                        if (stu_field.value().get_uint64().get(stu_value) != sj::SUCCESS) continue;
+                                        if (stu_key == "web_search_requests") web_search_requests = stu_value;
+                                    }
+                                    continue;
+                                }
+
                                 uint64_t value = 0;
                                 if (usage_field.value().get_uint64().get(value) != sj::SUCCESS) continue;
 
@@ -288,7 +305,8 @@ static GroupResult walk_group(
             if (ts < earliest) continue;
 
             double cost = cost_for(input_tokens, output_tokens,
-                                   cache_read_tokens, cache_write_tokens, model);
+                                   cache_read_tokens, cache_write_tokens,
+                                   web_search_requests, model);
 
             if (ts >= period_cutoff) result.trailing += cost;
             if (ts >= win_start_unix) result.window += cost;

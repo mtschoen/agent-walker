@@ -208,9 +208,13 @@ model id):
 - Opus 1M-tier doubling is **not** applied here — the harness does not apply it
   in practice (measured 0% error vs authoritative `costUSD` on big-context Opus,
   incl. 26M-cache-read sessions), so token rates alone match.
-- **Pending:** the Python reference also charges **$0.01 per server-side web
-  search** (`usage.server_tool_use.web_search_requests`). Not yet implemented
-  here, so cost modes under-count search-heavy sessions. See PLAN.md Inbox.
+- **Web search:** each server-side web search request is charged a flat
+  **$0.01** (billed at $10 / 1,000), added on top of token cost and NOT
+  divided by 1M. The count comes from
+  `usage.server_tool_use.web_search_requests` (nested object; absent → 0).
+  Verified to the cent against the authoritative per-model `costUSD` in
+  `~/.claude.json`. Applies to cost, events, and beacon modes alike — they
+  all share this one pricing formula.
 
 Cost for one assistant turn (all token counts default to 0 if missing):
 
@@ -221,11 +225,14 @@ cost = (
   + cache_write_tokens * input_rate * 1.25
   + output_tokens * output_rate
 ) / 1_000_000
+  + web_search_requests * 0.01
 ```
 
 Token field names in the JSONL `usage` object:
 `input_tokens`, `output_tokens`, `cache_read_input_tokens`,
-`cache_creation_input_tokens`.
+`cache_creation_input_tokens`. The web-search count is nested one level
+deeper: `usage.server_tool_use.web_search_requests` (uint, default 0 when
+the object or field is absent).
 
 ## Bucketing
 

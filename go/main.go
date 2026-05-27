@@ -211,17 +211,23 @@ type entry struct {
 }
 
 type message struct {
-	Role  string  `json:"role"`
-	ID    string  `json:"id"`
-	Model string  `json:"model"`
-	Usage *usage  `json:"usage"`
+	Role  string `json:"role"`
+	ID    string `json:"id"`
+	Model string `json:"model"`
+	Usage *usage `json:"usage"`
 }
 
 type usage struct {
-	InputTokens               uint64 `json:"input_tokens"`
-	OutputTokens              uint64 `json:"output_tokens"`
-	CacheReadInputTokens      uint64 `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens  uint64 `json:"cache_creation_input_tokens"`
+	InputTokens              uint64         `json:"input_tokens"`
+	OutputTokens             uint64         `json:"output_tokens"`
+	CacheReadInputTokens     uint64         `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens uint64         `json:"cache_creation_input_tokens"`
+	ServerToolUse            *serverToolUse `json:"server_tool_use"`
+}
+
+// serverToolUse is the nested usage.server_tool_use object; nil when absent.
+type serverToolUse struct {
+	WebSearchRequests uint64 `json:"web_search_requests"`
 }
 
 // ratesForModel returns (inputPerMTok, outputPerMTok) for a model string.
@@ -237,16 +243,25 @@ func ratesForModel(model string) (float64, float64) {
 	}
 }
 
+// webSearchCostUSD is the flat charge per server-side web search request
+// (billed $10 / 1,000), added on top of token cost. Matches SPEC.md.
+const webSearchCostUSD = 0.01
+
 // costForTurn computes the dollar cost of one assistant turn.
 func costForTurn(u *usage, model string) float64 {
 	if u == nil {
 		return 0
 	}
 	inputRate, outputRate := ratesForModel(model)
-	return (float64(u.InputTokens)*inputRate +
+	tokenCost := (float64(u.InputTokens)*inputRate +
 		float64(u.CacheReadInputTokens)*inputRate*0.10 +
 		float64(u.CacheCreationInputTokens)*inputRate*1.25 +
 		float64(u.OutputTokens)*outputRate) / 1_000_000.0
+	var webSearches uint64
+	if u.ServerToolUse != nil {
+		webSearches = u.ServerToolUse.WebSearchRequests
+	}
+	return tokenCost + float64(webSearches)*webSearchCostUSD
 }
 
 // parseISO8601 parses an ISO 8601 timestamp (with optional Z suffix) to a

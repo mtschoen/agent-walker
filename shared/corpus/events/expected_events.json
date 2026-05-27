@@ -55,6 +55,15 @@
         "session_id": "sess-006",
         "slug": "project-zeta"
       }
+    ],
+    "07-web-search": [
+      {
+        "ts": 1747899940.0,
+        "usd": 0.0575,
+        "model": "claude-opus-4-7",
+        "session_id": "sess-007",
+        "slug": "project-eta"
+      }
     ]
   }
 }

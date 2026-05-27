@@ -31,6 +31,8 @@ RATES = {
     "haiku": (1.0, 5.0),
 }
 
+WEB_SEARCH_COST_USD = 0.01  # flat charge per server-side web search request
+
 
 def rates_for(model_id: str) -> tuple[float, float]:
     name = (model_id or "").lower()
@@ -46,7 +48,9 @@ def cost_for(usage: dict, model_id: str) -> float:
     r = int(usage.get("cache_read_input_tokens", 0) or 0)
     w = int(usage.get("cache_creation_input_tokens", 0) or 0)
     o = int(usage.get("output_tokens", 0) or 0)
-    return (i * inp + r * inp * 0.10 + w * inp * 1.25 + o * out) / 1_000_000
+    web = int((usage.get("server_tool_use") or {}).get("web_search_requests", 0) or 0)
+    token_cost = (i * inp + r * inp * 0.10 + w * inp * 1.25 + o * out) / 1_000_000
+    return token_cost + web * WEB_SEARCH_COST_USD
 
 
 def iso(unix: float) -> str:
@@ -57,7 +61,18 @@ def iso(unix: float) -> str:
 
 def turn(model: str, ts_unix: float, *, msg_id: str | None,
          input_tokens: int = 0, output_tokens: int = 0,
-         cache_read: int = 0, cache_write: int = 0) -> dict:
+         cache_read: int = 0, cache_write: int = 0,
+         web_search_requests: int = 0) -> dict:
+    usage: dict = {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": cache_write,
+    }
+    # Only emit the nested server_tool_use object when there are searches,
+    # so fixtures also exercise the absent-object path (web count -> 0).
+    if web_search_requests:
+        usage["server_tool_use"] = {"web_search_requests": web_search_requests}
     return {
         "type": "assistant",
         "timestamp": iso(ts_unix),
@@ -65,12 +80,7 @@ def turn(model: str, ts_unix: float, *, msg_id: str | None,
             "role": "assistant",
             "id": msg_id,
             "model": model,
-            "usage": {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cache_read_input_tokens": cache_read,
-                "cache_creation_input_tokens": cache_write,
-            },
+            "usage": usage,
         },
     }
 
@@ -207,6 +217,25 @@ def fixture_07_unknown_model():
     return slug, {f"{sid}.jsonl": turns}
 
 
+def fixture_08_web_search():
+    """Server-side web search: $0.01 per request on top of token cost.
+
+    Both turns fall in trailing AND window. 5 + 3 = 8 searches -> $0.08
+    added beyond tokens, far above the $0.01 tolerance, so an impl that
+    ignores web search (or mis-parses the nested server_tool_use object)
+    fails. The other fixtures omit server_tool_use, covering the absent case.
+    """
+    slug = "08-web-search"
+    sid = "eta"
+    turns = [
+        turn("claude-opus-4-7", FRESH, msg_id="ws1",
+             input_tokens=1000, output_tokens=500, web_search_requests=5),
+        turn("claude-sonnet-4-6", RECENT, msg_id="ws2",
+             input_tokens=200, output_tokens=100, web_search_requests=3),
+    ]
+    return slug, {f"{sid}.jsonl": turns}
+
+
 FIXTURES = [
     fixture_01_single_parent,
     fixture_02_parent_acompact,
@@ -215,6 +244,7 @@ FIXTURES = [
     fixture_05_out_of_range,
     fixture_06_period_only,
     fixture_07_unknown_model,
+    fixture_08_web_search,
 ]
 
 
@@ -258,15 +288,24 @@ def walk_group(files: dict[str, list]) -> tuple[float, float]:
 
 
 def main():
-    if CORPUS.exists():
-        # Wipe and regenerate so deletions take effect.
-        for p in sorted(CORPUS.rglob("*"), reverse=True):
-            if p.is_file():
-                p.unlink()
-            elif p.is_dir():
-                p.rmdir()
-        CORPUS.rmdir()
     CORPUS.mkdir(parents=True, exist_ok=True)
+
+    # Build first so we know which cost-fixture slug dirs we own, then wipe
+    # ONLY those (so a removed fixture still takes effect). shared/corpus/ is
+    # shared with the beacons/, events/, search/, and multi_root/ trees — each
+    # owned by its own generator or hand-maintained — so wiping the whole tree
+    # here would destroy them. The sibling generators each wipe only their own
+    # subdir; mirror that.
+    built = [build() for build in FIXTURES]
+    for slug, _files in built:
+        slug_dir = CORPUS / slug
+        if slug_dir.exists():
+            for p in sorted(slug_dir.rglob("*"), reverse=True):
+                if p.is_file():
+                    p.unlink()
+                elif p.is_dir():
+                    p.rmdir()
+            slug_dir.rmdir()
 
     expected = {
         "_meta": {
@@ -281,8 +320,7 @@ def main():
 
     agg_t = agg_w = 0.0
     file_count = 0
-    for build in FIXTURES:
-        slug, files = build()
+    for slug, files in built:
         slug_dir = CORPUS / slug
         for rel, entries in files.items():
             target = slug_dir / rel

@@ -50,20 +50,36 @@ Remaining (in order):
 - [ ] **macOS conformance** (different machine; no macOS CI runner): after pulling the
   merged main, `python shared/conformance.py rust cpp go zig` + the zig-Darwin grep
   guard (CLAUDE.md macOS section). STILL PENDING -- can't run from chonkers/Windows.
-- [ ] **Then: web-search cost fix** (the "Add per-request web-search cost" Inbox
-  section below) -- user chose "both, beacons first" this session, so it is the next
-  bug after this rollout lands.
-- [ ] **Downstream repos (land AFTER walker reinstall):** schoen-claude-status
-  `feat/objective-drift` (statusline objective-drift changes already in working tree,
-  uncommitted -- commit them); skills-dev/progress-beacon `feat/drop-drift-field` (drop
-  `drift` from SKILL.md required fields + examples; objective-math note trigger).
+- [x] **Web-search cost fix -- DONE 2026-05-27.** $0.01/request added to the one shared
+  pricing formula in all four impls (cpp/pricing.hpp, rust transcript.rs, go main.go, zig
+  main.zig), parsing nested `usage.server_tool_use.web_search_requests`; SPEC §Pricing
+  updated; cost fixture `08-web-search` + events fixture `07-web-search` added (the latter
+  covers cpp/zig's separate event-path parsers). Full conformance 204 OK / 0 fail; cpp
+  rebuilt + reinstalled (verified aggregate $0.27925 incl. the $0.08 web-search). Also
+  fixed a `generate_corpus.py` footgun: it wiped the WHOLE `shared/corpus/` tree (killing
+  beacons/events/search/multi_root) -- now scoped to its own cost-slug dirs like the
+  sibling generators.
+- [x] **Downstream repos -- DONE.** schoen-claude-status objective-drift was ALREADY
+  landed by a parallel llamabox session (main `14c9a56`; it also ships the $0.01
+  web-search charge on the Python side). skills-dev/progress-beacon: dropped `drift` from
+  SKILL.md required fields + all examples, rewrote "Drift judgement" -> "Surfacing ETA
+  creep loudly" (objective-math trigger), swept README + prompt-reminder hook + evals;
+  submodule `a6fce55` + parent pointer `2b63444`, both remotes.
 - [x] Flip `## Test plan summary` checkboxes + prune completed phases in
   `docs/superpowers/plans/beacon-pairing-fix.md` (walker phase marked DONE; bias
   criterion corrected to the 1.70 fleet reality).
 
 Note: spec predicted bias ~0.5 (58-session snapshot); current 1943-session fleet lands
 at 1.70 -- both sane, do not chase 0.5 in the statusline work.
-### Add per-request web-search cost ($0.01) to the pricing model
+### Add per-request web-search cost ($0.01) to the pricing model — DONE 2026-05-27
+
+Implemented across all four impls + SPEC + cost/events corpus (see the rollout
+checklist item above for specifics). Open follow-up the user raised: consider
+having the status line call `claude-walker` for cost instead of its own Python
+`_cost_for_turn`, to collapse the 5-way formula duplication — BUT weigh the
+fleet-walk perf cost (the bottleneck behind RESULTS.md) and the granularity
+mismatch (walker `cost` mode is fleet-wide trailing/window; the statusline's
+Python walk is current-session parent+subagent). Original context below.
 
 The Python reference (`~/schoen-claude-status/statusline_lib.py`,
 `_cost_for_turn`) now charges **$0.01 per server-side web search request** on

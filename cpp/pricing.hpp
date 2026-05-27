@@ -37,20 +37,26 @@ inline Rates rates_for(std::string_view model) {
     return {3.0, 15.0};  // sonnet or unknown -> sonnet rates
 }
 
+// Flat charge per server-side web search request (billed $10 / 1,000), added
+// on top of token cost. Matches SPEC.md and the Python reference.
+inline constexpr double WEB_SEARCH_COST_USD = 0.01;
+
 inline double cost_for(
     uint64_t input_tokens,
     uint64_t output_tokens,
     uint64_t cache_read_tokens,
     uint64_t cache_write_tokens,
+    uint64_t web_search_requests,
     std::string_view model)
 {
     auto [input_rate, output_rate] = rates_for(model);
-    return (
+    double token_cost = (
         static_cast<double>(input_tokens) * input_rate
         + static_cast<double>(cache_read_tokens) * input_rate * 0.10
         + static_cast<double>(cache_write_tokens) * input_rate * 1.25
         + static_cast<double>(output_tokens) * output_rate
     ) / 1'000'000.0;
+    return token_cost + static_cast<double>(web_search_requests) * WEB_SEARCH_COST_USD;
 }
 
 }  // namespace walker

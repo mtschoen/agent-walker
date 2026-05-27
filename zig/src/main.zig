@@ -552,7 +552,11 @@ fn wantsHelp(argv: [][]const u8) bool {
 
 // ─── Pricing ─────────────────────────────────────────────────────────────────
 
-pub fn modelCost(inp: u64, out_: u64, cr: u64, cw: u64, model: []const u8) f64 {
+/// Flat charge per server-side web search request (billed $10 / 1,000),
+/// added on top of token cost. Matches SPEC.md and the Python reference.
+pub const WEB_SEARCH_COST_USD: f64 = 0.01;
+
+pub fn modelCost(inp: u64, out_: u64, cr: u64, cw: u64, web_searches: u64, model: []const u8) f64 {
     var buf: [256]u8 = undefined;
     const n = @min(model.len, buf.len);
     const lo = std.ascii.lowerString(buf[0..n], model[0..n]);
@@ -562,10 +566,11 @@ pub fn modelCost(inp: u64, out_: u64, cr: u64, cw: u64, model: []const u8) f64 {
     const or_: f64 = if (std.mem.indexOf(u8, lo, "opus") != null) 25.0
     else if (std.mem.indexOf(u8, lo, "haiku") != null) 5.0
     else 15.0;
-    return (@as(f64, @floatFromInt(inp)) * ir +
+    const token_cost = (@as(f64, @floatFromInt(inp)) * ir +
         @as(f64, @floatFromInt(cr)) * ir * 0.10 +
         @as(f64, @floatFromInt(cw)) * ir * 1.25 +
         @as(f64, @floatFromInt(out_)) * or_) / 1_000_000.0;
+    return token_cost + @as(f64, @floatFromInt(web_searches)) * WEB_SEARCH_COST_USD;
 }
 
 // ─── ISO 8601 ────────────────────────────────────────────────────────────────
@@ -744,6 +749,7 @@ fn processLine(
     var out_: u64 = 0;
     var cr: u64 = 0;
     var cw: u64 = 0;
+    var web_searches: u64 = 0;
 
     while (true) {
         const key = (parseObjectKey(&scanner, alloc) catch return) orelse break;
@@ -771,6 +777,18 @@ fn processLine(
                             cr = parseU64Value(&scanner, alloc) catch return;
                         } else if (std.mem.eql(u8, ukey, "cache_creation_input_tokens")) {
                             cw = parseU64Value(&scanner, alloc) catch return;
+                        } else if (std.mem.eql(u8, ukey, "server_tool_use")) {
+                            // Nested object: descend for web_search_requests.
+                            if (enterObject(&scanner) catch return) {
+                                while (true) {
+                                    const skey = (parseObjectKey(&scanner, alloc) catch return) orelse break;
+                                    if (std.mem.eql(u8, skey, "web_search_requests")) {
+                                        web_searches = parseU64Value(&scanner, alloc) catch return;
+                                    } else {
+                                        scanner.skipValue() catch return;
+                                    }
+                                }
+                            }
                         } else {
                             scanner.skipValue() catch return;
                         }
@@ -803,7 +821,7 @@ fn processLine(
     const ts = ts_value orelse return;
     if (ts < earliest) return;
 
-    const c = modelCost(inp, out_, cr, cw, model);
+    const c = modelCost(inp, out_, cr, cw, web_searches, model);
     if (ts >= pc) trailing.* += c;
     if (ts >= ws) window.* += c;
 }

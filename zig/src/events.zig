@@ -146,6 +146,7 @@ fn processLine(
     var out_: u64 = 0;
     var cr: u64 = 0;
     var cw: u64 = 0;
+    var web_searches: u64 = 0;
 
     while (true) {
         const key = (main.parseObjectKey(&scanner, alloc) catch return) orelse break;
@@ -173,6 +174,18 @@ fn processLine(
                             cr = main.parseU64Value(&scanner, alloc) catch return;
                         } else if (std.mem.eql(u8, ukey, "cache_creation_input_tokens")) {
                             cw = main.parseU64Value(&scanner, alloc) catch return;
+                        } else if (std.mem.eql(u8, ukey, "server_tool_use")) {
+                            // Nested object: descend for web_search_requests.
+                            if (main.enterObject(&scanner) catch return) {
+                                while (true) {
+                                    const skey = (main.parseObjectKey(&scanner, alloc) catch return) orelse break;
+                                    if (std.mem.eql(u8, skey, "web_search_requests")) {
+                                        web_searches = main.parseU64Value(&scanner, alloc) catch return;
+                                    } else {
+                                        scanner.skipValue() catch return;
+                                    }
+                                }
+                            }
                         } else {
                             scanner.skipValue() catch return;
                         }
@@ -208,7 +221,7 @@ fn processLine(
     const ts = ts_value orelse return;
     if (ts < cutoff) return;
 
-    const usd = main.modelCost(inp, out_, cr, cw, model);
+    const usd = main.modelCost(inp, out_, cr, cw, web_searches, model);
 
     // model is emitted lowercased (SPEC: "Lowercased model id ...").
     const model_lower = alloc.alloc(u8, model.len) catch return;
