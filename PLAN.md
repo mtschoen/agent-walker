@@ -85,9 +85,9 @@ Still open:
   `workflow_dispatch` invocation (do not gate merges on it; cross-impl perf
   varies per runner).
 
-### Finish root-resolution fix rollout (commit ba22515, local/unpushed)
+### Finish root-resolution fix rollout — DONE 2026-05-27 (macOS check pending)
 
-Three root-discovery bugs fixed in-tree on `main` this session:
+Three root-discovery bugs fixed in-tree on `main` (commit ba22515):
 
 1. rust silently dropped mapped network-drive roots (the `fs::canonicalize`
    verbatim/UNC trap broke the `glob` discovery). Fixed by walking the original
@@ -99,20 +99,30 @@ Three root-discovery bugs fixed in-tree on `main` this session:
 3. conformance never exercised config/home resolution (every runner forced
    `--no-config`). Added `check_config_resolution`.
 
-All four pass `python shared/conformance.py rust cpp go zig` locally on Windows.
 See `~/.claude/notes/idioms_windows_home_and_canonicalize.md` for the reusable
-gotchas. Remaining:
+gotchas.
 
-- **Push** ba22515 (+ the wrap-hygiene commit) to `origin` (GitHub) AND `gitea`.
-  Remotes are SWAPPED vs skills-dev: `git remote -v` first.
-- **Watch CI** (ubuntu + windows runners): the new config-resolution test is the
-  cross-platform guard for the precedence fix; Bug B's Windows failure only
-  reproduces on the windows-latest runner.
-- **macOS:** after pulling, run `python shared/conformance.py rust cpp go zig`
-  (no macOS CI runner; per CLAUDE.md macOS section).
-- **Bug A (mapped drive) has NO CI guard** (no mapped network drive on runners).
-  Its only regression check is local/live: `python shared/bench.py` against the
-  live fleet, or `walker --projects-root Y:\.claude\projects --no-config` must
-  walk >0 files in rust. Re-verify after any `walker_roots`/discovery change.
-- **Check `RESULTS.md`** for now-stale bench numbers (predates the fair
-  `--no-config`-for-all fix; go/zig were never actually 3-12x slower).
+Rollout status:
+
+- [x] **Pushed** to `origin` (GitHub) AND `gitea`. Both remotes had advanced to
+  `3722732` (a parallel session added a beacons-history plan commit + MIT
+  LICENSE), so ba22515+edde4c7 were rebased onto it (clean PLAN.md auto-merge) →
+  both remotes now at `24688c3`.
+- [x] **CI green** on run 8032: Build + Conformance (Linux) AND (Windows) both
+  `success`. The new config-resolution test passes on both — Bug B's
+  windows-latest-only failure does not reproduce.
+- [x] **Bug A re-verified** against the live Y: drive: rust and cpp both walk
+  855 files / 318 groups and agree to the cent ($3767.80) via
+  `walker --projects-root Y:/.claude/projects --no-config`. (No CI guard — no
+  mapped drive on runners; re-verify after any `walker_roots`/discovery change.)
+- [x] **RESULTS.md re-benched** (fair `--no-config`-for-all): headline cost,
+  cross-mode, and ranges tables regenerated 2026-05-27. zig/go dropped relative
+  to cpp in cost mode (zig 5.2×→2.48×) as expected; absolute numbers rose
+  because the post-filter fleet grew (~300→~2760 files). Python now edges out
+  zig on the larger fleet. Historical "What changed" sections left intact.
+  (RESULTS.md + this PLAN update uncommitted pending push decision.)
+- [ ] **macOS conformance — PENDING (different machine).** Can't run from
+  chonkers. On the Mac, after pulling `24688c3`: `python shared/conformance.py
+  rust cpp go zig`, plus grep new zig files for `linux\.openat|linux\.statx|
+  linux\.getdents|main\.platform\.linux` in `is_windows` else-branches (per
+  CLAUDE.md macOS section).

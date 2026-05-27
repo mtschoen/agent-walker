@@ -7,20 +7,32 @@ totals on the live fleet.
 
 ## Setup
 
-- Live fleet: ~1500 JSONL files; ~300 survive the weekly mtime filter;
-  ~130 distinct session groups.
-- 32-core box (Windows 11). 5 warm runs each via `shared/bench.py
-  --runs 5`; reporting median wall-clock.
+- Live fleet: ~2800 JSONL files, of which ~2760 fall inside the weekly
+  mtime window and form ~1940 distinct session groups (chonkers,
+  2026-05-27 — a heavy-usage week, so almost the whole fleet is recent).
+- 32-core box (Windows 11). 11 interleaved rounds each via `shared/bench.py
+  --runs 11 --interleave` (untimed warm-up); reporting median wall-clock.
+
+> **Re-benched 2026-05-27 (fair `--no-config`).** The number tables below
+> were regenerated after `bench.py` was fixed to pass `--no-config` to
+> *all* impls — it previously passed it to cpp only, so rust/go/zig also
+> folded in a mounted second machine over SMB while cpp didn't, inflating
+> their times (worst in cost mode). Absolute numbers are also much higher
+> than in this file's git history because the post-filter fleet is far
+> larger now (~2760 vs ~300 files). Binary-size columns were **not**
+> re-measured this pass. The "What changed in …" sections lower down are
+> historical records of past optimization passes and keep their original
+> numbers.
 
 ## Headline numbers — cost mode
 
-| Lang   | Median    | Range       | vs winner | vs slowest | Binary  |
-| ------ | --------: | ----------- | --------: | ---------: | ------: |
-| C++    |  **81ms** |  78-83      | 1.00x     | 1.83x      |  267 KB |
-| Rust   |   106ms   |  95-112     | 1.31x     | 1.40x      |  423 KB |
-| Go     |   110ms   | 107-113     | 1.36x     | 1.35x      |  8.0 MB |
-| Zig    |   148ms   | 144-160     | 1.83x     | 1.00x      |  977 KB |
-| Python |   345ms   | 324-362     | 4.26x     | n/a        |     n/a |
+| Lang   | Median     | Range   | vs winner | vs slowest | Binary  |
+| ------ | ---------: | ------- | --------: | ---------: | ------: |
+| C++    | **151ms**  | 144-158 | 1.00x     | 2.48x      |  267 KB |
+| Rust   |   213ms    | 196-225 | 1.41x     | 1.76x      |  423 KB |
+| Go     |   276ms    | 269-295 | 1.83x     | 1.36x      |  8.0 MB |
+| Zig    |   374ms    | 369-386 | 2.48x     | 1.00x      |  977 KB |
+| Python |   354ms    | 288-411 | 2.34x     | 1.06x      |     n/a |
 
 Python reference is the orjson + 8-worker `ProcessPoolExecutor` walker
 that ships in [schoen-claude-status](https://github.com/mtschoen/schoen-claude-status).
@@ -35,38 +47,43 @@ land in the corpus, but every impl in a single pass agrees).
 
 The status line drives three different walker subcommands. Numbers here
 are interleaved 11-round wall-clock medians on the same live fleet
-(365 distinct session groups, 1118 files post-mtime-filter). Wall-clock
+(1942 distinct session groups, 2760 files post-mtime-filter). Wall-clock
 includes process startup + filesystem discovery + walk + output — i.e.
 what a status-line caller actually feels.
 
 | Mode                          | cpp        | rust       | go       | zig      |
 | ----------------------------- | ---------: | ---------: | -------: | -------: |
-| cost (8 workers)              | **139ms**  | 218ms      | 321ms    | 723ms    |
-| beacons-history (8 workers)   | **146ms**  | 232ms      | 642ms    | 743ms    |
-| search `"TODO" --limit 1`     | **103ms**  | 225ms      | 397ms    | 584ms    |
+| cost (8 workers)              | **151ms**  | 213ms      | 276ms    | 374ms    |
+| beacons-history (8 workers)   | **216ms**  | 329ms      | 820ms    | 936ms    |
+| search `"TODO" --limit 1`     | **187ms**  | 424ms      | 622ms    | 811ms    |
 
 cpp leads every mode after the perf-pass-2 cleanup (zero per-line
 allocation via `padded_string_view`, search mmap rewrite, hand-rolled
 scanner for the beacon envelope, regex-free search literal path; see
 "What changed in cpp perf-pass-2" below for the breakdown). rust is
-second in all three modes. go and zig swap last/3rd by mode — go is
-faster on search/cost, zig on neither.
+second in all three modes; go is third and zig fourth in all three, with
+go reliably faster than zig on every Windows mode (the two only trade
+places on Linux — see Linux verification).
 
-Methodology: 11 interleaved rounds, one round = run every (impl, mode)
-cell back-to-back, so background noise hits all cells equally. Drop
-the single highest + lowest sample per cell, report median of the
-remaining 9. Trimmed ranges (min..max of the kept 9):
+Methodology: an untimed warm-up, then 11 interleaved rounds — one round
+= run every (impl, mode) cell back-to-back, so background noise hits all
+cells equally. cost and beacons-history run through `shared/bench.py
+--runs 11 --interleave` (median + min/max over the 11 timed rounds);
+search runs through a one-off interleaved timer (bench.py has no search
+mode), reporting the median + range of the kept 9 after dropping the
+single high/low outlier. Observed ranges:
 
 | Mode             | cpp range | rust range | go range  | zig range |
 | ---------------- | --------: | ---------: | --------: | --------: |
-| cost             |  134-152  |  210-242   |  309-348  |  674-755  |
-| beacons-history  |  140-152  |  220-257   |  596-662  |  692-812  |
-| search           |  101-109  |  216-229   |  386-410  |  564-608  |
+| cost             |  144-158  |  196-225   |  269-295  |  369-386  |
+| beacons-history  |  202-238  |  319-358   |  784-918  |  917-961  |
+| search           |  182-190  |  410-430   |  620-651  |  795-862  |
 
-Ranges do not overlap between any two adjacent impls in any mode, so
-the ranking is robust to noise. All four impls report identical
-trailing/window/files/groups/n_pairs/bias_factor on the same fleet
-under the same `--now` (sanity-checked before bench).
+Ranges are non-overlapping between adjacent impls in every mode except
+go↔zig in beacons-history, where they just abut (go 784-918, zig
+917-961) — go is still reliably faster on the median. All four impls
+report identical trailing/window/files/groups/n_pairs/bias_factor on the
+same fleet under the same `--now` (sanity-checked before bench).
 
 Bench harness: `.claude/scripts/bench-interleaved.py` (gitignored —
 lives outside the tracked tree; recreate from the methodology above if
@@ -301,10 +318,14 @@ simdjson on-demand, sonic, std.json manual extraction), the spread
 narrows from 3.5x to 1.9x. The remaining gap reflects real differences
 between parsers, not language quality.
 
-**Python is still the slowest** at 345ms — every native impl beats it
-by 2-4x. Process-pool overhead and per-line orjson cost finally show
-through against single-process native walkers that don't pay startup
-or IPC costs.
+**Python no longer trails every native impl (fleet-size dependent).** On
+the small (~300-file) fleet this file originally measured, the orjson +
+8-worker ProcessPoolExecutor walker was slowest at 345ms — every native
+impl beat it 2-4×. On the much larger fleet measured 2026-05-27 (~2760
+post-filter files) its process-pool parallelism now edges out
+single-process zig (python 354ms vs zig 374ms), landing between go and
+zig; cpp and rust still beat it comfortably (151ms / 213ms). More files
+amortize python's process-pool startup + IPC overhead.
 
 ## Per-implementation notes
 
