@@ -201,7 +201,7 @@ static GroupMap discover_groups(
                 auto mtime = fs::last_write_time(path, ec);
                 if (!ec) {
                     auto sys_time = std::chrono::time_point_cast<std::chrono::seconds>(
-                        std::chrono::clock_cast<std::chrono::system_clock>(mtime));
+                        mtime - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
                     double mtime_unix = static_cast<double>(sys_time.time_since_epoch().count());
                     if (mtime_unix < earliest) continue;
                 }
@@ -229,7 +229,7 @@ static GroupMap discover_groups(
                     auto mtime = fs::last_write_time(apath, ec);
                     if (!ec) {
                         auto sys_time = std::chrono::time_point_cast<std::chrono::seconds>(
-                            std::chrono::clock_cast<std::chrono::system_clock>(mtime));
+                            mtime - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
                         double mtime_unix = static_cast<double>(sys_time.time_since_epoch().count());
                         if (mtime_unix < earliest) continue;
                     }
