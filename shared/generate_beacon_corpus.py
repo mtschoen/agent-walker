@@ -122,10 +122,18 @@ def scenario_clean_lifecycle():
 
 
 def scenario_malformed():
-    """Beacon block has malformed JSON (trailing comma). Walker silently skips."""
+    """Beacon block has malformed JSON (unquoted bareword value). Walker skips.
+
+    Note: an earlier version used a trailing comma, but simdjson's on-demand
+    parser (cpp) tolerates trailing commas while serde_json (rust) rejects them
+    — a divergence the old drift-required check happened to mask. An unquoted
+    value is unambiguously invalid and rejected by all four parsers (via the
+    tokenizer or the string/number type-check), keeping the impls in lockstep.
+    Production beacons are emitted via json.dumps and never hit this path.
+    """
     sid = "session"
     t1 = NOW_UNIX - 300
-    bad = '{"kind": "begin", "eta_seconds": 180, "summary": "broken",}'
+    bad = '{"kind": "begin", "eta_seconds": 180, "summary": broken}'
     lines = [assistant_with_text(t1, "msg_mal_001", beacon_text(bad))]
     expected = {"session_id": sid, "beacon": None,
                 "emitted_at": None, "age_seconds": None}

@@ -6,13 +6,14 @@
 //     type=="text". Pattern: <progress-beacon>\s*({...})\s*</progress-beacon>.
 //     `[\s\S]` substitutes for Rust `(?s).` since std::regex's `.` does
 //     not match newlines.
-//   - Beacon must parse AND have all four required fields (kind,
-//     eta_seconds, summary, drift); otherwise silently skip.
+//   - Beacon must parse AND have the three required fields (kind,
+//     eta_seconds, summary); `drift` is optional. Otherwise silently skip.
 //   - beacons-latest: pick the entry with the highest timestamp; if multiple
 //     beacons exist within one entry, pick the LAST regex match in that
 //     entry's text.
-//   - beacons-history: group by (slug, session_id), find earliest "begin"
-//     and latest "end" within window. Emit pair when end_ts > begin_ts.
+//   - beacons-history: group by (slug, session_id), iterate beacons in
+//     timestamp order with one in-flight pending_begin; emit one pair per
+//     closed begin->end lifecycle (end_ts > begin_ts).
 //     bias_factor = median over (active_elapsed/eta) ratios with eta > 0,
 //     where active_elapsed = actual_elapsed - idle_excluded. idle_excluded
 //     is the sum of gaps preceding REAL user prompts (type=="user" entries
@@ -53,6 +54,7 @@ struct Beacon {
     double eta_seconds = 0.0;
     std::string summary;
     std::string drift;
+    bool has_drift = false;  // drift optional; track presence for output
     std::optional<int64_t> beats_left;
 };
 
@@ -96,8 +98,10 @@ std::vector<BeaconMatch> find_beacon_envelopes(std::string_view text) {
     return out;
 }
 
-// Try to parse a JSON beacon body. All four required fields must be present
-// and well-typed; otherwise return nullopt (silently skip, per spec).
+// Try to parse a JSON beacon body. The three required fields (kind,
+// eta_seconds, summary) must be present and well-typed; otherwise return
+// nullopt (silently skip, per spec). `drift` is optional (presence tracked
+// via b.has_drift so beacons-latest can omit it when the source lacked it).
 std::optional<Beacon> parse_beacon_body(std::string_view body) {
     sj::ondemand::parser parser;
     sj::padded_string padded(body);
@@ -107,7 +111,7 @@ std::optional<Beacon> parse_beacon_body(std::string_view body) {
     if (doc.get_object().get(obj) != sj::SUCCESS) return std::nullopt;
 
     Beacon b;
-    bool has_kind = false, has_eta = false, has_summary = false, has_drift = false;
+    bool has_kind = false, has_eta = false, has_summary = false;
 
     for (auto field : obj) {
         std::string_view key;
@@ -143,7 +147,7 @@ std::optional<Beacon> parse_beacon_body(std::string_view body) {
             std::string_view v;
             if (field.value().get_string().get(v) != sj::SUCCESS) return std::nullopt;
             b.drift.assign(v.data(), v.size());
-            has_drift = true;
+            b.has_drift = true;
         } else if (key == "beats_left") {
             int64_t iv;
             if (field.value().get_int64().get(iv) == sj::SUCCESS) {
@@ -152,7 +156,7 @@ std::optional<Beacon> parse_beacon_body(std::string_view body) {
         }
     }
 
-    if (!has_kind || !has_eta || !has_summary || !has_drift) return std::nullopt;
+    if (!has_kind || !has_eta || !has_summary) return std::nullopt;
     return b;
 }
 
@@ -513,8 +517,10 @@ std::string serialize_beacon(const Beacon& b) {
     std::ostringstream os;
     os << "{\"kind\":\"" << json_escape(b.kind) << "\""
        << ",\"eta_seconds\":" << format_number(b.eta_seconds)
-       << ",\"summary\":\"" << json_escape(b.summary) << "\""
-       << ",\"drift\":\"" << json_escape(b.drift) << "\"";
+       << ",\"summary\":\"" << json_escape(b.summary) << "\"";
+    if (b.has_drift) {
+        os << ",\"drift\":\"" << json_escape(b.drift) << "\"";
+    }
     if (b.beats_left.has_value()) {
         os << ",\"beats_left\":" << *b.beats_left;
     }
@@ -868,25 +874,29 @@ int run_history(const std::vector<std::string>& args) {
                           return a.timestamp < b.timestamp;
                       });
 
-            const std::pair<Beacon, double>* begin_ptr = nullptr;
+            // Iterate beacons in timestamp order (stable), tracking one
+            // in-flight pending_begin: emit one pair per properly-closed
+            // begin->end lifecycle. Replaces the old earliest-begin/latest-end
+            // rule that collapsed multiple lifecycles into one oversized span.
+            std::stable_sort(all_beacons.begin(), all_beacons.end(),
+                             [](const auto& a, const auto& b) { return a.second < b.second; });
+            const std::pair<Beacon, double>* pending_begin = nullptr;
             for (const auto& bt : all_beacons) {
-                if (bt.first.kind != "begin") continue;
-                if (!begin_ptr || bt.second < begin_ptr->second) begin_ptr = &bt;
+                if (bt.first.kind == "begin") {
+                    pending_begin = &bt;  // orphans any prior pending begin
+                } else if (bt.first.kind == "end") {
+                    if (pending_begin && bt.second > pending_begin->second) {
+                        double wall = bt.second - pending_begin->second;
+                        double idle = compute_idle_in_window(events, pending_begin->second, bt.second);
+                        double active = wall - idle;
+                        if (active < 0.0) active = 0.0;
+                        local.pairs.emplace_back(pending_begin->first.eta_seconds, active);
+                        local.pair_meta.emplace_back(wall, idle, active);
+                        pending_begin = nullptr;
+                    }
+                }
+                // report / other kinds: ignored for pairing
             }
-            const std::pair<Beacon, double>* end_ptr = nullptr;
-            for (const auto& bt : all_beacons) {
-                if (bt.first.kind != "end") continue;
-                if (!end_ptr || bt.second > end_ptr->second) end_ptr = &bt;
-            }
-            if (!begin_ptr || !end_ptr) continue;
-            if (end_ptr->second <= begin_ptr->second) continue;
-
-            double wall = end_ptr->second - begin_ptr->second;
-            double idle = compute_idle_in_window(events, begin_ptr->second, end_ptr->second);
-            double active = wall - idle;
-            if (active < 0.0) active = 0.0;
-            local.pairs.emplace_back(begin_ptr->first.eta_seconds, active);
-            local.pair_meta.emplace_back(wall, idle, active);
         }
     };
 
