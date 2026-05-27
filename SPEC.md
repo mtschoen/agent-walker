@@ -117,6 +117,17 @@ Every subcommand walks an effective set of project roots assembled as:
 3. **Config extras.** Read from `~/.claude/walker-roots.json` unless
    `--no-config` is passed.
 
+### Home directory
+
+`~` in both the default primary root (`~/.claude/projects`) and the config
+path (`~/.claude/walker-roots.json`) resolves identically across subcommands:
+
+- **Windows:** `USERPROFILE`, falling back to `HOME`. `USERPROFILE` is the
+  canonical Windows home; `HOME` is frequently unset, or set by git-bash to a
+  POSIX-style path (`/c/Users/...`) that is not a valid native path.
+- **Other platforms:** `HOME`, falling back to `USERPROFILE`.
+- Neither set → the relative path `.claude/...` (empty-fleet / CI fallback).
+
 ### Config file shape
 
 `~/.claude/walker-roots.json`:
@@ -138,7 +149,11 @@ stderr diagnostic, treat as no extras (must NOT error).
 The combined list is:
 
 - Deduplicated by `fs::canonical` (realpath); if `canonical` fails for
-  an entry, fall back to its lexically-normalized form.
+  an entry, fall back to its lexically-normalized form. The canonical form is
+  used **only as the dedup key** — the path actually handed to discovery must
+  stay in an enumerable form. (On Windows, canonicalizing a mapped network
+  drive can yield a UNC / `\\?\` verbatim path that some directory walkers
+  cannot enumerate; walk the original path, dedup by the canonical.)
 - Filtered to existing directories. Non-existent extras are skipped
   silently with a stderr diagnostic. (This is the SMB-mount-unreachable
   case — walker must keep going.)

@@ -822,9 +822,19 @@ fn addFile(alloc: Allocator, map: *FileMap, slug: []const u8, sid: []const u8, p
     try gop.value_ptr.*.append(alloc, path);
 }
 
+/// Resolve the user's home directory. On Windows, USERPROFILE is canonical
+/// (HOME is often unset, or a git-bash POSIX path like /c/Users/...), so
+/// prefer it and fall back to HOME; elsewhere prefer HOME, fall back to
+/// USERPROFILE. Caller frees the returned slice.
+pub fn homeDir(alloc: Allocator) ?[]const u8 {
+    const primary = if (is_windows) "USERPROFILE" else "HOME";
+    const secondary = if (is_windows) "HOME" else "USERPROFILE";
+    if (getEnvVar(alloc, primary)) |home| return home;
+    return getEnvVar(alloc, secondary);
+}
+
 pub fn defaultRoot(alloc: Allocator) ![]const u8 {
-    const home_var = if (is_windows) "USERPROFILE" else "HOME";
-    if (getEnvVar(alloc, home_var)) |home| {
+    if (homeDir(alloc)) |home| {
         defer alloc.free(home);
         return std.fmt.allocPrint(alloc, "{s}{c}.claude{c}projects", .{ home, PATH_SEP, PATH_SEP });
     }

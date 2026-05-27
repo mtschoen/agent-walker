@@ -23,6 +23,7 @@ Tolerance: ±$0.01 on trailing_usd and window_usd per fixture and aggregate.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -606,6 +607,93 @@ def check_help(lang: str, binary: Path) -> bool:
     return all_ok
 
 
+def run_walker_env(
+    lang: str, binary: Path, meta: dict, env: dict, projects_root: Path | None = None
+) -> dict:
+    """Run cost mode WITHOUT --no-config (so walker-roots.json is read) under a
+    custom environment (to control home-dir resolution). With projects_root
+    omitted, the binary falls back to its default <home>/.claude/projects."""
+    cmd = [
+        str(binary),
+        "--period", str(meta["period_seconds"]),
+        "--win-start", repr(meta["win_start_unix"]),
+        "--now", repr(meta["now_unix"]),
+    ]
+    if projects_root is not None:
+        cmd.extend(["--projects-root", str(projects_root)])
+    result = subprocess.run(
+        cmd, capture_output=True, text=True, encoding="utf-8", timeout=10, env=env
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"{binary.name} exited {result.returncode}\nstderr:\n{result.stderr}"
+        )
+    line = result.stdout.strip().splitlines()[-1]
+    return json.loads(line)
+
+
+def check_config_resolution(lang: str, binary: Path, expected: dict) -> bool:
+    """Exercise home-dir + walker-roots.json resolution.
+
+    The --no-config runners above never touch either, so a wrong HOME-vs-
+    USERPROFILE precedence or a dropped config root sails through. Lay out a
+    fake home:
+
+        <home>/.claude/projects/<fixtureA>/...         -> default primary root
+        <home>/.claude/walker-roots.json -> [<extra>]  -> config extra
+        <extra>/<fixtureB>/...                         -> extra root data
+
+    Point the canonical home var (USERPROFILE on Windows, else HOME) at <home>
+    and the *other* var at a config-less dir, per the precedence contract in
+    SPEC.md::Roots. Run with NO --projects-root and NO --no-config, so passing
+    requires the binary to resolve BOTH the default root and the config file
+    from the canonical home var. Expect the fixtureA+fixtureB sum.
+    """
+    meta = expected["_meta"]
+    names = list(expected["fixtures"].keys())
+    label = "config-resolution"
+    if len(names) < 2:
+        print(f"  [{lang:>4s}] {label:20s} SKIP  need >=2 fixtures")
+        return True
+    # Pick the two priciest fixtures so the sum is discriminating (a dropped
+    # config root or a 0-cost primary can't masquerade as a pass).
+    ranked = sorted(names, key=lambda n: expected["fixtures"][n]["trailing_usd"], reverse=True)
+    fixture_a, fixture_b = ranked[0], ranked[1]
+    target = {
+        "trailing_usd": expected["fixtures"][fixture_a]["trailing_usd"]
+        + expected["fixtures"][fixture_b]["trailing_usd"],
+        "window_usd": expected["fixtures"][fixture_a]["window_usd"]
+        + expected["fixtures"][fixture_b]["window_usd"],
+    }
+    with tempfile.TemporaryDirectory(prefix="walker-cfg-home-") as home, \
+         tempfile.TemporaryDirectory(prefix="walker-cfg-extra-") as extra, \
+         tempfile.TemporaryDirectory(prefix="walker-cfg-bogus-") as bogus:
+        home_p, extra_p = Path(home), Path(extra)
+        shutil.copytree(CORPUS / fixture_a, home_p / ".claude" / "projects" / fixture_a)
+        shutil.copytree(CORPUS / fixture_b, extra_p / fixture_b)
+        (home_p / ".claude" / "walker-roots.json").write_text(
+            json.dumps({"extra_roots": [str(extra_p)]}), encoding="utf-8"
+        )
+        env = dict(os.environ)
+        if sys.platform == "win32":
+            env["USERPROFILE"], env["HOME"] = str(home_p), str(bogus)
+        else:
+            env["HOME"], env["USERPROFILE"] = str(home_p), str(bogus)
+        try:
+            got = run_walker_env(lang, binary, meta, env)
+        except Exception as e:
+            print(f"  [{lang:>4s}] {label:20s} FAIL  {e}")
+            return False
+    ok, dt, dw = within_tolerance(got, target)
+    badge = " OK " if ok else "FAIL"
+    print(
+        f"  [{lang:>4s}] {label:20s} {badge}  "
+        f"trailing=${got.get('trailing_usd', 0):.6f} (d=${dt:+.6f})  "
+        f"window=${got.get('window_usd', 0):.6f} (d=${dw:+.6f})"
+    )
+    return ok
+
+
 def main():
     if not EXPECTED.is_file():
         print(f"missing {EXPECTED} -- run shared/generate_corpus.py first")
@@ -631,6 +719,8 @@ def main():
         if not check_beacons(lang, binary):
             overall_ok = False
         if not check_multi_root(lang, binary):
+            overall_ok = False
+        if not check_config_resolution(lang, binary, expected):
             overall_ok = False
         if not check_search(lang, binary):
             overall_ok = False

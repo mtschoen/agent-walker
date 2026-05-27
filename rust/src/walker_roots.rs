@@ -11,12 +11,26 @@
 
 use serde_json::Value;
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 
+/// Resolve the user's home directory the way every walker subcommand must.
+///
+/// On Windows, `USERPROFILE` is the canonical home; `HOME` is frequently
+/// unset, or set by git-bash to a POSIX-style path (`/c/Users/...`) that is
+/// not a valid native path — so prefer `USERPROFILE`, fall back to `HOME`.
+/// On other platforms, `HOME` is canonical (fall back to `USERPROFILE`).
+pub fn home_directory() -> Option<OsString> {
+    if cfg!(windows) {
+        std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+    } else {
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+    }
+}
+
 pub fn walker_config_path() -> PathBuf {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-    match home {
+    match home_directory() {
         Some(h) => PathBuf::from(h).join(".claude").join("walker-roots.json"),
         None => PathBuf::from(".claude/walker-roots.json"),
     }
@@ -97,10 +111,17 @@ pub fn resolve_roots(
             }
             continue;
         }
-        let canonical = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-        let key = canonical.to_string_lossy().to_string();
+        // Dedup by canonical path (realpath) per SPEC, but WALK the original
+        // path. On Windows `fs::canonicalize` returns extended-length `\\?\`
+        // verbatim forms — and a mapped network drive (e.g. `Y:`) resolves to
+        // a UNC target — which the `glob`-based discovery in transcript.rs
+        // cannot enumerate, silently dropping the whole root. The canonical
+        // form is only needed to detect two roots pointing at the same place.
+        let key = fs::canonicalize(&path)
+            .map(|c| c.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_string_lossy().into_owned());
         if seen.insert(key) {
-            result.push(canonical);
+            result.push(path);
         }
     }
     result

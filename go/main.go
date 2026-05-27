@@ -178,11 +178,26 @@ func parseFloat64(s string) (float64, error) {
 	return v, nil
 }
 
-func defaultProjectsRoot() string {
-	if home, ok := os.LookupEnv("USERPROFILE"); ok && home != "" {
-		return filepath.Join(home, ".claude", "projects")
+// homeDirectory resolves the user's home dir. On Windows, USERPROFILE is
+// canonical (HOME is often unset, or a git-bash POSIX path like /c/Users/...
+// that isn't a valid native path), so prefer it; elsewhere HOME is canonical.
+// The fallback covers the rarer inverse case. Returns "" if neither is set.
+func homeDirectory() string {
+	primary, secondary := "HOME", "USERPROFILE"
+	if runtime.GOOS == "windows" {
+		primary, secondary = "USERPROFILE", "HOME"
 	}
-	if home, ok := os.LookupEnv("HOME"); ok && home != "" {
+	if v, ok := os.LookupEnv(primary); ok && v != "" {
+		return v
+	}
+	if v, ok := os.LookupEnv(secondary); ok && v != "" {
+		return v
+	}
+	return ""
+}
+
+func defaultProjectsRoot() string {
+	if home := homeDirectory(); home != "" {
 		return filepath.Join(home, ".claude", "projects")
 	}
 	return filepath.Join(".claude", "projects")

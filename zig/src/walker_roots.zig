@@ -22,8 +22,7 @@ const PATH_SEP = main.PATH_SEP;
 /// Falls back to a relative path if neither env var is set. Returns an
 /// arena-allocated string the caller need not free.
 pub fn walkerConfigPath(alloc: Allocator) ![]const u8 {
-    const home_var = if (is_windows) "USERPROFILE" else "HOME";
-    if (main.getEnvVar(alloc, home_var)) |home| {
+    if (main.homeDir(alloc)) |home| {
         defer alloc.free(home);
         return std.fmt.allocPrint(alloc, "{s}{c}.claude{c}walker-roots.json", .{ home, PATH_SEP, PATH_SEP });
     }

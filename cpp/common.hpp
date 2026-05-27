@@ -42,10 +42,18 @@ inline std::optional<std::string> read_environment_variable(const char* name) {
 #endif
 }
 
-// Home directory from HOME, falling back to USERPROFILE (Windows).
+// Resolve the user's home directory. On Windows, USERPROFILE is canonical
+// (HOME is often unset, or a git-bash POSIX path like /c/Users/... that is
+// not a valid native path), so prefer it; elsewhere HOME is canonical. The
+// fallback covers the rarer inverse case on each platform.
 inline std::optional<std::string> home_directory() {
+#ifdef _WIN32
+    if (auto profile = read_environment_variable("USERPROFILE")) return profile;
+    return read_environment_variable("HOME");
+#else
     if (auto home = read_environment_variable("HOME")) return home;
     return read_environment_variable("USERPROFILE");
+#endif
 }
 
 inline fs::path default_projects_root() {

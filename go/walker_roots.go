@@ -25,10 +25,7 @@ import (
 // WalkerConfigPath returns the path to ~/.claude/walker-roots.json. Falls
 // back to ".claude/walker-roots.json" if neither HOME nor USERPROFILE is set.
 func WalkerConfigPath() string {
-	if home, ok := os.LookupEnv("HOME"); ok && home != "" {
-		return filepath.Join(home, ".claude", "walker-roots.json")
-	}
-	if home, ok := os.LookupEnv("USERPROFILE"); ok && home != "" {
+	if home := homeDirectory(); home != "" {
 		return filepath.Join(home, ".claude", "walker-roots.json")
 	}
 	return filepath.Join(".claude", "walker-roots.json")

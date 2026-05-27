@@ -209,12 +209,9 @@ fn walk_group(paths: &[PathBuf], period_cutoff: f64, win_start_unix: f64) -> Gro
 
 
 pub(crate) fn default_projects_root() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".claude").join("projects")
-    } else if let Some(up) = std::env::var_os("USERPROFILE") {
-        PathBuf::from(up).join(".claude").join("projects")
-    } else {
-        PathBuf::from(".claude/projects")
+    match walker_roots::home_directory() {
+        Some(home) => PathBuf::from(home).join(".claude").join("projects"),
+        None => PathBuf::from(".claude/projects"),
     }
 }
 
