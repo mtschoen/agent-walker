@@ -132,8 +132,12 @@ model id):
 - `cache_read = input_rate × 0.10`
 - `cache_write = input_rate × 1.25`
 - Unknown family falls back to **sonnet** rates (matches Python).
-- Opus 1M-tier doubling is **not** applied here. Matches the statusline's
-  documented under-estimate for big-context Opus.
+- Opus 1M-tier doubling is **not** applied here — the harness does not apply it
+  in practice (measured 0% error vs authoritative `costUSD` on big-context Opus,
+  incl. 26M-cache-read sessions), so token rates alone match.
+- **Pending:** the Python reference also charges **$0.01 per server-side web
+  search** (`usage.server_tool_use.web_search_requests`). Not yet implemented
+  here, so cost modes under-count search-heavy sessions. See PLAN.md Inbox.
 
 Cost for one assistant turn (all token counts default to 0 if missing):
 

@@ -20,6 +20,32 @@
 
 ## Inbox
 
+### Add per-request web-search cost ($0.01) to the pricing model
+
+The Python reference (`~/schoen-claude-status/statusline_lib.py`,
+`_cost_for_turn`) now charges **$0.01 per server-side web search request** on
+top of token cost, read from `usage.server_tool_use.web_search_requests`
+(billed at $10 / 1,000). The walker's `cost` / `events` / `beacons` modes still
+price tokens only, so their `trailing_usd` / `window_usd` under-count any
+search-heavy session (mostly background haiku agents) by 30-45%.
+
+Validated against `~/.claude.json`'s authoritative per-model `costUSD`
+(`projects.<path>.lastModelUsage`): token-only cost lands at 0.56-0.69×
+authoritative on search rows, and adding $0.01/search closes every one to
+**exactly 1.000**. So the rate is confirmed, not a guess.
+
+**To implement (all four impls + spec + corpus):**
+
+- `cost_for(...)` in `cpp/pricing.hpp` (and rust/go/zig equivalents): accept a
+  `web_search_requests` count and add `count * 0.01`. Token formula unchanged.
+- Parse `usage.server_tool_use.web_search_requests` (uint, default 0) in each
+  per-turn extractor, alongside the existing `usage.*` token fields.
+- `SPEC.md` §Pricing: document the per-request term + the new field name (the
+  bullets there already flag this as pending and correct the now-false 1M-tier
+  under-estimate note).
+- Add a conformance corpus case with `web_search_requests > 0` so all impls are
+  checked against the Python reference (`shared/conformance.py`).
+
 ### Rainy-day: roll our own JSON parser in each language
 
 Even with every impl now on a hot-path parser (`simdjson`, `sonic`,
