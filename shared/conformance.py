@@ -545,6 +545,67 @@ def check_events(lang: str, binary: Path) -> bool:
     return all_ok
 
 
+def check_help(lang: str, binary: Path) -> bool:
+    """Parity guard for the friendly help / default output.
+
+    Wording is per-impl, so we assert structure only: --help and no-args
+    print an overview to stdout and exit 0; a subcommand + --help does too;
+    a bogus flag is a usage error (exit 2). Catches an impl that forgot a
+    subcommand in its overview without pinning exact text.
+    """
+    required_substrings = [
+        "USAGE",
+        "cost",
+        "search",
+        "events",
+        "beacons-latest",
+        "beacons-history",
+        "--period",
+    ]
+    all_ok = True
+
+    def run(args: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [str(binary), *args],
+            capture_output=True, text=True, encoding="utf-8", timeout=10,
+        )
+
+    # 1. --help: exit 0, overview on stdout with every subcommand + --period.
+    result = run(["--help"])
+    missing = [s for s in required_substrings if s not in result.stdout]
+    ok = result.returncode == 0 and not missing
+    print(f"  [{lang:>4s}] {'help: --help':38s} {' OK ' if ok else 'FAIL'}")
+    if not ok:
+        print(f"        exit={result.returncode} missing={missing}")
+        all_ok = False
+
+    # 2. No args: friendly overview on stdout, exit 0 (not the terse error).
+    result = run([])
+    ok = result.returncode == 0 and result.stdout.strip() != ""
+    print(f"  [{lang:>4s}] {'help: no-args':38s} {' OK ' if ok else 'FAIL'}")
+    if not ok:
+        print(f"        exit={result.returncode} stdout_empty={result.stdout.strip() == ''}")
+        all_ok = False
+
+    # 3. Subcommand + --help: same overview, exit 0 (rule 3).
+    result = run(["search", "--help"])
+    ok = result.returncode == 0 and "USAGE" in result.stdout
+    print(f"  [{lang:>4s}] {'help: search --help':38s} {' OK ' if ok else 'FAIL'}")
+    if not ok:
+        print(f"        exit={result.returncode}")
+        all_ok = False
+
+    # 4. Bogus flag: usage error, exit 2 (still an error, not help).
+    result = run(["--bogus-flag"])
+    ok = result.returncode == 2
+    print(f"  [{lang:>4s}] {'help: bad flag -> exit 2':38s} {' OK ' if ok else 'FAIL'}")
+    if not ok:
+        print(f"        exit={result.returncode} (expected 2)")
+        all_ok = False
+
+    return all_ok
+
+
 def main():
     if not EXPECTED.is_file():
         print(f"missing {EXPECTED} -- run shared/generate_corpus.py first")
@@ -574,6 +635,8 @@ def main():
         if not check_search(lang, binary):
             overall_ok = False
         if not check_events(lang, binary):
+            overall_ok = False
+        if not check_help(lang, binary):
             overall_ok = False
         print()
 

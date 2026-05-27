@@ -46,8 +46,58 @@ struct Args {
     bool read_config = true;
 };
 
+static const char* const HELP = R"(claude-walker - fast cost & progress walker over Claude Code transcripts
+
+USAGE:
+    claude-walker [SUBCOMMAND] [OPTIONS]
+
+With no subcommand it runs `cost` (back-compat for the status line).
+
+SUBCOMMANDS:
+    cost              Trailing + window USD over the transcript fleet (default)
+    search <pattern>  Cross-root/-machine content search over transcripts
+    events            One NDJSON line per assistant turn (ts, usd, model, session)
+    beacons-latest    Most recent <progress-beacon> for a session
+    beacons-history   Calibration bias_factor over begin/end beacon pairs
+
+COST OPTIONS (default mode):
+    --period <seconds>            Required. Trailing-window length.
+    --win-start <unix>            Required. Cost-window start (unix epoch).
+    --projects-root <path>        Transcript root (default: ~/.claude/projects).
+    --extra-projects-root <path>  Additional root; repeatable.
+    --no-config                   Skip ~/.claude/walker-roots.json extras.
+    --now <unix>                  Pin "now" (default: wall clock; for tests).
+
+GLOBAL:
+    -h, --help     Show this help.
+    --version      Print <lang>/<version>.
+
+Full contract: SPEC.md in the source tree.
+)";
+
+static bool is_help_flag(const std::string& arg) {
+    return arg == "-h" || arg == "--help";
+}
+
+// Help is shown when: no args, or the first arg is -h/--help, or the first
+// arg is a known subcommand followed by -h/--help. See SPEC.md "Help & usage".
+static bool wants_help(const std::vector<std::string>& raw) {
+    if (raw.empty()) return true;
+    const std::string& first = raw.front();
+    if (is_help_flag(first)) return true;
+    static const char* const subs[] = {
+        "cost", "beacons-latest", "beacons-history", "search", "events"};
+    for (const char* sub : subs) {
+        if (first == sub) {
+            return raw.size() > 1 && is_help_flag(raw[1]);
+        }
+    }
+    return false;
+}
+
 [[noreturn]] static void die(std::string_view message) {
     std::cerr << "walker: " << message << "\n";
+    std::cerr << "Run 'claude-walker --help' for usage.\n";
     std::exit(2);
 }
 
@@ -401,6 +451,11 @@ int main(int argc, char* argv[]) {
     raw.reserve(argc > 1 ? argc - 1 : 0);
     for (int i = 1; i < argc; ++i) raw.emplace_back(argv[i]);
 
+    if (wants_help(raw)) {
+        std::cout << HELP;
+        return 0;
+    }
+
     // Subcommand routing. Bare flag invocations (first arg starts with '-')
     // route to cost mode for back-compat.
     std::string subcommand = "cost";
@@ -414,6 +469,7 @@ int main(int argc, char* argv[]) {
             rest = raw;  // bare-flag -> cost mode
         } else {
             std::cerr << "walker: unknown subcommand: " << first << "\n";
+            std::cerr << "Run 'claude-walker --help' for usage.\n";
             return 2;
         }
     }

@@ -472,6 +472,7 @@ fn parseCli(alloc: Allocator, argv: [][]const u8) !Cli {
             std.process.exit(0);
         } else {
             std.debug.print("walker: unknown flag: {s}\n", .{flag});
+            usagePointer();
             std.process.exit(2);
         }
     }
@@ -483,15 +484,70 @@ fn parseCli(alloc: Allocator, argv: [][]const u8) !Cli {
 pub fn grab(argv: [][]const u8, i: *usize, flag: []const u8) []const u8 {
     if (i.* >= argv.len) {
         std.debug.print("walker: {s} needs a value\n", .{flag});
+        usagePointer();
         std.process.exit(2);
     }
     defer i.* += 1;
     return argv[i.*];
 }
 
+pub fn usagePointer() void {
+    std.debug.print("Run 'claude-walker --help' for usage.\n", .{});
+}
+
 pub fn die(msg: []const u8) noreturn {
     std.debug.print("walker: {s}\n", .{msg});
+    usagePointer();
     std.process.exit(2);
+}
+
+const HELP =
+    \\claude-walker - fast cost & progress walker over Claude Code transcripts
+    \\
+    \\USAGE:
+    \\    claude-walker [SUBCOMMAND] [OPTIONS]
+    \\
+    \\With no subcommand it runs `cost` (back-compat for the status line).
+    \\
+    \\SUBCOMMANDS:
+    \\    cost              Trailing + window USD over the transcript fleet (default)
+    \\    search <pattern>  Cross-root/-machine content search over transcripts
+    \\    events            One NDJSON line per assistant turn (ts, usd, model, session)
+    \\    beacons-latest    Most recent <progress-beacon> for a session
+    \\    beacons-history   Calibration bias_factor over begin/end beacon pairs
+    \\
+    \\COST OPTIONS (default mode):
+    \\    --period <seconds>            Required. Trailing-window length.
+    \\    --win-start <unix>            Required. Cost-window start (unix epoch).
+    \\    --projects-root <path>        Transcript root (default: ~/.claude/projects).
+    \\    --extra-projects-root <path>  Additional root; repeatable.
+    \\    --no-config                   Skip ~/.claude/walker-roots.json extras.
+    \\    --now <unix>                  Pin "now" (default: wall clock; for tests).
+    \\
+    \\GLOBAL:
+    \\    -h, --help     Show this help.
+    \\    --version      Print <lang>/<version>.
+    \\
+    \\Full contract: SPEC.md in the source tree.
+    \\
+;
+
+fn isHelpFlag(s: []const u8) bool {
+    return std.mem.eql(u8, s, "-h") or std.mem.eql(u8, s, "--help");
+}
+
+// Help is shown when: no args, or the first arg is -h/--help, or the first
+// arg is a known subcommand followed by -h/--help. See SPEC.md "Help & usage".
+fn wantsHelp(argv: [][]const u8) bool {
+    if (argv.len == 0) return true;
+    if (isHelpFlag(argv[0])) return true;
+    const subs = [_][]const u8{ "cost", "beacons-latest", "beacons-history", "search", "events" };
+    for (subs) |s| {
+        if (std.mem.eql(u8, argv[0], s)) {
+            return argv.len > 1 and isHelpFlag(argv[1]);
+        }
+    }
+    return false;
 }
 
 // ─── Pricing ─────────────────────────────────────────────────────────────────
@@ -1145,6 +1201,10 @@ pub fn main() !void {
     const dispatch_alloc = dispatch_arena.allocator();
 
     const argv = try getArgs(dispatch_alloc);
+    if (wantsHelp(argv)) {
+        writeStdout(HELP);
+        std.process.exit(0);
+    }
     // Subcommand routing: "cost", "beacons-latest", "beacons-history" route
     // to the matching impl. Bare flag invocation (first arg starts with "-")
     // or no args at all routes to cost mode for back-compat.
@@ -1158,6 +1218,7 @@ pub fn main() !void {
         if (std.mem.eql(u8, first, "events")) break :blk "events";
         if (first.len > 0 and first[0] == '-') break :blk "cost";
         std.debug.print("walker: unknown subcommand: {s}\n", .{first});
+        usagePointer();
         std.process.exit(2);
     };
     const rest: [][]const u8 = if (std.mem.eql(u8, subcommand, "cost") and (argv.len == 0 or argv[0].len == 0 or argv[0][0] == '-'))

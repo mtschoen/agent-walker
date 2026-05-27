@@ -18,6 +18,56 @@ import (
 
 const version = "go/0.1.1"
 
+const helpText = `claude-walker - fast cost & progress walker over Claude Code transcripts
+
+USAGE:
+    claude-walker [SUBCOMMAND] [OPTIONS]
+
+With no subcommand it runs ` + "`cost`" + ` (back-compat for the status line).
+
+SUBCOMMANDS:
+    cost              Trailing + window USD over the transcript fleet (default)
+    search <pattern>  Cross-root/-machine content search over transcripts
+    events            One NDJSON line per assistant turn (ts, usd, model, session)
+    beacons-latest    Most recent <progress-beacon> for a session
+    beacons-history   Calibration bias_factor over begin/end beacon pairs
+
+COST OPTIONS (default mode):
+    --period <seconds>            Required. Trailing-window length.
+    --win-start <unix>            Required. Cost-window start (unix epoch).
+    --projects-root <path>        Transcript root (default: ~/.claude/projects).
+    --extra-projects-root <path>  Additional root; repeatable.
+    --no-config                   Skip ~/.claude/walker-roots.json extras.
+    --now <unix>                  Pin "now" (default: wall clock; for tests).
+
+GLOBAL:
+    -h, --help     Show this help.
+    --version      Print <lang>/<version>.
+
+Full contract: SPEC.md in the source tree.
+`
+
+func isHelpFlag(s string) bool {
+	return s == "-h" || s == "--help"
+}
+
+// wantsHelp reports whether to show the overview: no args, or first arg is
+// -h/--help, or first arg is a known subcommand followed by -h/--help.
+// See SPEC.md "Help & usage".
+func wantsHelp(raw []string) bool {
+	if len(raw) == 0 {
+		return true
+	}
+	if isHelpFlag(raw[0]) {
+		return true
+	}
+	switch raw[0] {
+	case "cost", "beacons-latest", "beacons-history", "search", "events":
+		return len(raw) > 1 && isHelpFlag(raw[1])
+	}
+	return false
+}
+
 // CLI arguments.
 type arguments struct {
 	periodSeconds      uint64
@@ -368,6 +418,10 @@ type output struct {
 
 func main() {
 	raw := os.Args[1:]
+	if wantsHelp(raw) {
+		fmt.Print(helpText)
+		os.Exit(0)
+	}
 	// Subcommand dispatch. Bare flag invocation (or no args) routes to cost
 	// mode for back-compat with the original CLI shape.
 	if len(raw) > 0 {
@@ -393,6 +447,7 @@ func main() {
 		// an error; bare flag invocation falls through to cost.
 		if !strings.HasPrefix(first, "-") {
 			fmt.Fprintf(os.Stderr, "walker: unknown subcommand: %s\n", first)
+			fmt.Fprintln(os.Stderr, "Run 'claude-walker --help' for usage.")
 			os.Exit(2)
 		}
 	}
@@ -405,6 +460,7 @@ func runCost(rawArgs []string) {
 	args, err := parseArguments(rawArgs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "walker: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Run 'claude-walker --help' for usage.")
 		os.Exit(2)
 	}
 

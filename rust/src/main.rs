@@ -17,6 +17,58 @@ mod search;
 mod transcript;
 mod walker_roots;
 
+const SUBCOMMANDS: [&str; 5] = ["cost", "beacons-latest", "beacons-history", "search", "events"];
+
+const HELP: &str = r#"claude-walker - fast cost & progress walker over Claude Code transcripts
+
+USAGE:
+    claude-walker [SUBCOMMAND] [OPTIONS]
+
+With no subcommand it runs `cost` (back-compat for the status line).
+
+SUBCOMMANDS:
+    cost              Trailing + window USD over the transcript fleet (default)
+    search <pattern>  Cross-root/-machine content search over transcripts
+    events            One NDJSON line per assistant turn (ts, usd, model, session)
+    beacons-latest    Most recent <progress-beacon> for a session
+    beacons-history   Calibration bias_factor over begin/end beacon pairs
+
+COST OPTIONS (default mode):
+    --period <seconds>            Required. Trailing-window length.
+    --win-start <unix>            Required. Cost-window start (unix epoch).
+    --projects-root <path>        Transcript root (default: ~/.claude/projects).
+    --extra-projects-root <path>  Additional root; repeatable.
+    --no-config                   Skip ~/.claude/walker-roots.json extras.
+    --now <unix>                  Pin "now" (default: wall clock; for tests).
+
+GLOBAL:
+    -h, --help     Show this help.
+    --version      Print <lang>/<version>.
+
+Full contract: SPEC.md in the source tree.
+"#;
+
+fn is_help_flag(arg: &str) -> bool {
+    arg == "-h" || arg == "--help"
+}
+
+// Help is shown when: no args, or the first arg is -h/--help, or the first
+// arg is a known subcommand followed by -h/--help. See SPEC.md "Help & usage".
+fn wants_help(raw: &[String]) -> bool {
+    match raw.first().map(|s| s.as_str()) {
+        None => true,
+        Some(first) if is_help_flag(first) => true,
+        Some(first) if SUBCOMMANDS.contains(&first) => {
+            raw.get(1).map(|s| is_help_flag(s)).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+fn usage_pointer() {
+    eprintln!("Run 'claude-walker --help' for usage.");
+}
+
 #[derive(Default)]
 struct Args {
     period_seconds: u64,
@@ -175,6 +227,10 @@ pub(crate) fn current_unix() -> f64 {
 
 fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
+    if wants_help(&raw) {
+        print!("{HELP}");
+        std::process::exit(0);
+    }
     let first = raw.first().map(|s| s.as_str());
     let (subcommand, rest): (&str, &[String]) = match first {
         Some("cost") => ("cost", &raw[1..]),
@@ -186,6 +242,7 @@ fn main() {
         Some(s) if s.starts_with('-') => ("cost", &raw[..]),
         Some(s) => {
             eprintln!("walker: unknown subcommand: {}", s);
+            usage_pointer();
             std::process::exit(2);
         }
         None => ("cost", &raw[..]),
@@ -207,6 +264,7 @@ fn run_cost(args: &[String]) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("walker: {e}");
+            usage_pointer();
             std::process::exit(2);
         }
     };

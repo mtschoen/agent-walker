@@ -49,6 +49,64 @@ to caller's reference path." Stderr is for diagnostics. The walker MUST
 NOT panic, hang, or write partial output. Bad input means clean error +
 non-zero exit.
 
+On a usage error (unknown flag, missing required flag, bad value, unknown
+subcommand) the stderr diagnostic is followed by a pointer line:
+
+```
+walker: --period is required
+Run 'claude-walker --help' for usage.
+```
+
+### Help & usage
+
+A human running the binary with no arguments (or asking for help) gets a
+friendly overview on **stdout** and exit **0** (not the terse error the
+status-line caller never sees, since that caller always passes `--period`).
+
+Help is shown (full overview to stdout, exit 0) when **any** of:
+
+1. No arguments are given, OR
+2. The first argument is `-h` or `--help`, OR
+3. The first argument is a known subcommand and the *next* argument is
+   `-h` or `--help` (e.g. `walker search --help`).
+
+The overview lists every subcommand with a one-line description and the
+**cost**-mode flag table (the common case). Per-subcommand flag tables are
+out of scope for now: `walker search --help` shows the same overview.
+Exact wording is per-impl and NOT conformance-pinned; the parity guard
+asserts only structure: exit 0, and stdout containing `USAGE`, every
+subcommand name, and `--period`. The reference text:
+
+```
+claude-walker - fast cost & progress walker over Claude Code transcripts
+
+USAGE:
+    claude-walker [SUBCOMMAND] [OPTIONS]
+
+With no subcommand it runs `cost` (back-compat for the status line).
+
+SUBCOMMANDS:
+    cost              Trailing + window USD over the transcript fleet (default)
+    search <pattern>  Cross-root/-machine content search over transcripts
+    events            One NDJSON line per assistant turn (ts, usd, model, session)
+    beacons-latest    Most recent <progress-beacon> for a session
+    beacons-history   Calibration bias_factor over begin/end beacon pairs
+
+COST OPTIONS (default mode):
+    --period <seconds>            Required. Trailing-window length.
+    --win-start <unix>            Required. Cost-window start (unix epoch).
+    --projects-root <path>        Transcript root (default: ~/.claude/projects).
+    --extra-projects-root <path>  Additional root; repeatable.
+    --no-config                   Skip ~/.claude/walker-roots.json extras.
+    --now <unix>                  Pin "now" (default: wall clock; for tests).
+
+GLOBAL:
+    -h, --help     Show this help.
+    --version      Print <lang>/<version>.
+
+Full contract: SPEC.md in the source tree.
+```
+
 ## Roots
 
 Every subcommand walks an effective set of project roots assembled as:
