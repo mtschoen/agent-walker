@@ -10,6 +10,11 @@ schoen-claude-status status line to answer two questions fast:
    progress beacons (`<progress-beacon>{...}</progress-beacon>` blocks
    in assistant message text) and compute calibration `bias_factor`.
 
+Two auxiliary subcommands round out the tool (not used by the status
+line): `events` (one NDJSON line per assistant turn, feeds the `/spend`
+dashboard) and `search` (full-text transcript search, backs the
+`claude-walker` MCP server).
+
 Authoritative contract: `SPEC.md`. Every implementation must match.
 
 ## Four implementations
@@ -28,8 +33,9 @@ others are dev/perf-comparison ports kept conformance-tested for parity.
 
 Bare-flag invocations (e.g. `walker --period 86400 --win-start 0`) are
 routed to **cost** mode for back-compat with existing callers. Adding a
-positional first arg of `cost`, `beacons-latest`, or `beacons-history`
-explicitly selects the subcommand. See `rust/src/main.rs`'s `main()` for
+positional first arg of `cost`, `beacons-latest`, `beacons-history`,
+`search`, or `events` explicitly selects the subcommand. See
+`rust/src/main.rs`'s `main()` for
 the canonical routing logic; the other impls mirror it.
 
 ## Conformance
