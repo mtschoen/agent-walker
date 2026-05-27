@@ -67,6 +67,28 @@ If you change a fixture, regenerate the expected files via the matching
 6. After all four pass, merge each branch with `--no-ff` and rerun
    `python shared/conformance.py` against the merged tree.
 
+## Linting / static analysis
+
+No lint gate in CI yet (planned testing/coverage work is in
+`COVERAGE-PLAN.md`). The per-impl commands that keep the tree
+warning-clean:
+
+- **C++** — `clang-tidy` against the compile DB, scoped to our TUs with
+  simdjson headers filtered out:
+  ```
+  cmake -S cpp -B cpp/build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+  clang-tidy -p cpp/build --header-filter='\.hpp$' \
+    -checks='-*,bugprone-*,performance-*,clang-analyzer-*' \
+    cpp/main.cpp cpp/beacons.cpp cpp/events.cpp cpp/search.cpp
+  ```
+  The `clang-analyzer-unix.Errno` finding originates in vendored simdjson
+  (`build/_deps/`) — not our code; ignore it.
+- **Rust** — `cd rust && cargo clippy --all-targets`. Tree is clippy-clean
+  with **zero `#[allow(clippy::…)]`** suppressions; keep it that way.
+- **Go** — `cd go && staticcheck ./... && go vet ./...` (`staticcheck` is at
+  `~/go/bin`; see `~/.claude/notes/reference_static_analysis_tools.md`).
+- **Zig** — `cd zig && zig fmt --check src/ && zig build`.
+
 ## CI
 
 `.gitea/workflows/ci.yml` builds all four impls on `ubuntu-latest` +
