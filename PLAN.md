@@ -20,7 +20,46 @@
 
 ## Inbox
 
-- [ ] Implement the beacons-history pairing fix (specced + planned 2026-05-18, walker portion confirmed UNimplemented 2026-05-27). Replace "earliest begin + latest end per session" pairing with a single in-flight `pending_begin` (consecutive begin→end pairs, orphans dropped), and drop `drift` from the required-field set (keep accepting it for back-compat). Currently `bias_factor` is directionally wrong (~3.45 vs measured ~0.5), so status-line calibrated ETAs come out 5–10× too high. Touches SPEC.md + all four impls (cpp/rust/go/zig) + conformance corpus (add multi_lifecycle / orphan_begin / orphan_end / back_to_back fixtures). Spec: docs/superpowers/specs/beacon-pairing-fix.md; plan: docs/superpowers/plans/beacon-pairing-fix.md; memory: project_beacon_pairing_fix.md.
+### Finish beacon-pairing-fix rollout (walker DONE on branch `fix/beacon-pairing`, unmerged)
+
+The walker beacons-history pairing fix is **implemented and conformant** on local
+branch `fix/beacon-pairing` (5 commits off e46d8ac), NOT merged or installed. The old
+"earliest begin + latest end per session" rule is replaced by timestamp-ordered
+iteration with a single in-flight `pending_begin` (one pair per closed begin->end
+lifecycle); the beacon parser no longer requires `drift` (accepted + passed through;
+omitted from beacons-latest output when absent). All four impls (rust/cpp/go/zig) pass
+`python shared/conformance.py rust cpp go zig` (0 fail) with new fixtures
+(multi_lifecycle / orphan_begin / orphan_end / back_to_back / optional_drift;
+missing_fields repurposed to missing-eta; malformed hardened to an unquoted bareword).
+Live-fleet validation: `bias_factor` 3.82 -> 1.70, n_pairs 23 -> 44.
+
+Spec/plan: `docs/superpowers/specs|plans/beacon-pairing-fix.md`. Memory:
+`project_beacon_pairing_fix.md`, `reference_json_parser_leniency_conformance.md`.
+
+Remaining (in order):
+
+- [ ] **Merge `fix/beacon-pairing` -> main.** `git fetch origin`; rebase the branch
+  onto latest `origin/main` first (this repo's main is advanced by parallel llamabox
+  sessions -- see `feedback_claude_walker_parallel_push_rebase`); merge `--no-ff`;
+  rerun conformance on the merged tree; push to BOTH remotes (origin + gitea).
+- [ ] **Rebuild + reinstall** the cpp binary via `install.bat` -- production
+  `~/.local/bin/claude-walker.exe` still has the old pairing until then. The branch's
+  four binaries are already built locally with the new pairing.
+- [ ] **macOS conformance** (different machine; no macOS CI runner): after pulling the
+  merged main, `python shared/conformance.py rust cpp go zig` + the zig-Darwin grep
+  guard (CLAUDE.md macOS section).
+- [ ] **Then: web-search cost fix** (the "Add per-request web-search cost" Inbox
+  section below) -- user chose "both, beacons first" this session, so it is the next
+  bug after this rollout lands.
+- [ ] **Downstream repos (land AFTER walker reinstall):** schoen-claude-status
+  `feat/objective-drift` (statusline objective-drift changes already in working tree,
+  uncommitted -- commit them); skills-dev/progress-beacon `feat/drop-drift-field` (drop
+  `drift` from SKILL.md required fields + examples; objective-math note trigger).
+- [ ] Flip `## Test plan summary` checkboxes + prune completed phases in
+  `docs/superpowers/plans/beacon-pairing-fix.md` during the merge.
+
+Note: spec predicted bias ~0.5 (58-session snapshot); current 1943-session fleet lands
+at 1.70 -- both sane, do not chase 0.5 in the statusline work.
 ### Add per-request web-search cost ($0.01) to the pricing model
 
 The Python reference (`~/schoen-claude-status/statusline_lib.py`,
