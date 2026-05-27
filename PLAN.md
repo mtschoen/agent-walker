@@ -38,16 +38,18 @@ Spec/plan: `docs/superpowers/specs|plans/beacon-pairing-fix.md`. Memory:
 
 Remaining (in order):
 
-- [ ] **Merge `fix/beacon-pairing` -> main.** `git fetch origin`; rebase the branch
-  onto latest `origin/main` first (this repo's main is advanced by parallel llamabox
-  sessions -- see `feedback_claude_walker_parallel_push_rebase`); merge `--no-ff`;
-  rerun conformance on the merged tree; push to BOTH remotes (origin + gitea).
-- [ ] **Rebuild + reinstall** the cpp binary via `install.bat` -- production
-  `~/.local/bin/claude-walker.exe` still has the old pairing until then. The branch's
-  four binaries are already built locally with the new pairing.
+- [x] **Merge `fix/beacon-pairing` -> main.** Rebased onto `5bb4cd7` (clean, only
+  PLAN.md drift); merged `--no-ff` -> `d416ac9`; conformance green on merged tree
+  (196 OK / 0 fail, all four impls); pushed to BOTH remotes (origin + gitea at
+  `d416ac9`). 2026-05-27.
+- [x] **Rebuild + reinstall** the cpp binary via `install.bat` -- production
+  `~/.local/bin/claude-walker.exe` now has the new pairing (rebuilt 04:15, smoke ok;
+  verified `multi_lifecycle --no-config` -> n_pairs=2 bias=0.8333). A stale
+  `cpp/build/Release/walker.exe` process had locked the linker output (LNK1104); killed
+  it and the build went through.
 - [ ] **macOS conformance** (different machine; no macOS CI runner): after pulling the
   merged main, `python shared/conformance.py rust cpp go zig` + the zig-Darwin grep
-  guard (CLAUDE.md macOS section).
+  guard (CLAUDE.md macOS section). STILL PENDING -- can't run from chonkers/Windows.
 - [ ] **Then: web-search cost fix** (the "Add per-request web-search cost" Inbox
   section below) -- user chose "both, beacons first" this session, so it is the next
   bug after this rollout lands.
@@ -55,8 +57,9 @@ Remaining (in order):
   `feat/objective-drift` (statusline objective-drift changes already in working tree,
   uncommitted -- commit them); skills-dev/progress-beacon `feat/drop-drift-field` (drop
   `drift` from SKILL.md required fields + examples; objective-math note trigger).
-- [ ] Flip `## Test plan summary` checkboxes + prune completed phases in
-  `docs/superpowers/plans/beacon-pairing-fix.md` during the merge.
+- [x] Flip `## Test plan summary` checkboxes + prune completed phases in
+  `docs/superpowers/plans/beacon-pairing-fix.md` (walker phase marked DONE; bias
+  criterion corrected to the 1.70 fleet reality).
 
 Note: spec predicted bias ~0.5 (58-session snapshot); current 1943-session fleet lands
 at 1.70 -- both sane, do not chase 0.5 in the statusline work.

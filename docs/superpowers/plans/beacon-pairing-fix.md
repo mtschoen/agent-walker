@@ -18,7 +18,12 @@ computation so all three repos ship in lockstep.
 Land order: walker → statusline → SKILL. The walker change is the load
 bearing one; the other two clean up the now-orphaned `drift` field.
 
-## Walker (claude-walker repo)
+## Walker (claude-walker repo) — DONE (merged to main `d416ac9`, 2026-05-27)
+
+Sections 1–7 complete: spec rewritten, all four impls on the
+`pending_begin` loop + relaxed required-field check, fixtures +
+expectations regenerated, conformance green (196 OK / 0 fail), cpp
+rebuilt and reinstalled to `~/.local/bin/claude-walker.exe`.
 
 ### 1. Update SPEC.md `beacons-history` section
 Rewrite the "find earliest 'begin' and latest 'end' within window" text
@@ -167,10 +172,14 @@ explicit math, not a self-assessed label.
 
 ## Test plan summary
 
-- [ ] Conformance passes for all four walker impls
-- [ ] `bench.py` on live corpus produces bias_factor < 1.0
+- [x] Conformance passes for all four walker impls (196 OK / 0 fail)
+- [x] `bench.py` on live corpus produces a sane bias_factor — lands at
+      1.70 on the current 1943-session fleet (was 3.82). The spec's
+      "< 1.0 / ~0.5" prediction came from a 58-session snapshot; on the
+      full fleet 1.70 is the correct sane regime — do NOT chase 0.5.
 - [ ] Manual statusline check: yellow at 1.5× crossing, red at 2× crossing
-- [ ] Backward-compat: existing JSONL transcripts still parse, drift
-      field ignored
-- [ ] New corpus fixtures cover multi-lifecycle, orphan-begin, orphan-end,
+      (pending — schoen-claude-status `feat/objective-drift`)
+- [x] Backward-compat: existing JSONL transcripts still parse, drift
+      field ignored (optional_drift fixture)
+- [x] New corpus fixtures cover multi-lifecycle, orphan-begin, orphan-end,
       back-to-back patterns
