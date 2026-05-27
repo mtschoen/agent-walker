@@ -6,15 +6,18 @@ sibling expected files:
 - `shared/corpus/beacons/expected_history.json`
 
 Beacon fixtures use the same slug-dir layout as cost mode:
-    shared/corpus/beacons/<scenario>/<sid>.jsonl
-so walker's discovery glob (`<projects-root>/*/<sid>.jsonl`) finds them when
-the conformance harness copies one scenario into a temp tree.
+    shared/corpus/beacons/<scenario>/<sid>.jsonl          (beacons-latest)
+    shared/corpus/beacons/<scenario>/<slug>/<sid>.jsonl   (beacons-history)
+so walker's discovery glob finds them when the conformance harness copies one
+scenario into a temp tree (latest: scenario dir = slug; history: scenario dir =
+projects-root with slug subdirs).
 
 Anchored to the same NOW_UNIX as cost mode so test runs are deterministic.
 """
 from __future__ import annotations
 
 import json
+import statistics
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -50,21 +53,20 @@ def assistant_with_text(unix_ts: float, msg_id: str, text: str) -> dict:
     }
 
 
-def beacon_text(beacon_json: str) -> str:
+def beacon_text(beacon_json_str: str) -> str:
     """Wrap a JSON string in a fenced beacon block embedded in narration."""
     return (
         "Working on it.\n\n"
-        f"<progress-beacon>\n{beacon_json}\n</progress-beacon>"
+        f"<progress-beacon>\n{beacon_json_str}\n</progress-beacon>"
     )
 
 
-def beacon_json(kind: str, eta: int, summary: str, drift: str = "nominal") -> str:
-    return json.dumps({
-        "kind": kind,
-        "eta_seconds": eta,
-        "summary": summary,
-        "drift": drift,
-    })
+def beacon_json(kind: str, eta: int, summary: str, drift: str | None = "nominal") -> str:
+    """Serialize a beacon. `drift=None` omits the field (post-fix optional form)."""
+    obj = {"kind": kind, "eta_seconds": eta, "summary": summary}
+    if drift is not None:
+        obj["drift"] = drift
+    return json.dumps(obj)
 
 
 def write_jsonl(path: Path, lines: list[dict]) -> None:
@@ -73,6 +75,26 @@ def write_jsonl(path: Path, lines: list[dict]) -> None:
         for line in lines:
             f.write(json.dumps(line))
             f.write("\n")
+
+
+def bias_of(pairs: list[tuple[float, float]]) -> float | None:
+    """median(active_elapsed / begin_eta). Even count -> mean of two middle.
+
+    These hand-built fixtures contain no user-prompt entries, so there is no
+    idle time to exclude: active_elapsed == actual_elapsed for every pair.
+    """
+    if not pairs:
+        return None
+    return statistics.median(sorted(active / eta for eta, active in pairs))
+
+
+def history_expected(pairs: list[tuple[float, float]], session_count: int) -> dict:
+    return {
+        "pairs": [{"begin_eta": e, "actual_elapsed": a} for e, a in pairs],
+        "session_count": session_count,
+        "n_pairs": len(pairs),
+        "bias_factor": bias_of(pairs),
+    }
 
 
 # === Scenarios for `beacons-latest` ===
@@ -100,10 +122,18 @@ def scenario_clean_lifecycle():
 
 
 def scenario_malformed():
-    """Beacon block has malformed JSON (trailing comma). Walker silently skips."""
+    """Beacon block has malformed JSON (unquoted bareword value). Walker skips.
+
+    Note: an earlier version used a trailing comma, but simdjson's on-demand
+    parser (cpp) tolerates trailing commas while serde_json (rust) rejects them
+    — a divergence the old drift-required check happened to mask. An unquoted
+    value is unambiguously invalid and rejected by all four parsers (via the
+    tokenizer or the string/number type-check), keeping the impls in lockstep.
+    Production beacons are emitted via json.dumps and never hit this path.
+    """
     sid = "session"
     t1 = NOW_UNIX - 300
-    bad = '{"kind": "begin", "eta_seconds": 180, "summary": "broken",}'
+    bad = '{"kind": "begin", "eta_seconds": 180, "summary": broken}'
     lines = [assistant_with_text(t1, "msg_mal_001", beacon_text(bad))]
     expected = {"session_id": sid, "beacon": None,
                 "emitted_at": None, "age_seconds": None}
@@ -111,15 +141,38 @@ def scenario_malformed():
 
 
 def scenario_missing_fields():
-    """Beacon JSON parses but `drift` missing. Walker silently skips."""
+    """Beacon JSON parses but a STILL-required field (`eta_seconds`) is missing.
+
+    Post-fix, `drift` is optional (covered by `optional_drift`); this fixture
+    now omits `eta_seconds` to confirm the parser still rejects genuinely
+    incomplete beacons.
+    """
     sid = "session"
     t1 = NOW_UNIX - 300
-    incomplete = json.dumps({"kind": "begin", "eta_seconds": 180,
-                             "summary": "no drift field"})
+    incomplete = json.dumps({"kind": "begin", "summary": "no eta field",
+                             "drift": "nominal"})
     lines = [assistant_with_text(t1, "msg_miss_001", beacon_text(incomplete))]
     expected = {"session_id": sid, "beacon": None,
                 "emitted_at": None, "age_seconds": None}
     return "missing_fields", sid, lines, expected
+
+
+def scenario_optional_drift():
+    """Beacon omits `drift` (the new optional form). Walker parses + returns it,
+    and the returned `beacon` object omits `drift` too."""
+    sid = "session"
+    t1 = NOW_UNIX - 300
+    lines = [
+        assistant_with_text(t1, "msg_opt_001",
+            beacon_text(beacon_json("begin", 180, "no drift field", drift=None))),
+    ]
+    expected = {
+        "session_id": sid,
+        "beacon": {"kind": "begin", "eta_seconds": 180, "summary": "no drift field"},
+        "emitted_at": t1,
+        "age_seconds": NOW_UNIX - t1,
+    }
+    return "optional_drift", sid, lines, expected
 
 
 def scenario_multiple_in_turn():
@@ -144,10 +197,10 @@ def scenario_multiple_in_turn():
     return "multiple_in_turn", sid, lines, expected
 
 
-# === Scenario for `beacons-history` ===
+# === Scenarios for `beacons-history` ===
 
 def scenario_cross_session_pairs():
-    """Two sessions, each begin+end. bias_factor = median(actual/eta)."""
+    """Two sessions, each one begin+end lifecycle (drift present -> back-compat)."""
     # A: eta=500s, actual=1000s -> ratio 2.0
     a_begin, a_end = NOW_UNIX - 1800, NOW_UNIX - 800
     a_lines = [
@@ -164,20 +217,81 @@ def scenario_cross_session_pairs():
         assistant_with_text(b_end, "msg_b_002",
             beacon_text(beacon_json("end", 0, "session B done"))),
     ]
-    expected = {
-        "pairs": [
-            {"begin_eta": 500.0, "actual_elapsed": 1000.0},
-            {"begin_eta": 400.0, "actual_elapsed": 200.0},
-        ],
-        "session_count": 2,
-        "n_pairs": 2,
-        "bias_factor": 1.25,
-    }
     files = {
         "slug_a/session_a.jsonl": a_lines,
         "slug_b/session_b.jsonl": b_lines,
     }
-    return "cross_session_pairs", files, expected
+    return "cross_session_pairs", files, history_expected(
+        [(500.0, 1000.0), (400.0, 200.0)], session_count=2)
+
+
+def scenario_multi_lifecycle():
+    """One session, two complete begin->end lifecycles + interleaved reports.
+
+    Beacons omit `drift`, so this also exercises the relaxed required-field set
+    in history mode. Lifecycle A: eta=300 actual=200; B: eta=600 actual=600.
+    """
+    a0, a1, a2 = NOW_UNIX - 3000, NOW_UNIX - 2940, NOW_UNIX - 2800
+    b0, b1, b2 = NOW_UNIX - 1200, NOW_UNIX - 900, NOW_UNIX - 600
+    lines = [
+        assistant_with_text(a0, "msg_ml_001", beacon_text(beacon_json("begin", 300, "lifecycle A", drift=None))),
+        assistant_with_text(a1, "msg_ml_002", beacon_text(beacon_json("report", 240, "A midway", drift=None))),
+        assistant_with_text(a2, "msg_ml_003", beacon_text(beacon_json("end", 0, "A done", drift=None))),
+        assistant_with_text(b0, "msg_ml_004", beacon_text(beacon_json("begin", 600, "lifecycle B", drift=None))),
+        assistant_with_text(b1, "msg_ml_005", beacon_text(beacon_json("report", 300, "B midway", drift=None))),
+        assistant_with_text(b2, "msg_ml_006", beacon_text(beacon_json("end", 0, "B done", drift=None))),
+    ]
+    return "multi_lifecycle", {"slug/session.jsonl": lines}, history_expected(
+        [(300.0, 200.0), (600.0, 600.0)], session_count=1)
+
+
+def scenario_orphan_begin():
+    """One session with a begin (and report) but no end. No pair emitted."""
+    t0, t1 = NOW_UNIX - 1000, NOW_UNIX - 900
+    lines = [
+        assistant_with_text(t0, "msg_ob_001", beacon_text(beacon_json("begin", 300, "started, never ended", drift=None))),
+        assistant_with_text(t1, "msg_ob_002", beacon_text(beacon_json("report", 200, "still going", drift=None))),
+    ]
+    return "orphan_begin", {"slug/session.jsonl": lines}, history_expected([], session_count=1)
+
+
+def scenario_orphan_end():
+    """One session with an end but no preceding begin. No pair emitted."""
+    t0 = NOW_UNIX - 1000
+    lines = [
+        assistant_with_text(t0, "msg_oe_001", beacon_text(beacon_json("end", 0, "ended with no begin", drift=None))),
+    ]
+    return "orphan_end", {"slug/session.jsonl": lines}, history_expected([], session_count=1)
+
+
+def scenario_back_to_back():
+    """One session: begin, end, begin, end -> two pairs from one group."""
+    t0, t1, t2, t3 = NOW_UNIX - 2000, NOW_UNIX - 1900, NOW_UNIX - 1800, NOW_UNIX - 1500
+    lines = [
+        assistant_with_text(t0, "msg_bb_001", beacon_text(beacon_json("begin", 100, "first", drift=None))),
+        assistant_with_text(t1, "msg_bb_002", beacon_text(beacon_json("end", 0, "first done", drift=None))),
+        assistant_with_text(t2, "msg_bb_003", beacon_text(beacon_json("begin", 200, "second", drift=None))),
+        assistant_with_text(t3, "msg_bb_004", beacon_text(beacon_json("end", 0, "second done", drift=None))),
+    ]
+    return "back_to_back", {"slug/session.jsonl": lines}, history_expected(
+        [(100.0, 100.0), (200.0, 300.0)], session_count=1)
+
+
+LATEST_SCENARIOS = (
+    scenario_clean_lifecycle,
+    scenario_malformed,
+    scenario_missing_fields,
+    scenario_optional_drift,
+    scenario_multiple_in_turn,
+)
+
+HISTORY_SCENARIOS = (
+    scenario_cross_session_pairs,
+    scenario_multi_lifecycle,
+    scenario_orphan_begin,
+    scenario_orphan_end,
+    scenario_back_to_back,
+)
 
 
 def main() -> None:
@@ -191,19 +305,17 @@ def main() -> None:
     CORPUS_BEACONS.mkdir(parents=True, exist_ok=True)
 
     expected_latest = {}
-    for build in (
-        scenario_clean_lifecycle,
-        scenario_malformed,
-        scenario_missing_fields,
-        scenario_multiple_in_turn,
-    ):
+    for build in LATEST_SCENARIOS:
         scenario, sid, lines, expected = build()
         write_jsonl(CORPUS_BEACONS / scenario / f"{sid}.jsonl", lines)
         expected_latest[scenario] = expected
 
-    history_scenario, history_files, history_expected = scenario_cross_session_pairs()
-    for rel, lines in history_files.items():
-        write_jsonl(CORPUS_BEACONS / history_scenario / rel, lines)
+    expected_history = {}
+    for build in HISTORY_SCENARIOS:
+        scenario, files, expected = build()
+        for rel, lines in files.items():
+            write_jsonl(CORPUS_BEACONS / scenario / rel, lines)
+        expected_history[scenario] = expected
 
     meta = {
         "now_unix": NOW_UNIX,
@@ -214,7 +326,7 @@ def main() -> None:
         encoding="utf-8",
     )
     (CORPUS_BEACONS / "expected_history.json").write_text(
-        json.dumps({"_meta": meta, "fixture": history_expected}, indent=2) + "\n",
+        json.dumps({"_meta": meta, "fixtures": expected_history}, indent=2) + "\n",
         encoding="utf-8",
     )
 

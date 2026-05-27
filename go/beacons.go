@@ -47,8 +47,11 @@ type beacon struct {
 	Kind       string  `json:"kind"`
 	EtaSeconds float64 `json:"eta_seconds"`
 	Summary    string  `json:"summary"`
-	Drift      string  `json:"drift"`
-	BeatsLeft  *int64  `json:"beats_left,omitempty"`
+	// Optional per SPEC: nil (and so omitted) when the source beacon lacked
+	// drift; the pointer keeps presence distinct from an empty value, matching
+	// rust's Option<String> / cpp's has_drift.
+	Drift     *string `json:"drift,omitempty"`
+	BeatsLeft *int64  `json:"beats_left,omitempty"`
 }
 
 type rawBeacon struct {
@@ -60,14 +63,14 @@ type rawBeacon struct {
 }
 
 func (rb *rawBeacon) toBeacon() (*beacon, bool) {
-	if rb.Kind == nil || rb.EtaSeconds == nil || rb.Summary == nil || rb.Drift == nil {
+	if rb.Kind == nil || rb.EtaSeconds == nil || rb.Summary == nil {
 		return nil, false
 	}
 	return &beacon{
 		Kind:       *rb.Kind,
 		EtaSeconds: *rb.EtaSeconds,
 		Summary:    *rb.Summary,
-		Drift:      *rb.Drift,
+		Drift:      rb.Drift, // nil when absent -> omitted on output
 		BeatsLeft:  rb.BeatsLeft,
 	}, true
 }
@@ -656,33 +659,35 @@ func runBeaconsHistory(args []string) {
 					}
 				}
 
-				var begin, end *beaconWithTimestamp
+				// Iterate in timestamp order (stable), tracking one in-flight
+				// pending begin: emit one pair per properly-closed begin->end
+				// lifecycle. Replaces the old earliest-begin/latest-end rule.
+				sort.SliceStable(inside, func(i, j int) bool {
+					return inside[i].timestamp < inside[j].timestamp
+				})
+				var pendingBegin *beaconWithTimestamp
 				for index := range inside {
 					b := &inside[index]
 					switch b.beacon.Kind {
 					case "begin":
-						if begin == nil || b.timestamp < begin.timestamp {
-							begin = b
-						}
+						pendingBegin = b // orphans any prior pending begin
 					case "end":
-						if end == nil || b.timestamp > end.timestamp {
-							end = b
+						if pendingBegin != nil && b.timestamp > pendingBegin.timestamp {
+							wall := b.timestamp - pendingBegin.timestamp
+							idle := computeIdleInWindow(eventsAll, pendingBegin.timestamp, b.timestamp)
+							active := wall - idle
+							if active < 0 {
+								active = 0
+							}
+							local = append(local, historyPair{
+								beginEta:      pendingBegin.beacon.EtaSeconds,
+								actualElapsed: wall,
+								idleExcluded:  idle,
+								activeElapsed: active,
+							})
+							pendingBegin = nil
 						}
 					}
-				}
-				if begin != nil && end != nil && end.timestamp > begin.timestamp {
-					wall := end.timestamp - begin.timestamp
-					idle := computeIdleInWindow(eventsAll, begin.timestamp, end.timestamp)
-					active := wall - idle
-					if active < 0 {
-						active = 0
-					}
-					local = append(local, historyPair{
-						beginEta:      begin.beacon.EtaSeconds,
-						actualElapsed: wall,
-						idleExcluded:  idle,
-						activeElapsed: active,
-					})
 				}
 			}
 			perWorkerPairs[tid] = local

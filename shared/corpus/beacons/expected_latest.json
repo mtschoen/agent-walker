@@ -27,6 +27,16 @@
       "emitted_at": null,
       "age_seconds": null
     },
+    "optional_drift": {
+      "session_id": "session",
+      "beacon": {
+        "kind": "begin",
+        "eta_seconds": 180,
+        "summary": "no drift field"
+      },
+      "emitted_at": 1778414100.0,
+      "age_seconds": 300.0
+    },
     "multiple_in_turn": {
       "session_id": "session",
       "beacon": {
