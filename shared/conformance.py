@@ -221,54 +221,57 @@ def assert_beacons_latest(lang: str, binary: Path, expected: dict) -> bool:
 
 
 def assert_beacons_history(lang: str, binary: Path, expected: dict) -> bool:
-    """Run beacons-history against the cross_session_pairs fixture."""
+    """Run beacons-history against each history scenario in isolation."""
     meta = expected["_meta"]
-    target = expected["fixture"]
-    label = "beacons-history"
-    with tempfile.TemporaryDirectory(prefix="walker-beacon-history-") as tmp:
-        # Copy the cross_session_pairs tree (which already contains slug
-        # subdirs slug_a/ slug_b/) and point projects-root at it.
-        tree = Path(tmp) / "tree"
-        shutil.copytree(BEACON_CORPUS / "cross_session_pairs", tree)
-        try:
-            got = run_walker_subcommand(lang, binary, "beacons-history", [
-                "--period", "604800",  # 7 days, generous
-                "--win-start", "0",
-                "--projects-root", str(tree),
-                "--now", repr(meta["now_unix"]),
-            ])
-        except Exception as e:
-            print(f"  [{lang:>4s}] {label:38s} FAIL  {e}")
-            return False
+    overall = True
 
     def pairs_key(p):
         return (p["begin_eta"], p["actual_elapsed"])
 
-    pairs_ok = sorted(map(pairs_key, got.get("pairs", []))) == sorted(
-        map(pairs_key, target["pairs"])
-    )
-    counts_ok = (
-        got.get("session_count") == target["session_count"]
-        and got.get("n_pairs") == target["n_pairs"]
-    )
-    bias_got = got.get("bias_factor")
-    bias_tgt = target.get("bias_factor")
-    if bias_got is None and bias_tgt is None:
-        bias_ok = True
-    elif bias_got is None or bias_tgt is None:
-        bias_ok = False
-    else:
-        bias_ok = abs(bias_got - bias_tgt) <= BIAS_TOLERANCE
-    ok = pairs_ok and counts_ok and bias_ok
-    badge = " OK " if ok else "FAIL"
-    print(
-        f"  [{lang:>4s}] {label:38s} {badge}  "
-        f"n_pairs={got.get('n_pairs')}  bias={bias_got}"
-    )
-    if not ok:
-        print(f"        got:    {got}")
-        print(f"        target: {target}")
-    return ok
+    for scenario, target in expected["fixtures"].items():
+        label = f"beacons-history:{scenario}"
+        with tempfile.TemporaryDirectory(prefix="walker-beacon-history-") as tmp:
+            # Each scenario dir is a projects-root containing slug subdirs.
+            tree = Path(tmp) / "tree"
+            shutil.copytree(BEACON_CORPUS / scenario, tree)
+            try:
+                got = run_walker_subcommand(lang, binary, "beacons-history", [
+                    "--period", "604800",  # 7 days, generous
+                    "--win-start", "0",
+                    "--projects-root", str(tree),
+                    "--now", repr(meta["now_unix"]),
+                ])
+            except Exception as e:
+                print(f"  [{lang:>4s}] {label:38s} FAIL  {e}")
+                overall = False
+                continue
+
+        pairs_ok = sorted(map(pairs_key, got.get("pairs", []))) == sorted(
+            map(pairs_key, target["pairs"])
+        )
+        counts_ok = (
+            got.get("session_count") == target["session_count"]
+            and got.get("n_pairs") == target["n_pairs"]
+        )
+        bias_got = got.get("bias_factor")
+        bias_tgt = target.get("bias_factor")
+        if bias_got is None and bias_tgt is None:
+            bias_ok = True
+        elif bias_got is None or bias_tgt is None:
+            bias_ok = False
+        else:
+            bias_ok = abs(bias_got - bias_tgt) <= BIAS_TOLERANCE
+        ok = pairs_ok and counts_ok and bias_ok
+        badge = " OK " if ok else "FAIL"
+        print(
+            f"  [{lang:>4s}] {label:38s} {badge}  "
+            f"n_pairs={got.get('n_pairs')}  bias={bias_got}"
+        )
+        if not ok:
+            print(f"        got:    {got}")
+            print(f"        target: {target}")
+            overall = False
+    return overall
 
 
 def check_beacons(lang: str, binary: Path) -> bool:
