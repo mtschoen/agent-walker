@@ -17,7 +17,9 @@ const Beacon = struct {
     kind: []const u8,
     eta_seconds: f64,
     summary: []const u8,
-    drift: []const u8,
+    // Optional per SPEC: null (and so omitted from output) when the source
+    // beacon lacked drift; matches rust Option / cpp has_drift / go *string.
+    drift: ?[]const u8 = null,
     beats_left: ?i64 = null,
 
     fn writeJson(self: Beacon, w: *Buf) !void {
@@ -27,8 +29,10 @@ const Beacon = struct {
         try writeJsonNumber(w, self.eta_seconds);
         try w.appendStr(",\"summary\":");
         try writeJsonString(w, self.summary);
-        try w.appendStr(",\"drift\":");
-        try writeJsonString(w, self.drift);
+        if (self.drift) |d| {
+            try w.appendStr(",\"drift\":");
+            try writeJsonString(w, d);
+        }
         if (self.beats_left) |bl| {
             try w.appendFmt(",\"beats_left\":{d}", .{bl});
         }
@@ -172,7 +176,7 @@ fn parseBeaconJson(alloc: Allocator, json_src: []const u8) ?Beacon {
         .kind = kind orelse return null,
         .eta_seconds = eta orelse return null,
         .summary = summary orelse return null,
-        .drift = drift orelse return null,
+        .drift = drift,
         .beats_left = beats_left,
     };
 }
@@ -684,6 +688,10 @@ const HistoryWorker = struct {
     pairs: std.ArrayList(Pair),
 };
 
+fn cmpFoundAsc(_: void, a: Found, b: Found) bool {
+    return a.ts < b.ts;
+}
+
 fn historyDoWork(
     worker: *HistoryWorker,
     queue_cur: *std.atomic.Value(usize),
@@ -703,29 +711,31 @@ fn historyDoWork(
         }
         std.mem.sort(Event, all_events.items, {}, cmpEventAsc);
 
-        var begin: ?Found = null;
-        var end: ?Found = null;
+        // Sort beacons by ts (stable), then iterate tracking one in-flight
+        // pending begin: emit one pair per properly-closed begin->end
+        // lifecycle. Beacons before window_lo are skipped, so a pair needs its
+        // begin (and end) inside the window. Replaces the earliest/latest rule.
+        std.mem.sort(Found, all_beacons.items, {}, cmpFoundAsc);
+        var pending_begin: ?Found = null;
         for (all_beacons.items) |f| {
             if (f.ts < window_lo) continue;
             if (std.mem.eql(u8, f.beacon.kind, "begin")) {
-                if (begin == null or f.ts < begin.?.ts) begin = f;
+                pending_begin = f; // orphans any prior pending begin
             } else if (std.mem.eql(u8, f.beacon.kind, "end")) {
-                if (end == null or f.ts > end.?.ts) end = f;
-            }
-        }
-        if (begin != null and end != null) {
-            const b = begin.?;
-            const e = end.?;
-            if (e.ts > b.ts) {
-                const wall = e.ts - b.ts;
-                const idle = computeIdleInWindow(all_events.items, b.ts, e.ts);
-                const active = @max(0.0, wall - idle);
-                worker.pairs.append(wa, .{
-                    .begin_eta = b.beacon.eta_seconds,
-                    .actual_elapsed = wall,
-                    .idle_excluded = idle,
-                    .active_elapsed = active,
-                }) catch {};
+                if (pending_begin) |b| {
+                    if (f.ts > b.ts) {
+                        const wall = f.ts - b.ts;
+                        const idle = computeIdleInWindow(all_events.items, b.ts, f.ts);
+                        const active = @max(0.0, wall - idle);
+                        worker.pairs.append(wa, .{
+                            .begin_eta = b.beacon.eta_seconds,
+                            .actual_elapsed = wall,
+                            .idle_excluded = idle,
+                            .active_elapsed = active,
+                        }) catch {};
+                        pending_begin = null;
+                    }
+                }
             }
         }
     }
