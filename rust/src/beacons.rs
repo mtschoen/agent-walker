@@ -36,7 +36,10 @@ struct Beacon {
     kind: String,
     eta_seconds: f64,
     summary: String,
-    drift: String,
+    /// Optional per SPEC: parses when absent, passed through when present, and
+    /// omitted from beacons-latest output when the source beacon lacked it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    drift: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     beats_left: Option<i64>,
 }
@@ -459,7 +462,8 @@ pub fn run_history(args: &[String]) {
     };
     let now_unix = parsed.now_unix.unwrap_or_else(current_unix);
     let period_cutoff = now_unix - parsed.period_seconds as f64;
-    // Pairs are emitted only when both begin AND end fall within the window.
+    // Beacons before window_lo are dropped; pairing runs on the survivors, so
+    // a pair requires its begin (and end) timestamp inside the window.
     let window_lo = period_cutoff.max(parsed.win_start_unix);
     let primary = parsed.projects_root.unwrap_or_else(default_projects_root);
     let roots = walker_roots::resolve_roots(
@@ -506,26 +510,32 @@ pub fn run_history(args: &[String]) {
                     events_all.extend(se.events);
                 }
                 events_all.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-                // Filter to beacons inside the window.
+                // Drop beacons before the window, then iterate in timestamp
+                // order tracking a single in-flight pending_begin: one pair per
+                // properly-closed begin->end lifecycle. Stable sort keeps file
+                // order on ties for cross-impl determinism.
                 beacons_all.retain(|(_, ts)| *ts >= window_lo);
+                beacons_all.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
-                let begin = beacons_all
-                    .iter()
-                    .filter(|(b, _)| b.kind == "begin")
-                    .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
-                let end = beacons_all
-                    .iter()
-                    .filter(|(b, _)| b.kind == "end")
-                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
                 let mut local_pairs: Vec<(f64, f64)> = Vec::new();
                 let mut local_meta: Vec<(f64, f64, f64)> = Vec::new();
-                if let (Some((begin_b, begin_ts)), Some((_end_b, end_ts))) = (begin, end) {
-                    if *end_ts > *begin_ts {
-                        let wall = *end_ts - *begin_ts;
-                        let idle = compute_idle_in_window(&events_all, *begin_ts, *end_ts);
-                        let active = (wall - idle).max(0.0);
-                        local_pairs.push((begin_b.eta_seconds, active));
-                        local_meta.push((wall, idle, active));
+                let mut pending_begin: Option<(f64, f64)> = None; // (begin_ts, begin_eta)
+                for (b, ts) in &beacons_all {
+                    match b.kind.as_str() {
+                        "begin" => pending_begin = Some((*ts, b.eta_seconds)),
+                        "end" => {
+                            if let Some((begin_ts, begin_eta)) = pending_begin {
+                                if *ts > begin_ts {
+                                    let wall = *ts - begin_ts;
+                                    let idle = compute_idle_in_window(&events_all, begin_ts, *ts);
+                                    let active = (wall - idle).max(0.0);
+                                    local_pairs.push((begin_eta, active));
+                                    local_meta.push((wall, idle, active));
+                                    pending_begin = None;
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 (local_pairs, local_meta)
