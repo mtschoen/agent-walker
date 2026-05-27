@@ -24,6 +24,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 CORPUS_SEARCH = ROOT / "corpus" / "search"
+CORPUS_SEARCH_MULTI_ROOT = ROOT / "corpus" / "search_multi_root"
 
 NOW_UNIX = 1778414400.0  # 2026-05-09 12:00:00 UTC -- matches beacon corpus
 
@@ -784,6 +785,49 @@ def scenario_11_multibyte_snippet_boundary():
     return scenario, files, expected
 
 
+def multi_root_scenario_01_two_roots():
+    """Same pattern in a primary-root session AND an extra-root session.
+
+    Regression guard for cpp search: the perf-pass-2 rewrite dropped root
+    resolution, so cpp ignored --extra-projects-root / walker-roots.json and
+    hardcoded roots_walked=1. rust/go/zig kept it. This asserts both roots are
+    walked (roots_walked=2) and that hits aggregate + sort newest-first ACROSS
+    roots. Layout: <scenario>/<root>/<slug>/<sid>.jsonl.
+
+    Returns (scenario, primary_root, extra_roots, files, combos)."""
+    scenario = "01-two-roots"
+    t_primary = NOW_UNIX - 2000
+    t_extra = NOW_UNIX - 1000  # newer -> sorts ahead of the primary-root hit
+    text_p = "primary root mentions needle once"
+    text_e = "extra root also has needle here"
+    files = {
+        "primary/proj-primary/sid_p.jsonl": [assistant_text(t_primary, "msg_mr_p", text_p)],
+        "extra/proj-extra/sid_e.jsonl": [assistant_text(t_extra, "msg_mr_e", text_e)],
+    }
+    o_p = find_offset(text_p, "needle")
+    o_e = find_offset(text_e, "needle")
+    hit_e = hit(
+        session_id="sid_e", cwd_slug="proj-extra", line_number=1,
+        timestamp=iso(t_extra), role="assistant", snippet=text_e,
+        match_offsets=[[o_e[0], o_e[1]]],
+    )
+    hit_p = hit(
+        session_id="sid_p", cwd_slug="proj-primary", line_number=1,
+        timestamp=iso(t_primary), role="assistant", snippet=text_p,
+        match_offsets=[[o_p[0], o_p[1]]],
+    )
+    combos = {
+        "default": {
+            "description": "Pattern in both roots: 2 hits newest-first, roots_walked=2.",
+            "pattern": "needle",
+            "flags": [],
+            "hits": [hit_e, hit_p],
+            "summary": summary(hits=2, sessions_matched=2, roots_walked=2),
+        },
+    }
+    return scenario, "primary", ["extra"], files, combos
+
+
 SCENARIOS = [
     scenario_01_basic,
     scenario_02_multi_match_per_session,
@@ -796,6 +840,10 @@ SCENARIOS = [
     scenario_09_count_only,
     scenario_10_context_zero,
     scenario_11_multibyte_snippet_boundary,
+]
+
+MULTI_ROOT_SCENARIOS = [
+    multi_root_scenario_01_two_roots,
 ]
 
 
@@ -826,8 +874,44 @@ def main() -> None:
             encoding="utf-8",
         )
 
+    # Multi-root search scenarios live in a sibling corpus dir with their own
+    # layout (<scenario>/<root>/<slug>/<sid>.jsonl + an expected.json carrying
+    # primary_root / extra_roots). check_search_multi_root runs
+    # `walker search --projects-root <primary> --extra-projects-root <extra>`.
+    if CORPUS_SEARCH_MULTI_ROOT.exists():
+        for p in sorted(CORPUS_SEARCH_MULTI_ROOT.rglob("*"), reverse=True):
+            if p.is_file():
+                p.unlink()
+            elif p.is_dir():
+                p.rmdir()
+        CORPUS_SEARCH_MULTI_ROOT.rmdir()
+    CORPUS_SEARCH_MULTI_ROOT.mkdir(parents=True, exist_ok=True)
+
+    mr_files = 0
+    for build in MULTI_ROOT_SCENARIOS:
+        scenario, primary_root, extra_roots, files, combos = build()
+        for rel, lines in files.items():
+            write_jsonl(CORPUS_SEARCH_MULTI_ROOT / scenario / rel, lines)
+            mr_files += 1
+        expected_path = CORPUS_SEARCH_MULTI_ROOT / scenario / "expected.json"
+        expected_path.write_text(
+            json.dumps(
+                {
+                    "_meta": meta,
+                    "primary_root": primary_root,
+                    "extra_roots": extra_roots,
+                    "combos": combos,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
     print(f"Wrote {total_files} JSONL fixtures across {len(SCENARIOS)} scenarios")
     print(f"  under {CORPUS_SEARCH}")
+    print(f"Wrote {mr_files} JSONL fixtures across {len(MULTI_ROOT_SCENARIOS)} multi-root scenarios")
+    print(f"  under {CORPUS_SEARCH_MULTI_ROOT}")
 
 
 if __name__ == "__main__":

@@ -36,6 +36,7 @@ EXPECTED = ROOT / "shared" / "expected.json"
 BEACON_CORPUS = ROOT / "shared" / "corpus" / "beacons"
 MULTI_ROOT_CORPUS = ROOT / "shared" / "corpus" / "multi_root"
 SEARCH_CORPUS = ROOT / "shared" / "corpus" / "search"
+SEARCH_MULTI_ROOT_CORPUS = ROOT / "shared" / "corpus" / "search_multi_root"
 EVENTS_CORPUS = ROOT / "shared" / "corpus" / "events"
 EVENTS_EXPECTED = EVENTS_CORPUS / "expected_events.json"
 EXPECTED_LATEST = BEACON_CORPUS / "expected_latest.json"
@@ -327,9 +328,11 @@ def run_walker_search(
     pattern: str,
     flags: list[str],
     now_unix: float,
+    extras: list[Path] | None = None,
 ) -> tuple[list[dict], dict | None]:
     """Invoke `walker search <pattern> <flags> --format jsonl ...`.
 
+    `extras` adds `--extra-projects-root <path>` flags (the multi-root case).
     Returns (hits, summary). Hits are stripped of per-run path fields
     (host_root, file_path); summary is stripped of elapsed_ms / files_walked.
     Raises RuntimeError on non-zero exit.
@@ -340,8 +343,10 @@ def run_walker_search(
         "--now", repr(now_unix),
         "--format", "jsonl",
         "--no-config",
-        *flags,
     ]
+    for extra in extras or []:
+        cmd.extend(["--extra-projects-root", str(extra)])
+    cmd.extend(flags)
     result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=10)
     if result.returncode != 0:
         raise RuntimeError(
@@ -436,6 +441,65 @@ def check_search(lang: str, binary: Path) -> bool:
             if not assert_search_combo(
                 lang, binary, scenario_dir.name, combo_name, combo, now_unix,
             ):
+                all_ok = False
+    return all_ok
+
+
+def check_search_multi_root(lang: str, binary: Path) -> bool:
+    """Multi-root search: assert --extra-projects-root reaches a second root,
+    hits aggregate + sort across roots, and roots_walked reflects the count.
+
+    Regression guard for the cpp perf-pass-2 search rewrite, which dropped root
+    resolution (ignored --extra-projects-root / walker-roots.json, hardcoded
+    roots_walked=1). rust/go/zig already pass this. Runs read-only directly
+    against the corpus (search never writes), mirroring check_multi_root.
+    """
+    if not SEARCH_MULTI_ROOT_CORPUS.is_dir():
+        return True  # corpus missing -- nothing to test
+    if lang not in IMPLS_WITH_SEARCH:
+        print(f"  [{lang:>4s}] search multi-root -- skipping (not in IMPLS_WITH_SEARCH)")
+        return True
+    all_ok = True
+    for scenario_dir in sorted(SEARCH_MULTI_ROOT_CORPUS.iterdir()):
+        if not scenario_dir.is_dir():
+            continue
+        expected_file = scenario_dir / "expected.json"
+        if not expected_file.is_file():
+            continue
+        data = json.loads(expected_file.read_text(encoding="utf-8"))
+        now_unix = data["_meta"]["now_unix"]
+        primary = scenario_dir / data["primary_root"]
+        extras = [scenario_dir / r for r in data["extra_roots"]]
+        for combo_name, combo in data["combos"].items():
+            label = f"search-mr/{scenario_dir.name}/{combo_name}"
+            try:
+                got_hits, got_summary = run_walker_search(
+                    lang, binary, primary,
+                    combo["pattern"], combo["flags"], now_unix, extras=extras,
+                )
+            except Exception as e:
+                print(f"  [{lang:>4s}] {label:48s} FAIL  {e}")
+                all_ok = False
+                continue
+            hits_ok = got_hits == combo["hits"]
+            summary_ok = got_summary == combo["summary"]
+            ok = hits_ok and summary_ok
+            badge = " OK " if ok else "FAIL"
+            walked = got_summary.get("roots_walked") if got_summary else "?"
+            print(f"  [{lang:>4s}] {label:48s} {badge}  hits={len(got_hits)} roots_walked={walked}")
+            if not hits_ok:
+                print(f"        hits mismatch: got {len(got_hits)}, expected {len(combo['hits'])}")
+                for i in range(max(len(got_hits), len(combo["hits"]))):
+                    g = got_hits[i] if i < len(got_hits) else None
+                    e = combo["hits"][i] if i < len(combo["hits"]) else None
+                    if g != e:
+                        print(f"          hit[{i}] got:      {json.dumps(g, sort_keys=True)}")
+                        print(f"          hit[{i}] expected: {json.dumps(e, sort_keys=True)}")
+                        break
+            if not summary_ok:
+                print(f"        summary got:      {json.dumps(got_summary, sort_keys=True)}")
+                print(f"        summary expected: {json.dumps(combo['summary'], sort_keys=True)}")
+            if not ok:
                 all_ok = False
     return all_ok
 
@@ -726,6 +790,8 @@ def main():
         if not check_config_resolution(lang, binary, expected):
             overall_ok = False
         if not check_search(lang, binary):
+            overall_ok = False
+        if not check_search_multi_root(lang, binary):
             overall_ok = False
         if not check_events(lang, binary):
             overall_ok = False

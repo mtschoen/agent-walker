@@ -5,6 +5,7 @@
 #include "search.hpp"
 #include "common.hpp"
 #include "json_writer.hpp"
+#include "walker_roots.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -182,6 +183,7 @@ struct DiscoveredFile {
     fs::path path;
     std::string slug;
     std::string session_id;
+    std::string host_root;  // the effective root this file was discovered under
 };
 
 static std::vector<DiscoveredFile> discoverFiles(
@@ -213,6 +215,7 @@ static std::vector<DiscoveredFile> discoverFiles(
             df.path = fent.path();
             df.slug = slug;
             df.session_id = fent.path().stem().string();
+            df.host_root = root.string();
             out.push_back(std::move(df));
         }
     }
@@ -335,6 +338,8 @@ struct Args {
     std::string format = "pretty";
     uint32_t snippet_chars = 240;
     fs::path projects_root;
+    std::vector<fs::path> extra_projects_roots;
+    bool read_config = true;
     double now = 0;
 };
 
@@ -413,7 +418,11 @@ static Args parseArgs(const std::vector<std::string>& raw) {
             if (++i >= raw.size()) throw std::runtime_error("--now needs a value");
             now_override = std::stod(raw[i]);
         }
-        else if (s == "--no-config") { /* ignore for search */ }
+        else if (s == "--extra-projects-root") {
+            if (++i >= raw.size()) throw std::runtime_error("--extra-projects-root needs a value");
+            args.extra_projects_roots.push_back(fs::path(raw[i]));
+        }
+        else if (s == "--no-config") { args.read_config = false; }
         else if (s.rfind("--", 0) == 0) throw std::runtime_error("unknown flag: " + s);
         else {
             if (!args.pattern.empty()) throw std::runtime_error("unexpected positional argument: " + s);
@@ -495,8 +504,7 @@ struct Matcher {
 static std::vector<Hit> processFile(
     const DiscoveredFile& f,
     const Args& args,
-    const Matcher& matcher,
-    const std::string& host_root)
+    const Matcher& matcher)
 {
     auto messages = scanFile(f.path, args.include_tool_blocks);
     std::vector<Hit> hits;
@@ -525,7 +533,7 @@ static std::vector<Hit> processFile(
         h.timestamp_str = m.timestamp_str;
         h.session_id = f.session_id;
         h.cwd_slug = f.slug;
-        h.host_root = host_root;
+        h.host_root = f.host_root;
         h.file_path = f.path.string();
         h.line_number = m.line_number;
         h.role = m.role;
@@ -616,11 +624,22 @@ int run(const std::vector<std::string>& argv) {
         }
     }
 
-    // Discover files
+    // Discover files across all effective roots (primary + CLI extras + config
+    // extras from ~/.claude/walker-roots.json). Each DiscoveredFile carries the
+    // root it came from as host_root. Mirrors events.cpp / search.rs; the
+    // perf-pass-2 search rewrite dropped this multi-root resolution.
     std::string* cwd_slug_ptr = args.cwd.empty() ? nullptr : &args.cwd;
-    auto files = discoverFiles(args.projects_root, args.since, cwd_slug_ptr);
+    std::vector<fs::path> roots = walker::resolve_roots(
+        args.projects_root, args.extra_projects_roots, args.read_config);
+    std::vector<DiscoveredFile> files;
+    for (const auto& root : roots) {
+        auto root_files = discoverFiles(root, args.since, cwd_slug_ptr);
+        files.insert(files.end(),
+                     std::make_move_iterator(root_files.begin()),
+                     std::make_move_iterator(root_files.end()));
+    }
     size_t files_walked = files.size();
-    std::string host_root = args.projects_root.string();
+    size_t roots_walked = roots.size();
 
     // Process files in parallel. Work unit = one file; each worker owns a
     // local hits list to avoid contention; merge after join, then sort.
@@ -640,7 +659,7 @@ int run(const std::vector<std::string>& argv) {
         while (true) {
             size_t idx = task_index.fetch_add(1, std::memory_order_relaxed);
             if (idx >= files.size()) break;
-            auto hs = processFile(files[idx], args, matcher, host_root);
+            auto hs = processFile(files[idx], args, matcher);
             local.insert(local.end(),
                          std::make_move_iterator(hs.begin()),
                          std::make_move_iterator(hs.end()));
@@ -691,7 +710,7 @@ int run(const std::vector<std::string>& argv) {
         if (!args.count_only) {
             for (auto& h : hits) { writeHit(std::cout, h); std::cout << '\n'; }
         }
-        writeSummary(std::cout, hits_output, sessions_matched, 1, files_walked, truncated, elapsed);
+        writeSummary(std::cout, hits_output, sessions_matched, roots_walked, files_walked, truncated, elapsed);
         std::cout << '\n';
     } else {
         // pretty format
@@ -729,7 +748,7 @@ int run(const std::vector<std::string>& argv) {
                 std::cout << "\n";
             }
         }
-        writeSummary(std::cout, hits_output, sessions_matched, 1, files_walked, truncated, elapsed);
+        writeSummary(std::cout, hits_output, sessions_matched, roots_walked, files_walked, truncated, elapsed);
         std::cout << '\n';
     }
 
