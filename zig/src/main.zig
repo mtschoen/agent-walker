@@ -560,12 +560,8 @@ pub fn modelCost(inp: u64, out_: u64, cr: u64, cw: u64, web_searches: u64, model
     var buf: [256]u8 = undefined;
     const n = @min(model.len, buf.len);
     const lo = std.ascii.lowerString(buf[0..n], model[0..n]);
-    const ir: f64 = if (std.mem.indexOf(u8, lo, "opus") != null) 5.0
-    else if (std.mem.indexOf(u8, lo, "haiku") != null) 1.0
-    else 3.0;
-    const or_: f64 = if (std.mem.indexOf(u8, lo, "opus") != null) 25.0
-    else if (std.mem.indexOf(u8, lo, "haiku") != null) 5.0
-    else 15.0;
+    const ir: f64 = if (std.mem.indexOf(u8, lo, "opus") != null) 5.0 else if (std.mem.indexOf(u8, lo, "haiku") != null) 1.0 else 3.0;
+    const or_: f64 = if (std.mem.indexOf(u8, lo, "opus") != null) 25.0 else if (std.mem.indexOf(u8, lo, "haiku") != null) 5.0 else 15.0;
     const token_cost = (@as(f64, @floatFromInt(inp)) * ir +
         @as(f64, @floatFromInt(cr)) * ir * 0.10 +
         @as(f64, @floatFromInt(cw)) * ir * 1.25 +

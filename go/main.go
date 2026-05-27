@@ -534,7 +534,7 @@ func runCost(rawArgs []string) {
 			defer workerGroup.Done()
 			for paths := range work {
 				r := walkGroup(paths, periodCutoff, args.winStartUnix)
-				results <- result{trailing: r.trailing, window: r.window}
+				results <- result(r)
 			}
 		}()
 	}

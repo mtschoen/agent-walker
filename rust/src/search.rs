@@ -358,8 +358,8 @@ fn nudge_to_whitespace(text: &str, cut: usize, direction: i32, max_nudge: usize)
         }
     } else {
         let hi = (cut + max_nudge).min(text.len());
-        for i in cut..hi {
-            if text.is_char_boundary(i) && bytes[i].is_ascii_whitespace() {
+        for (i, &b) in bytes.iter().enumerate().take(hi).skip(cut) {
+            if text.is_char_boundary(i) && b.is_ascii_whitespace() {
                 return i;
             }
         }
@@ -406,12 +406,10 @@ struct ContextTurn {
 }
 
 fn role_matches(filter: Role, role: &str) -> bool {
-    match (filter, role) {
-        (Role::Both, _) => true,
-        (Role::User, "user") => true,
-        (Role::Assistant, "assistant") => true,
-        _ => false,
-    }
+    matches!(
+        (filter, role),
+        (Role::Both, _) | (Role::User, "user") | (Role::Assistant, "assistant")
+    )
 }
 
 fn build_context_turns(
@@ -532,22 +530,26 @@ fn hit_to_json(h: &Hit) -> Value {
     })
 }
 
-fn summary_json(
-    hits: usize,
+/// Aggregate counters for a completed search, shared by the JSON-summary and
+/// pretty-print output paths (replaces a 6-arg group threaded through both).
+struct SearchSummary {
+    total_hits: usize,
     sessions_matched: usize,
     roots_walked: usize,
     files_walked: usize,
     truncated: bool,
     elapsed_ms: u64,
-) -> Value {
+}
+
+fn summary_json(summary: &SearchSummary) -> Value {
     json!({
         "type": "summary",
-        "hits": hits,
-        "sessions_matched": sessions_matched,
-        "roots_walked": roots_walked,
-        "files_walked": files_walked,
-        "truncated": truncated,
-        "elapsed_ms": elapsed_ms,
+        "hits": summary.total_hits,
+        "sessions_matched": summary.sessions_matched,
+        "roots_walked": summary.roots_walked,
+        "files_walked": summary.files_walked,
+        "truncated": summary.truncated,
+        "elapsed_ms": summary.elapsed_ms,
     })
 }
 
@@ -562,16 +564,7 @@ fn write_jsonl(hits: &[Hit], summary: &Value, suppress_hits: bool) {
     let _ = writeln!(out, "{}", summary);
 }
 
-fn write_pretty(
-    hits: &[Hit],
-    total_hits: usize,
-    sessions_matched: usize,
-    roots_walked: usize,
-    files_walked: usize,
-    truncated: bool,
-    elapsed_ms: u64,
-    suppress_hits: bool,
-) {
+fn write_pretty(hits: &[Hit], summary: &SearchSummary, suppress_hits: bool) {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     if !suppress_hits {
@@ -602,7 +595,8 @@ fn write_pretty(
     let _ = writeln!(
         out,
         "{} hits in {} sessions across {} roots ({} files). truncated={} elapsed {}ms.",
-        total_hits, sessions_matched, roots_walked, files_walked, truncated, elapsed_ms
+        summary.total_hits, summary.sessions_matched, summary.roots_walked,
+        summary.files_walked, summary.truncated, summary.elapsed_ms
     );
 }
 
@@ -701,27 +695,18 @@ pub fn run(raw: &[String]) {
     }
 
     let elapsed_ms = started.elapsed().as_millis() as u64;
-    let summary = summary_json(
-        if args.count_only { total_unfiltered } else { hits.len() },
+    let summary_stats = SearchSummary {
+        total_hits: if args.count_only { total_unfiltered } else { hits.len() },
         sessions_matched,
         roots_walked,
         files_walked,
         truncated,
         elapsed_ms,
-    );
+    };
 
     match args.format {
-        Format::Jsonl => write_jsonl(&hits, &summary, args.count_only),
-        Format::Pretty => write_pretty(
-            &hits,
-            if args.count_only { total_unfiltered } else { hits.len() },
-            sessions_matched,
-            roots_walked,
-            files_walked,
-            truncated,
-            elapsed_ms,
-            args.count_only,
-        ),
+        Format::Jsonl => write_jsonl(&hits, &summary_json(&summary_stats), args.count_only),
+        Format::Pretty => write_pretty(&hits, &summary_stats, args.count_only),
     }
 
     if truncated {

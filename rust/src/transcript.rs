@@ -58,10 +58,9 @@ pub(crate) fn rates_for(model: &str) -> (f64, f64) {
         (5.0, 25.0)
     } else if m.contains("haiku") {
         (1.0, 5.0)
-    } else if m.contains("sonnet") {
-        (3.0, 15.0)
     } else {
-        (3.0, 15.0) // unknown -> sonnet, per spec
+        // sonnet — and any unknown model falls back to sonnet rates, per SPEC.md
+        (3.0, 15.0)
     }
 }
 

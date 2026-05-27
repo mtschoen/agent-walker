@@ -410,14 +410,13 @@ void walk_entries_for_history(const fs::path& path, AssistantCb&& assistant_cb, 
                                     first_text = false;
                                 }
                             }
-                        } else if (ct == sj::ondemand::json_type::string) {
-                            // Bare-string content: real user prompt, no
-                            // text blocks (assistant entries never use this
-                            // shape). Consume so on-demand cursor advances.
-                            content_was_array = false;
-                            std::string_view sv;
-                            (void)val.get_string().get(sv);
                         } else {
+                            // Non-array content (bare string = real user prompt
+                            // in the older format; any other scalar can't carry a
+                            // tool_result block either). simdjson on-demand
+                            // auto-skips unconsumed scalars when iteration
+                            // advances, and val.type() above peeked without
+                            // consuming — so nothing more is needed here.
                             content_was_array = false;
                         }
                     }

@@ -100,7 +100,7 @@ fn find_latest_in_path(path: &Path, re: &Regex) -> Option<(Beacon, f64)> {
             }
         }
         if let Some(b) = entry_beacon {
-            if latest.as_ref().map_or(true, |(_, t)| ts >= *t) {
+            if latest.as_ref().is_none_or(|(_, t)| ts >= *t) {
                 latest = Some((b, ts));
             }
         }
@@ -498,7 +498,10 @@ pub fn run_history(args: &[String]) {
     // regex::Regex is Send+Sync for read-only matching, so the shared `re`
     // works across workers. Each task gets local beacons/events buffers; final
     // pair tuples are concatenated via reduce.
-    let (pairs, pair_meta): (Vec<(f64, f64)>, Vec<(f64, f64, f64)>) = pool.install(|| {
+    // Aliases keep the binding readable (clippy::type_complexity).
+    type BiasPairs = Vec<(f64, f64)>; // (begin_eta, active_elapsed)
+    type PairMeta = Vec<(f64, f64, f64)>; // (wall, idle, active)
+    let (pairs, pair_meta): (BiasPairs, PairMeta) = pool.install(|| {
         group_paths
             .par_iter()
             .map(|paths| {

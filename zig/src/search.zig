@@ -69,10 +69,7 @@ fn parseArgs(alloc: Allocator, raw: [][]const u8) !SearchArgs {
             case_sensitive = true;
         } else if (std.mem.eql(u8, arg, "--role")) {
             const v = main.grab(raw, &i, "--role");
-            if (std.mem.eql(u8, v, "user")) role = .user
-            else if (std.mem.eql(u8, v, "assistant")) role = .assistant
-            else if (std.mem.eql(u8, v, "both")) role = .both
-            else {
+            if (std.mem.eql(u8, v, "user")) role = .user else if (std.mem.eql(u8, v, "assistant")) role = .assistant else if (std.mem.eql(u8, v, "both")) role = .both else {
                 writeStderrFmt(alloc, "walker: search: --role: invalid value {s}; expected user|assistant|both\n", .{v});
                 std.process.exit(2);
             }
@@ -100,9 +97,7 @@ fn parseArgs(alloc: Allocator, raw: [][]const u8) !SearchArgs {
             include_tool_blocks = true;
         } else if (std.mem.eql(u8, arg, "--format")) {
             const v = main.grab(raw, &i, "--format");
-            if (std.mem.eql(u8, v, "pretty")) format = .pretty
-            else if (std.mem.eql(u8, v, "jsonl")) format = .jsonl
-            else {
+            if (std.mem.eql(u8, v, "pretty")) format = .pretty else if (std.mem.eql(u8, v, "jsonl")) format = .jsonl else {
                 writeStderrFmt(alloc, "walker: search: --format: invalid value {s}; expected pretty|jsonl\n", .{v});
                 std.process.exit(2);
             }
@@ -397,9 +392,18 @@ fn compileRegex(alloc: Allocator, src: []const u8, case_sensitive: bool) ![]Item
         var q: Quant = .one;
         if (i < src.len) {
             switch (src[i]) {
-                '*' => { q = .star; i += 1; },
-                '+' => { q = .plus; i += 1; },
-                '?' => { q = .opt; i += 1; },
+                '*' => {
+                    q = .star;
+                    i += 1;
+                },
+                '+' => {
+                    q = .plus;
+                    i += 1;
+                },
+                '?' => {
+                    q = .opt;
+                    i += 1;
+                },
                 else => {},
             }
         }
@@ -1547,7 +1551,7 @@ pub fn run(gpa: Allocator, argv: [][]const u8) !void {
                 }
             }
             w.appendFmt("{d} hits in {d} sessions across {d} roots ({d} files). truncated={s} elapsed {d}ms.\n", .{
-                hits_output, sessions_matched, roots_walked, files_walked,
+                hits_output,                        sessions_matched, roots_walked, files_walked,
                 if (truncated) "true" else "false", elapsed_ms,
             }) catch {};
             main.writeStdout(w.items());

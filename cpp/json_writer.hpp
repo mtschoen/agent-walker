@@ -29,7 +29,7 @@ inline void write_json_string(std::ostream& os, std::string_view s) {
                     std::snprintf(buffer, sizeof(buffer), "\\u%04x", c);
                     os << buffer;
                 } else {
-                    os.put(c);
+                    os.put(static_cast<char>(c));
                 }
         }
     }

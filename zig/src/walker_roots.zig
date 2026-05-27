@@ -179,4 +179,3 @@ fn isExistingDir(alloc: Allocator, path: []const u8) bool {
         return (statx_buf.mode & 0o170000) == 0o040000;
     }
 }
-
