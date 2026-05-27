@@ -15,10 +15,41 @@ namespace walker {
 
 namespace fs = std::filesystem;
 
+// Single source for the C++ impl's --version string, used by both entry
+// points (main.cpp cost mode + events.cpp). Mirrors the go/zig convention of
+// one constant rather than a hardcoded copy per file; keep CMakeLists'
+// project() version aligned for packaging metadata.
+inline constexpr const char* VERSION = "cpp/0.4.1";
+
+// Read an environment variable into an owning string. On MSVC, uses
+// _dupenv_s (its recommended replacement for the deprecated getenv);
+// elsewhere, std::getenv. Returns nullopt when the variable is unset.
+// Copying to std::string sidesteps both the C4996 deprecation and the
+// pointer-lifetime caveat of getenv.
+inline std::optional<std::string> read_environment_variable(const char* name) {
+#ifdef _MSC_VER
+    char* buffer = nullptr;
+    size_t size = 0;
+    if (_dupenv_s(&buffer, &size, name) != 0 || buffer == nullptr)
+        return std::nullopt;
+    std::string value(buffer);
+    free(buffer);
+    return value;
+#else
+    const char* value = std::getenv(name);
+    if (!value) return std::nullopt;
+    return std::string(value);
+#endif
+}
+
+// Home directory from HOME, falling back to USERPROFILE (Windows).
+inline std::optional<std::string> home_directory() {
+    if (auto home = read_environment_variable("HOME")) return home;
+    return read_environment_variable("USERPROFILE");
+}
+
 inline fs::path default_projects_root() {
-    const char* home = std::getenv("HOME");
-    if (!home) home = std::getenv("USERPROFILE");
-    if (home) return fs::path(home) / ".claude" / "projects";
+    if (auto home = home_directory()) return fs::path(*home) / ".claude" / "projects";
     return fs::path(".claude/projects");
 }
 
@@ -27,6 +58,23 @@ inline double current_unix() {
     return static_cast<double>(
         std::chrono::duration_cast<std::chrono::milliseconds>(tp.time_since_epoch()).count()
     ) / 1000.0;
+}
+
+// (slug, session_id) -> discovery map key. The NUL separator can't appear in
+// either component, so the join is unambiguous. Shared by main.cpp/events.cpp.
+inline std::string group_key(const std::string& slug, const std::string& session_id) {
+    return slug + '\0' + session_id;
+}
+
+// Portable file_time_type -> Unix seconds. std::chrono::clock_cast is C++20
+// but missing from Apple Clang's libc++ (as of Xcode 16); this offset trick
+// works on every implementation. Integer-second precision is plenty for
+// comparing mtime against the discovery cutoff. Shared by main.cpp/events.cpp.
+inline double file_mtime_to_unix(fs::file_time_type mtime) {
+    auto sys_time = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+        mtime - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+    auto seconds = std::chrono::time_point_cast<std::chrono::seconds>(sys_time);
+    return static_cast<double>(seconds.time_since_epoch().count());
 }
 
 // ISO 8601 timestamp parsing — accepts "...Z" or "+HH:MM" offset.

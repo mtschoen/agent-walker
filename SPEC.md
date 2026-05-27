@@ -347,6 +347,17 @@ from, closing the "agent didn't think to check the other host" gap. Ordering
 is newest-first, tiebroken by `(timestamp DESC, session_id ASC, line_number
 ASC)`. `pretty` mode renders the same data human-readably.
 
+**Snippet boundaries.** `match_offsets` and the snippet window are byte
+offsets. The snippet is the byte range `[match_start − ⌊snippet_chars/2⌋,
+match_end + ⌊snippet_chars/2⌋)` clamped to the text, with each end then (1)
+nudged **forward to the next UTF-8 character boundary**, (2) if it was clipped
+(not already at text start/end), nudged outward to the nearest ASCII whitespace
+within ±20 bytes, then (3) nudged forward to a character boundary again. The
+character-boundary nudge is mandatory — offsets are byte offsets, and slicing
+mid-codepoint would emit invalid UTF-8 in `snippet`. The emitted `match_offsets`
+are byte offsets **within the snippet** (the matcher is re-run against the
+snippet text), not within the original message.
+
 Errors (exit 2, stderr diagnostic): empty pattern (`pattern must be
 non-empty`), unparseable regex (`bad regex: <why>`), unparseable
 `--since`/`--until` (`bad time: ...`). Malformed JSONL lines are skipped, never

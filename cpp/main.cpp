@@ -8,6 +8,7 @@
 #include "events.hpp"
 #include "search.hpp"
 #include "common.hpp"
+#include "pricing.hpp"
 #include "walker_roots.hpp"
 
 #include <algorithm>
@@ -70,7 +71,7 @@ static Args parse_args(const std::vector<std::string>& argv) {
         } else if (flag == "--projects-root") {
             args.projects_root = fs::path(next());
         } else if (flag == "--version") {
-            std::cout << "cpp/0.4.1\n";
+            std::cout << walker::VERSION << "\n";
             std::exit(0);
         } else if (flag == "--extra-projects-root") {
             args.extra_projects_roots.emplace_back(next());
@@ -86,54 +87,13 @@ static Args parse_args(const std::vector<std::string>& argv) {
     return args;
 }
 
-// Use the shared default_projects_root from common.hpp.
+// Shared helpers from common.hpp + pricing.hpp. Pricing (rates_for/cost_for),
+// group_key, and file_mtime_to_unix are shared verbatim with events.cpp.
 using walker::default_projects_root;
-
-// ---------------------------------------------------------------------------
-// Pricing
-// ---------------------------------------------------------------------------
-
-struct Rates {
-    double input;   // per MTok
-    double output;  // per MTok
-};
-
-static Rates rates_for(std::string_view model) {
-    // Case-insensitive substring scan without copying or lowercasing the
-    // model string. tolower-comparing only the needle bytes is fine since
-    // "opus"/"haiku" are ASCII.
-    auto contains_ci = [&](std::string_view needle) {
-        if (needle.size() > model.size()) return false;
-        auto eq = [](unsigned char a, unsigned char b) {
-            return std::tolower(a) == std::tolower(b);
-        };
-        return std::search(model.begin(), model.end(),
-                           needle.begin(), needle.end(), eq) != model.end();
-    };
-    if (contains_ci("opus"))  return {5.0, 25.0};
-    if (contains_ci("haiku")) return {1.0, 5.0};
-    // sonnet or unknown -> sonnet rates
-    return {3.0, 15.0};
-}
-
-static double cost_for(
-    uint64_t input_tokens,
-    uint64_t output_tokens,
-    uint64_t cache_read_tokens,
-    uint64_t cache_write_tokens,
-    std::string_view model)
-{
-    auto [i_rate, o_rate] = rates_for(model);
-    return (
-        static_cast<double>(input_tokens) * i_rate
-        + static_cast<double>(cache_read_tokens) * i_rate * 0.10
-        + static_cast<double>(cache_write_tokens) * i_rate * 1.25
-        + static_cast<double>(output_tokens) * o_rate
-    ) / 1'000'000.0;
-}
-
-// ISO 8601 timestamp parsing is in common.hpp (walker::parse_iso8601).
 using walker::parse_iso8601;
+using walker::cost_for;
+using walker::group_key;
+using walker::file_mtime_to_unix;
 
 // ---------------------------------------------------------------------------
 // Group walking
@@ -293,22 +253,6 @@ static GroupResult walk_group(
 // ---------------------------------------------------------------------------
 
 using GroupMap = std::unordered_map<std::string, std::vector<fs::path>>;
-
-// Create a key string for (slug, session_id)
-static std::string group_key(const std::string& slug, const std::string& sid) {
-    return slug + '\0' + sid;
-}
-
-// Portable file_time_type -> Unix seconds. std::chrono::clock_cast is C++20
-// but missing from Apple Clang's libc++ (as of Xcode 16). The offset trick
-// works on every implementation; precision is more than enough for mtime
-// comparison against an integer-second cutoff.
-static double file_mtime_to_unix(fs::file_time_type mtime) {
-    auto sys_time = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-        mtime - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
-    auto secs = std::chrono::time_point_cast<std::chrono::seconds>(sys_time);
-    return static_cast<double>(secs.time_since_epoch().count());
-}
 
 static GroupMap discover_groups(
     const std::vector<fs::path>& roots,

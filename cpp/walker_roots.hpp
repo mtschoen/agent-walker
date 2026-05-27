@@ -28,9 +28,7 @@ namespace walker {
 namespace sj = simdjson;
 
 inline fs::path walker_config_path() {
-    const char* home = std::getenv("HOME");
-    if (!home) home = std::getenv("USERPROFILE");
-    if (home) return fs::path(home) / ".claude" / "walker-roots.json";
+    if (auto home = home_directory()) return fs::path(*home) / ".claude" / "walker-roots.json";
     return fs::path(".claude/walker-roots.json");
 }
 

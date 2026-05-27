@@ -289,6 +289,18 @@ func searchNudgeWS(text string, cut int, direction int, maxNudge int) int {
 	return cut
 }
 
+// searchNudgeCharBoundary nudges idx forward to the next UTF-8 character
+// boundary (mirrors Rust's str::is_char_boundary walk). A continuation byte
+// has top bits 10 (0x80..0xBF); len(text) is always a boundary. Prevents a
+// snippet cut from splitting a multibyte codepoint. See SPEC.md "Snippet
+// boundaries".
+func searchNudgeCharBoundary(text string, idx int) int {
+	for idx < len(text) && text[idx]&0xC0 == 0x80 {
+		idx++
+	}
+	return idx
+}
+
 func searchMakeSnippet(text string, firstMatch [2]uint32, snippetChars uint32) string {
 	halfInt := int(snippetChars / 2)
 	mstart := int(firstMatch[0])
@@ -301,12 +313,16 @@ func searchMakeSnippet(text string, firstMatch [2]uint32, snippetChars uint32) s
 	if hi > len(text) {
 		hi = len(text)
 	}
+	lo = searchNudgeCharBoundary(text, lo)
+	hi = searchNudgeCharBoundary(text, hi)
 	if lo > 0 {
 		lo = searchNudgeWS(text, lo, -1, 20)
 	}
 	if hi < len(text) {
 		hi = searchNudgeWS(text, hi, 1, 20)
 	}
+	lo = searchNudgeCharBoundary(text, lo)
+	hi = searchNudgeCharBoundary(text, hi)
 	return text[lo:hi]
 }
 

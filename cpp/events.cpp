@@ -5,6 +5,8 @@
 
 #include "events.hpp"
 #include "common.hpp"
+#include "pricing.hpp"
+#include "json_writer.hpp"
 #include "walker_roots.hpp"
 
 #include <algorithm>
@@ -43,72 +45,10 @@ struct EventRecord {
     std::string slug;
 };
 
-// ---------------------------------------------------------------------------
-// Pricing (mirrors main.cpp — same formula)
-// ---------------------------------------------------------------------------
-
-struct Rates {
-    double input;
-    double output;
-};
-
-static Rates rates_for(std::string_view model) {
-    auto contains_ci = [&](std::string_view needle) {
-        if (needle.size() > model.size()) return false;
-        auto eq = [](unsigned char a, unsigned char b) {
-            return std::tolower(a) == std::tolower(b);
-        };
-        return std::search(model.begin(), model.end(),
-                           needle.begin(), needle.end(), eq) != model.end();
-    };
-    if (contains_ci("opus"))  return {5.0, 25.0};
-    if (contains_ci("haiku")) return {1.0, 5.0};
-    return {3.0, 15.0};  // sonnet or unknown
-}
-
-static double cost_for(
-    uint64_t input_tokens,
-    uint64_t output_tokens,
-    uint64_t cache_read_tokens,
-    uint64_t cache_write_tokens,
-    std::string_view model)
-{
-    auto [i_rate, o_rate] = rates_for(model);
-    return (
-        static_cast<double>(input_tokens) * i_rate
-        + static_cast<double>(cache_read_tokens) * i_rate * 0.10
-        + static_cast<double>(cache_write_tokens) * i_rate * 1.25
-        + static_cast<double>(output_tokens) * o_rate
-    ) / 1'000'000.0;
-}
-
-// ---------------------------------------------------------------------------
-// JSON string writer (mirrors search.cpp's writeJsonString)
-// ---------------------------------------------------------------------------
-
-static void write_json_string(std::ostream& os, std::string_view s) {
-    os.put('"');
-    for (unsigned char c : s) {
-        switch (c) {
-            case '"':  os << "\\\""; break;
-            case '\\': os << "\\\\"; break;
-            case '\b': os << "\\b"; break;
-            case '\f': os << "\\f"; break;
-            case '\n': os << "\\n"; break;
-            case '\r': os << "\\r"; break;
-            case '\t': os << "\\t"; break;
-            default:
-                if (c < 0x20) {
-                    char buf[8];
-                    snprintf(buf, sizeof(buf), "\\u%04x", c);
-                    os << buf;
-                } else {
-                    os.put(c);
-                }
-        }
-    }
-    os.put('"');
-}
+// Pricing (rates_for / cost_for) lives in pricing.hpp and the JSON string
+// writer in json_writer.hpp — the same shared definitions cost mode and the
+// search subcommand use. Both resolve unqualified here via the enclosing
+// walker namespace.
 
 // ---------------------------------------------------------------------------
 // Argument parsing
@@ -156,7 +96,7 @@ static Args parse_args(const std::vector<std::string>& argv) {
         } else if (flag == "--no-config") {
             args.read_config = false;
         } else if (flag == "--version") {
-            std::cout << "cpp/0.4.1\n";
+            std::cout << walker::VERSION << "\n";
             std::exit(0);
         } else {
             die(std::string("unknown flag: ") + flag);
@@ -173,10 +113,6 @@ static Args parse_args(const std::vector<std::string>& argv) {
 // ---------------------------------------------------------------------------
 
 using GroupMap = std::unordered_map<std::string, std::vector<fs::path>>;
-
-static std::string group_key(const std::string& slug, const std::string& sid) {
-    return slug + '\0' + sid;
-}
 
 static GroupMap discover_groups(
     const std::vector<fs::path>& roots,
@@ -199,12 +135,7 @@ static GroupMap discover_groups(
                 if (path.extension() != ".jsonl") continue;
 
                 auto mtime = fs::last_write_time(path, ec);
-                if (!ec) {
-                    auto sys_time = std::chrono::time_point_cast<std::chrono::seconds>(
-                        mtime - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
-                    double mtime_unix = static_cast<double>(sys_time.time_since_epoch().count());
-                    if (mtime_unix < earliest) continue;
-                }
+                if (!ec && file_mtime_to_unix(mtime) < earliest) continue;
 
                 std::string sid = path.stem().string();
                 groups[group_key(slug, sid)].push_back(path);
@@ -227,12 +158,7 @@ static GroupMap discover_groups(
                     if (fname.substr(0, 6) != "agent-") continue;
 
                     auto mtime = fs::last_write_time(apath, ec);
-                    if (!ec) {
-                        auto sys_time = std::chrono::time_point_cast<std::chrono::seconds>(
-                            mtime - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
-                        double mtime_unix = static_cast<double>(sys_time.time_since_epoch().count());
-                        if (mtime_unix < earliest) continue;
-                    }
+                    if (!ec && file_mtime_to_unix(mtime) < earliest) continue;
 
                     groups[group_key(slug, sid)].push_back(apath);
                 }

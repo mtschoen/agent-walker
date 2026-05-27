@@ -116,6 +116,73 @@ def find_offset(text: str, needle: str, *, case_sensitive: bool = False) -> tupl
     return (idx, idx + len(needle))
 
 
+# Byte-level snippet reference ----------------------------------------------
+# Replicates the snippet construction every impl performs (see SPEC.md
+# "Snippet boundaries"). Works on UTF-8 *bytes* because offsets are byte
+# offsets; the char-boundary nudge keeps a cut from splitting a codepoint.
+
+_WHITESPACE = b" \t\n\r"
+
+
+def _nudge_char_boundary(data: bytes, idx: int) -> int:
+    """Nudge idx forward to the next UTF-8 character boundary."""
+    while idx < len(data) and (data[idx] & 0xC0) == 0x80:
+        idx += 1
+    return idx
+
+
+def _nudge_to_whitespace(data: bytes, cut: int, direction: int, max_nudge: int) -> int:
+    """Nudge cut outward to the nearest ASCII whitespace within max_nudge bytes."""
+    if cut == 0 or cut == len(data):
+        return cut
+    if direction < 0:
+        lo = max(cut - max_nudge, 0)
+        for i in range(cut, lo, -1):
+            if data[i - 1] in _WHITESPACE:
+                return i
+    else:
+        hi = min(cut + max_nudge, len(data))
+        for i in range(cut, hi):
+            if data[i] in _WHITESPACE:
+                return i
+    return cut
+
+
+def snippet_and_offsets(
+    text: str, needle: str, snippet_chars: int, *, case_sensitive: bool = False
+) -> tuple[str, list[list[int]]]:
+    """Return (snippet, match_offsets-within-snippet) for the first match of a
+    literal `needle` in `text`, mirroring the impls. match_offsets are byte
+    offsets within the emitted snippet (the matcher is re-run on the snippet)."""
+    data = text.encode("utf-8")
+    nbytes = needle.encode("utf-8")
+    hay = data if case_sensitive else data.lower()
+    nee = nbytes if case_sensitive else nbytes.lower()
+    mstart = hay.find(nee)
+    assert mstart >= 0, f"needle {needle!r} not found in {text!r}"
+    mend = mstart + len(nbytes)
+
+    half = snippet_chars // 2
+    lo = _nudge_char_boundary(data, max(mstart - half, 0))
+    hi = _nudge_char_boundary(data, min(mend + half, len(data)))
+    if lo > 0:
+        lo = _nudge_to_whitespace(data, lo, -1, 20)
+    if hi < len(data):
+        hi = _nudge_to_whitespace(data, hi, 1, 20)
+    lo = _nudge_char_boundary(data, lo)
+    hi = _nudge_char_boundary(data, hi)
+    snip = data[lo:hi]
+
+    # Re-run the (non-overlapping) matcher against the snippet bytes.
+    snip_hay = snip if case_sensitive else snip.lower()
+    offsets: list[list[int]] = []
+    pos = 0
+    while (found := snip_hay.find(nee, pos)) >= 0:
+        offsets.append([found, found + len(nbytes)])
+        pos = found + len(nbytes)
+    return snip.decode("utf-8"), offsets
+
+
 def hit(
     *,
     session_id: str,
@@ -685,6 +752,38 @@ def scenario_10_context_zero():
     return scenario, files, expected
 
 
+def scenario_11_multibyte_snippet_boundary():
+    """Multibyte UTF-8 around the match + a small --snippet-chars forces the
+    snippet cut to land mid-codepoint. There is no whitespace near the cut, so
+    the whitespace nudge is a no-op and ONLY the char-boundary nudge keeps the
+    snippet valid UTF-8. Without it, three of the four impls would slice a
+    partial codepoint. See SPEC.md "Snippet boundaries"."""
+    scenario = "11-multibyte-snippet-boundary"
+    t1 = NOW_UNIX - 1000
+    # 6 three-byte CJK chars, "needle", 6 more — no spaces anywhere.
+    text = "中" * 6 + "needle" + "中" * 6
+    files = {"sid1.jsonl": [assistant_text(t1, "msg_11_a1", text)]}
+    snip, offsets = snippet_and_offsets(text, "needle", 20)
+    hits = [
+        hit(
+            session_id="sid1", cwd_slug=scenario, line_number=1,
+            timestamp=iso(t1), role="assistant", snippet=snip,
+            match_offsets=offsets,
+        ),
+    ]
+    expected = {
+        "snippet-chars-20": {
+            "description": "Multibyte chars + small --snippet-chars: snippet must "
+                           "stay on UTF-8 boundaries (no split codepoints).",
+            "pattern": "needle",
+            "flags": ["--snippet-chars", "20"],
+            "hits": hits,
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+    }
+    return scenario, files, expected
+
+
 SCENARIOS = [
     scenario_01_basic,
     scenario_02_multi_match_per_session,
@@ -696,6 +795,7 @@ SCENARIOS = [
     scenario_08_time_window,
     scenario_09_count_only,
     scenario_10_context_zero,
+    scenario_11_multibyte_snippet_boundary,
 ]
 
 

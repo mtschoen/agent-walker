@@ -99,7 +99,7 @@ def run_walker(lang: str, binary: Path, meta: dict, projects_root: Path, extras:
     ]
     for extra in extras or []:
         cmd.extend(["--extra-projects-root", str(extra)])
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=10)
     if result.returncode != 0:
         raise RuntimeError(
             f"{binary.name} exited {result.returncode}\n"
@@ -171,7 +171,7 @@ def check_implementation(lang: str, binary: Path, expected: dict) -> bool:
 def run_walker_subcommand(lang: str, binary: Path, subcommand: str, args: list[str]) -> dict:
     """Invoke a walker subcommand, return parsed JSON of last stdout line."""
     cmd = [str(binary), subcommand, *args, "--no-config"]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=10)
     if result.returncode != 0:
         raise RuntimeError(
             f"{binary.name} {subcommand} exited {result.returncode}\n"
@@ -338,7 +338,7 @@ def run_walker_search(
         "--no-config",
         *flags,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=10)
     if result.returncode != 0:
         raise RuntimeError(
             f"{binary.name} search exited {result.returncode}\n"
@@ -476,7 +476,7 @@ def check_events(lang: str, binary: Path) -> bool:
             "--now", repr(pin_now),
             "--no-config",
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=10)
         if result.returncode != 0:
             print(
                 f"  [{lang:>4s}] {label:30s} FAIL  "

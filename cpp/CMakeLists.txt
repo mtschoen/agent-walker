@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
-project(walker VERSION 0.3.0 LANGUAGES CXX)
+# --version string is authoritative in cpp/common.hpp (walker::VERSION);
+# keep this in sync for packaging metadata.
+project(walker VERSION 0.4.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

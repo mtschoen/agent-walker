@@ -1224,14 +1224,28 @@ fn nudgeWhitespace(text: []const u8, cut: usize, direction: i32, max_nudge: usiz
     return cut;
 }
 
+// Nudge idx forward to the next UTF-8 character boundary (mirrors Rust's
+// str::is_char_boundary walk). A continuation byte has top bits 10
+// (0x80..0xBF); text.len is always a boundary. Prevents a snippet cut from
+// splitting a multibyte codepoint. See SPEC.md "Snippet boundaries".
+fn nudgeCharBoundary(text: []const u8, idx_in: usize) usize {
+    var idx = idx_in;
+    while (idx < text.len and (text[idx] & 0xC0) == 0x80) : (idx += 1) {}
+    return idx;
+}
+
 fn makeSnippet(text: []const u8, first_match: [2]usize, snippet_chars: u32) []const u8 {
     const half: usize = @intCast(snippet_chars / 2);
     const mstart = first_match[0];
     const mend = first_match[1];
     var lo: usize = if (mstart > half) mstart - half else 0;
     var hi: usize = @min(mend + half, text.len);
+    lo = nudgeCharBoundary(text, lo);
+    hi = nudgeCharBoundary(text, hi);
     if (lo > 0) lo = nudgeWhitespace(text, lo, -1, 20);
     if (hi < text.len) hi = nudgeWhitespace(text, hi, 1, 20);
+    lo = nudgeCharBoundary(text, lo);
+    hi = nudgeCharBoundary(text, hi);
     return text[lo..hi];
 }
 

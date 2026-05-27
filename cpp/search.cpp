@@ -4,6 +4,7 @@
 
 #include "search.hpp"
 #include "common.hpp"
+#include "json_writer.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -226,7 +227,16 @@ static bool roleMatches(const std::string& filter, const std::string& role) {
 
 // === Snippet generation ===
 
+// Nudge `idx` forward to the next UTF-8 character boundary (mirrors Rust's
+// str::is_char_boundary walk in search.rs). A byte is a continuation byte iff
+// its top two bits are 10 (0x80..0xBF); idx == size() is always a boundary.
+// Without this, a snippet cut can split a multibyte codepoint and emit invalid
+// UTF-8 into the JSON `snippet` field. See SPEC.md "Snippet boundaries".
 static size_t nudgeCharBoundary(std::string_view text, size_t idx) {
+    while (idx < text.size() &&
+           (static_cast<unsigned char>(text[idx]) & 0xC0) == 0x80) {
+        ++idx;
+    }
     return idx;
 }
 
@@ -304,30 +314,8 @@ struct Hit {
 };
 
 // === JSON escaping ===
-
-static void writeJsonString(std::ostream& os, std::string_view s) {
-    os.put('"');
-    for (unsigned char c : s) {
-        switch (c) {
-            case '"':  os << "\\\""; break;
-            case '\\': os << "\\\\"; break;
-            case '\b': os << "\\b"; break;
-            case '\f': os << "\\f"; break;
-            case '\n': os << "\\n"; break;
-            case '\r': os << "\\r"; break;
-            case '\t': os << "\\t"; break;
-            default:
-                if (c < 0x20) {
-                    char buf[8];
-                    snprintf(buf, sizeof(buf), "\\u%04x", c);
-                    os << buf;
-                } else {
-                    os.put(c);
-                }
-        }
-    }
-    os.put('"');
-}
+// The shared escaper lives in json_writer.hpp (walker::write_json_string);
+// calls below resolve to it unqualified via the enclosing walker namespace.
 
 // === Args ===
 
@@ -355,15 +343,13 @@ static double parseTimeArg(const std::string& s, double now) {
     while (!trimmed.empty() && std::isspace((unsigned char)trimmed.front())) trimmed.erase(trimmed.begin());
     while (!trimmed.empty() && std::isspace((unsigned char)trimmed.back())) trimmed.pop_back();
     if (trimmed.empty()) throw std::runtime_error("empty value");
-    if (!trimmed.empty()) {
-        char last = trimmed.back();
-        if (last == 'd' || last == 'h' || last == 'm' || last == 's') {
-            std::string head = trimmed.substr(0, trimmed.size() - 1);
-            if (!head.empty() && head.find_first_not_of("0123456789.") == std::string::npos) {
-                double n = std::stod(head);
-                double mult = last == 'd' ? 86400.0 : last == 'h' ? 3600.0 : last == 'm' ? 60.0 : 1.0;
-                return now - n * mult;
-            }
+    char last = trimmed.back();
+    if (last == 'd' || last == 'h' || last == 'm' || last == 's') {
+        std::string head = trimmed.substr(0, trimmed.size() - 1);
+        if (!head.empty() && head.find_first_not_of("0123456789.") == std::string::npos) {
+            double n = std::stod(head);
+            double mult = last == 'd' ? 86400.0 : last == 'h' ? 3600.0 : last == 'm' ? 60.0 : 1.0;
+            return now - n * mult;
         }
     }
     auto ts = parse_iso8601(trimmed);
@@ -436,7 +422,7 @@ static Args parseArgs(const std::vector<std::string>& raw) {
     }
 
     if (args.pattern.empty()) throw std::runtime_error("pattern must be non-empty");
-    if (args.cwd.empty() && args.any_cwd) /* match all cwsds */;
+    // cwd empty + any_cwd set -> match all cwds (the default; nothing to do here).
     if (!args.cwd.empty() && args.any_cwd)
         throw std::runtime_error("--cwd and --any-cwd are mutually exclusive");
     args.projects_root = args.projects_root.empty() ? default_projects_root() : args.projects_root;
@@ -558,9 +544,9 @@ static void writeCtxArray(std::ostream& os, const std::vector<Ctx>& ctx) {
     os.put('[');
     for (size_t i = 0; i < ctx.size(); ++i) {
         if (i > 0) os << ',';
-        os << "{\"role\":"; writeJsonString(os, ctx[i].role);
-        os << ",\"text\":"; writeJsonString(os, ctx[i].text);
-        os << ",\"timestamp\":"; writeJsonString(os, ctx[i].ts);
+        os << "{\"role\":"; write_json_string(os, ctx[i].role);
+        os << ",\"text\":"; write_json_string(os, ctx[i].text);
+        os << ",\"timestamp\":"; write_json_string(os, ctx[i].ts);
         os << '}';
     }
     os << ']';
@@ -568,14 +554,14 @@ static void writeCtxArray(std::ostream& os, const std::vector<Ctx>& ctx) {
 
 static void writeHit(std::ostream& os, const Hit& h) {
     os << "{\"type\":\"hit\",";
-    os << "\"session_id\":"; writeJsonString(os, h.session_id);
-    os << ",\"cwd_slug\":"; writeJsonString(os, h.cwd_slug);
-    os << ",\"host_root\":"; writeJsonString(os, h.host_root);
-    os << ",\"file_path\":"; writeJsonString(os, h.file_path);
+    os << "\"session_id\":"; write_json_string(os, h.session_id);
+    os << ",\"cwd_slug\":"; write_json_string(os, h.cwd_slug);
+    os << ",\"host_root\":"; write_json_string(os, h.host_root);
+    os << ",\"file_path\":"; write_json_string(os, h.file_path);
     os << ",\"line_number\":" << h.line_number;
-    os << ",\"timestamp\":"; writeJsonString(os, h.timestamp_str);
-    os << ",\"role\":"; writeJsonString(os, h.role);
-    os << ",\"snippet\":"; writeJsonString(os, h.snippet);
+    os << ",\"timestamp\":"; write_json_string(os, h.timestamp_str);
+    os << ",\"role\":"; write_json_string(os, h.role);
+    os << ",\"snippet\":"; write_json_string(os, h.snippet);
     os << ",\"match_offsets\":[";
     for (size_t i = 0; i < h.match_offsets.size(); ++i) {
         if (i > 0) os << ',';
