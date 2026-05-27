@@ -20,6 +20,7 @@
 
 ## Inbox
 
+- [ ] Implement the beacons-history pairing fix (specced + planned 2026-05-18, walker portion confirmed UNimplemented 2026-05-27). Replace "earliest begin + latest end per session" pairing with a single in-flight `pending_begin` (consecutive begin→end pairs, orphans dropped), and drop `drift` from the required-field set (keep accepting it for back-compat). Currently `bias_factor` is directionally wrong (~3.45 vs measured ~0.5), so status-line calibrated ETAs come out 5–10× too high. Touches SPEC.md + all four impls (cpp/rust/go/zig) + conformance corpus (add multi_lifecycle / orphan_begin / orphan_end / back_to_back fixtures). Spec: docs/superpowers/specs/beacon-pairing-fix.md; plan: docs/superpowers/plans/beacon-pairing-fix.md; memory: project_beacon_pairing_fix.md.
 ### Add per-request web-search cost ($0.01) to the pricing model
 
 The Python reference (`~/schoen-claude-status/statusline_lib.py`,
