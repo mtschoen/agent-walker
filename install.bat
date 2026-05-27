@@ -26,13 +26,13 @@ REM Smoke test: bare-flag invocation routes to cost mode.
 "%INSTALL_DIR%\claude-walker.exe" --period 86400 --win-start 0 >nul || goto :smoke_failed
 echo smoke test ok
 
-REM Warn if install dir isn't on PATH. NOTE: do NOT suggest
-REM `setx PATH "%PATH%;..."` here. At a cmd prompt %PATH% expands to the merged
-REM system+user PATH; setx (no /M) writes the whole thing into the *user* PATH,
-REM duplicating every system entry, and setx silently truncates at 1024 chars,
-REM dropping the tail. Use the PowerShell user-scope SetEnvironmentVariable
-REM method below instead -- it reads only the user PATH and has no length cap.
-echo %PATH% | findstr /I /C:"%INSTALL_DIR%" >nul
+REM Warn only if INSTALL_DIR isn't on the PERSISTED PATH (User or Machine).
+REM Deliberately NOT a grep of this session's %PATH%: after the user adds the
+REM dir (via :path_note or the GUI), this cmd session's %PATH% stays stale until
+REM a new terminal opens, so a %PATH% check would warn on every re-run even
+REM though the dir is permanently installed. The persisted PATH is also exactly
+REM what fresh processes -- the recency-nudge hook, the status line -- will see.
+powershell -NoProfile -Command "$d=('%INSTALL_DIR%').TrimEnd([char]92); $raw=(@([Environment]::GetEnvironmentVariable('Path','User'),[Environment]::GetEnvironmentVariable('Path','Machine')) -join ';'); if ((($raw -split ';' | ForEach-Object { $_.Trim().TrimEnd([char]92) }) -icontains $d)) { exit 0 } else { exit 1 }"
 if errorlevel 1 call :path_note
 
 popd
@@ -40,6 +40,11 @@ endlocal
 exit /b 0
 
 :path_note
+REM Do NOT suggest `setx PATH "%PATH%;..."` here. At a cmd prompt %PATH% is the
+REM merged system+user PATH, so setx (no /M) writes the whole thing into the
+REM *user* PATH (duplicating every system entry) and silently truncates at 1024
+REM chars, dropping the tail. The PowerShell user-scope SetEnvironmentVariable
+REM below reads only the user PATH and has no length cap.
 echo.
 echo Note: %INSTALL_DIR% is not on PATH. Add it before the recency-nudge
 echo hook or status line can find claude-walker by name. To add it to your
