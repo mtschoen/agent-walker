@@ -365,7 +365,7 @@ jobs:
           python shared/coverage.py --baseline rust=97.47,cpp=98.40,go=96.73,zig=93.63
 
       - name: Post coverage status
-        # Posts a Gitea commit status (context=claude-walker/coverage) with
+        # Posts a Gitea commit status (context=pr-crew/coverage) with
         # the cumulative pooled % in the description. Shows up as its own
         # check line on the PR with the percent inline — the workflow's own
         # status line can't be re-described per-run. Modeled on projdash's

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Post the claude-walker/coverage commit status from CI (stdlib only).
+"""Post the pr-crew/coverage commit status from CI (stdlib only).
 
 Reads the cumulative coverage percent from coverage/summary.json (emitted by
 shared/coverage.py) and POSTs it as a Gitea commit status (context=
-claude-walker/coverage) on $GITHUB_SHA using the auto $GITHUB_TOKEN.
+pr-crew/coverage) on $GITHUB_SHA using the auto $GITHUB_TOKEN.
 
 Modeled on projdash/ci/post-coverage-status.py — same status-post shape so
 the percent shows up as its own check line on the PR (the workflow job's
@@ -59,7 +59,7 @@ def _post(state: str, description: str) -> None:
     sha = os.environ["GITHUB_SHA"]
     run_id = os.environ.get("GITHUB_RUN_ID", "")
     body = json.dumps({
-        "context": "claude-walker/coverage",
+        "context": "pr-crew/coverage",
         "state": state,
         "description": description,
         "target_url": f"{server}/{repository}/actions/runs/{run_id}",
@@ -104,7 +104,7 @@ def main(argv: list[str]) -> int:
         return 0
 
     _post("success", description)
-    print(f"posted claude-walker/coverage success: {description}")
+    print(f"posted pr-crew/coverage success: {description}")
     return 0
 
 
