@@ -496,6 +496,8 @@ int main(int argc, char* argv[]) {
     if (subcommand == "beacons-latest") return walker::beacons::run_latest(rest);
     if (subcommand == "beacons-history") return walker::beacons::run_history(rest);
     if (subcommand == "search") return walker::search::run(rest);
-    if (subcommand == "events") return walker::events::run(rest);
-    return 2;  // unreachable
+    // subcommand is one of {"cost", "beacons-latest", "beacons-history",
+    // "search", "events"} by construction above; "events" is the final
+    // branch — no trailing fallback needed.
+    return walker::events::run(rest);
 }
