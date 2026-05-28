@@ -156,6 +156,19 @@ also re-`install` it to `/etc/gitea-runner/` and `systemctl restart
 act_runner` on llamabox. The runner config option line lives in
 `/etc/gitea-runner/config.yaml` under `container.options`.
 
+**Coverage status posting (projdash).** After the gate runs,
+`ci/post-coverage-status.py` reads `coverage/summary.json` (emitted by
+`shared/coverage.py` alongside `TEST-REPORT.md`) and POSTs a Gitea
+commit status. The context MUST be **`pr-crew/coverage`** — that's the
+fleet-wide convention projdash's `pr_crew/coverage_gate.py` strict-
+equals on. Do not rename it to `claude-walker/coverage` or similar —
+projdash silently filters non-matching contexts and the dashboard
+shows no coverage for the repo. The workflow opts into TLS-skip via
+`GITEA_TLS_INSECURE=1` because Python's urllib doesn't honor the
+runner's `GIT_SSL_NO_VERIFY` / `NODE_TLS_REJECT_UNAUTHORIZED` env;
+the script defaults to full verification and supports `GITEA_CA_BUNDLE`
+as the secure alternative.
+
 ## macOS
 
 CI only runs on `ubuntu-latest` + `windows-latest` — there is no macOS
