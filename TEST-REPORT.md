@@ -1,27 +1,27 @@
-claude-walker test report — 2026-05-28T03:50:00+00:00
+claude-walker test report — 2026-05-28T03:54:52+00:00
 ============================================================
 
 Status:       BASELINE (Phase 0 baseline — coverage gate not yet met)
 Conformance:  PASS (520 checks across measured impls)
-Git:          c14ee31 (coverage-phase3-r3-unittests)
+Git:          17841d5 (coverage-phase3-r3-unittests)
 Target:       100% line/statement coverage in all four implementations
 
 Per-implementation coverage
 ------------------------------------------------------------
 impl   metric         covered/total    cover   conformance
-rust   lines              1346/1388   96.97%   PASS (130 ok)
+rust   lines              1381/1423   97.05%   PASS (130 ok)
 cpp    lines              2151/2190   98.22%   PASS (130 ok)
 go     statements         1184/1235   95.87%   PASS (130 ok)
 zig    lines              1909/2107   90.60%   PASS (130 ok)
 
-### rust — 96.97% (42 lines uncovered)
+### rust — 97.05% (42 lines uncovered)
     beacons.rs               362/373    97.05%   <-- 11 uncovered
     content.rs                53/55     96.36%   <-- 2 uncovered
     events.rs                158/164    96.34%   <-- 6 uncovered
     main.rs                  192/196    97.96%   <-- 4 uncovered
     search.rs                475/485    97.94%   <-- 10 uncovered
     transcript.rs             64/72     88.89%   <-- 8 uncovered
-    walker_roots.rs           42/43     97.67%   <-- 1 uncovered
+    walker_roots.rs           77/78     98.72%   <-- 1 uncovered
 
 ### cpp — 98.22% (39 lines uncovered)
     beacons.cpp              770/791    97.35%   <-- 21 uncovered
