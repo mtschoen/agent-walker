@@ -304,7 +304,6 @@ extern "c" fn _NSGetArgv() *[*][*:0]u8;
 extern "c" fn _NSGetArgc() *c_int;
 
 fn getArgsDarwin(alloc: Allocator) ![][]const u8 {
-    if (!is_darwin) unreachable;
     const argc: usize = @intCast(_NSGetArgc().*);
     const argv = _NSGetArgv().*;
     var out: std.ArrayList([]const u8) = .empty;
@@ -352,7 +351,6 @@ fn getArgsLinux(alloc: Allocator) ![][]const u8 {
 }
 
 fn getArgsWindows(alloc: Allocator) ![][]const u8 {
-    if (!is_windows) unreachable;
     const wcmd = platform.GetCommandLineW();
     const wlen = std.mem.len(wcmd);
     const ws = wcmd[0..wlen];
@@ -698,9 +696,8 @@ pub fn parseStringValue(scanner: *std.json.Scanner, alloc: Allocator) !?[]const 
     }
     const tok = try scanner.nextAlloc(alloc, .alloc_if_needed);
     return switch (tok) {
-        .string => |s| s,
-        .allocated_string => |s| s,
-        else => unreachable,
+        .string, .allocated_string => |s| s,
+        else => null,
     };
 }
 
@@ -715,9 +712,8 @@ pub fn parseU64Value(scanner: *std.json.Scanner, alloc: Allocator) !u64 {
     }
     const tok = try scanner.nextAlloc(alloc, .alloc_if_needed);
     const slice: []const u8 = switch (tok) {
-        .number => |s| s,
-        .allocated_number => |s| s,
-        else => unreachable,
+        .number, .allocated_number => |s| s,
+        else => return 0,
     };
     if (std.fmt.parseInt(i64, slice, 10)) |n| {
         return if (n >= 0) @intCast(n) else 0;

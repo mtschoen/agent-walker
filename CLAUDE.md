@@ -98,6 +98,12 @@ is inherited), collects per-language line/statement coverage, and writes
 `TEST-REPORT.md` at the repo root. Exits non-zero until every measured
 impl hits 100%. Roadmap + phase status: `COVERAGE-PLAN.md`.
 
+`--baseline rust=97.47,cpp=98.40,go=96.73,zig=93.63` switches the gate
+from "must be 100%" to "must not regress vs documented thresholds" —
+this is the Phase 4 CI mode locked in until COVERAGE-PLAN items 4 and 6
+close the remaining gap. Raise the floors in the same PR that raises
+coverage.
+
 Per-impl mechanism (see module docstring for detail):
 - **Rust** — cargo-llvm-cov "external test" show-env workflow; the
   release `strip`/`lto` settings that corrupt coverage mapping are
@@ -126,8 +132,11 @@ default discovery path (rebuild release to restore). Coverage runs leave
 
 `.gitea/workflows/ci.yml` builds all four impls on `ubuntu-latest` +
 `windows-latest` (the llamabox Gitea Actions runners) and runs
-`python shared/conformance.py rust cpp go zig` on each. Triggers on
-push to `main`, pull_request to `main`, and `workflow_dispatch`.
+`python shared/conformance.py rust cpp go zig` on each. A third
+`coverage-linux` job builds kcov-master and runs
+`python shared/coverage.py --baseline …` to gate per-impl regression
+against the documented baseline. Triggers on push to `main`,
+pull_request to `main`, and `workflow_dispatch`.
 
 **Footgun:** `conformance.py` silently prints SKIP and exits 0 when
 a binary is missing — a misnamed output path would masquerade as a

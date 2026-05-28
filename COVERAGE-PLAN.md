@@ -1,13 +1,18 @@
 # claude-walker — Plan for 100% test coverage
 
-> Status: **Phases 0–2 complete; Phase 3 substantially advanced** (post 2026-05-27).
+> Status: **Phases 0–4 live; gap to 100% closes in follow-up PRs** (2026-05-28).
 > Pipeline + baseline live (Phases 0–1, `shared/coverage.py` → `TEST-REPORT.md`).
 > Gap matrix written (Phase 2 → `COVERAGE-GAPS.md`). Phase 3 ran three rounds of
 > parallel fan-out (Batches B/C/D + sub-batches A-i/A-ii/A-iii + R3-α/β/γ),
-> lifting all four impls **15.6 / 9.3 / 19.7 / 12.8 pp** over baseline. Current:
-> **rust 97.39% · cpp 98.40% · go 96.57% · zig 93.59%**. Three real bugs fixed
-> along the way (2× Zig `parseTs`, 1× Zig regex parity). NOT at 100% yet —
-> remaining work in §"Resume points" below. Phase 4 (CI gate) not started.
+> then small follow-ups landed items 1/2/3 from the resume list (Zig §F
+> unreachable-asserts restructured, Go walker_roots:71 covered via a
+> wrong-typed-extras fixture, Rust events broken-pipe branch tested in-process).
+> Phase 4 CI gate live: `.gitea/workflows/ci.yml::coverage-linux` runs
+> `shared/coverage.py --baseline …` and fails on regression. Current:
+> **rust 97.47% · cpp 98.40% · go 96.73% · zig 93.63%** (locked as baseline).
+> Three real bugs fixed along the way (2× Zig `parseTs`, 1× Zig regex parity).
+> Remaining work to 100% — items 4 (SPEC under-specs) and 6 (platform seam) —
+> in §"Resume points" below.
 > Goal: every line of production code in **all four impls** exercised by a
 > test, with a checked-in `TEST-REPORT.md` and a CI gate. See
 > `~/.claude/skills/maintaining-full-coverage` for the governing discipline.
@@ -107,26 +112,25 @@ shared gaps get fixed once via fixtures.
 
 ### Resume points (for a future session)
 
-Coverage today: rust 97.39% / cpp 98.40% / go 96.57% / zig 93.59%. The
-gap matrix in `COVERAGE-GAPS.md` is still the right index, but several
-items in §E (dead code) and most of §A (shared fixtures) have landed.
-What's left to push toward 100% and gate it:
+Coverage today: rust 97.47% / cpp 98.40% / go 96.73% / zig 93.63% — locked
+as the CI baseline. The gap matrix in `COVERAGE-GAPS.md` is still the
+right index. Items 1/2/3/5 below have **landed**; 4 and 6 remain:
 
-1. **Zig §F unreachable-asserts** — the 7 lines kcov-master counts that
-   live in `else => unreachable` token arms and `prog orelse unreachable`
-   sites (see §F of `COVERAGE-GAPS.md`). Prefer restructure over a
-   kcov-ignore. Likely worth ~0.3pp on Zig.
-2. **Walker_roots.go:71 typed-unmarshal** — R3-γ documented this as
-   misclassified as dead in Phase 2; a body like
-   `{"extra_roots":[1,2,3]}` does reach it. Add a `wrong-typed-extras`
-   variant to `MALFORMED_CONFIG_VARIANTS` in `conformance.py`. Parity
-   check the other three impls (probably already covered via simdjson
-   typed parse in C++, similar story elsewhere).
-3. **Rust `events.rs` broken-pipe + serialize branches** — R3-γ kept
-   the broken-pipe branch (real, reachable on `walker events | head`).
-   Cover with a `#[cfg(test)] mod tests` block that writes a fixed
-   `EventRecord` slice into a custom `io::Write` that returns
-   `ErrorKind::BrokenPipe` on first write. In-process, deterministic.
+1. ~~**Zig §F unreachable-asserts**~~ — landed. The 8 token-switch /
+   platform-assert sites were restructured (combined `.number,
+   .allocated_number` arms with `else => return null`; deleted the
+   `if (!is_*) unreachable;` defensive guards; folded `parseTimeArg`'s
+   outer suffix-check into the switch so `else => 0.0` is reachable;
+   replaced `prog orelse unreachable` with a defined fallback).
+2. ~~**Walker_roots.go:71 typed-unmarshal**~~ — landed. Added a
+   `wrong-typed-extras` variant to `MALFORMED_CONFIG_VARIANTS` in
+   `shared/conformance.py`: a body of `{"extra_roots":[1,2,3]}` reaches
+   Go's typed `json.Unmarshal` failure branch (line 71); Rust/C++/Zig
+   silently skip non-string elements, both consistent with SPEC.
+3. ~~**Rust `events.rs` broken-pipe + serialize branches**~~ — landed.
+   Extracted `emit_records<W: Write>` and added an in-process test using
+   a `BrokenPipeWriter` that returns `ErrorKind::BrokenPipe` on first
+   write; verifies the loop breaks after one attempt without panicking.
 4. **SPEC under-specifications surfaced by Phase 3 agents** — three
    pretty-format divergences (highlight delimiter spacing, summary line
    format, Go dropping post-match suffix) and three `--include-tool-blocks`
@@ -134,11 +138,11 @@ What's left to push toward 100% and gate it:
    go preserves bytes). Each needs a SPEC decision before a parity test
    can be tightened beyond "substring presence" — not coverage work
    per se but blocks the last few search.* lines.
-5. **Phase 4 CI gate** — extend `.gitea/workflows/ci.yml` to build
-   kcov-master (NOT `apt install kcov` — it's broken on DWARF5 per
-   CLAUDE.md), run `python shared/coverage.py`, and fail on regression.
-   If 100% isn't reached, lock in the current numbers as a documented
-   baseline. The macOS check is local-only (per CLAUDE.md).
+5. ~~**Phase 4 CI gate**~~ — landed. `.gitea/workflows/ci.yml` gained a
+   `coverage-linux` job that builds SimonKagstrom/kcov master and runs
+   `python shared/coverage.py --baseline rust=97.47,cpp=98.40,go=96.73,zig=93.63`.
+   Regression below any threshold fails the job. Raise the floors in the
+   same PR that raises coverage; the macOS check stays local-only.
 6. **Platform branches (§D, the long pole)** — Windows + macOS
    discovery code. Per §5 of this plan, the preferred path is the
    restructure-for-testability seam (inject home dir, dir-lister,

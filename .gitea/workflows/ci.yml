@@ -270,3 +270,74 @@ jobs:
       - name: Run conformance
         shell: pwsh
         run: python shared/conformance.py rust cpp go zig
+
+  coverage-linux:
+    name: Coverage Gate (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build + kcov runtime deps
+        # kcov needs libdw/libcurl/libelf/binutils-dev to build; cmake is
+        # needed for both kcov and the C++ instrumented build.
+        run: |
+          set -e
+          if command -v sudo >/dev/null 2>&1; then SUDO=sudo; else SUDO=; fi
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends \
+            cmake build-essential pkg-config git curl tar xz-utils \
+            libdw-dev libcurl4-openssl-dev libelf-dev libiberty-dev \
+            binutils-dev zlib1g-dev
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        # External-test workflow for collecting Rust coverage off the
+        # conformance harness (see shared/coverage.py::cov_rust).
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Install Zig 0.16.0
+        run: |
+          set -e
+          ZIG_VERSION=0.16.0
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
+          mkdir -p "$HOME/.local/zig"
+          tar -xf /tmp/zig.tar.xz -C "$HOME/.local/zig" --strip-components=1
+          echo "$HOME/.local/zig" >> "$GITHUB_PATH"
+          "$HOME/.local/zig/zig" version
+
+      - name: Build kcov-master (DWARF5-capable)
+        # Stock kcov 43 and liyu1981/zig-kcov both fail on Zig 0.16's
+        # LLVM-backend DWARF5 output (see CLAUDE.md / COVERAGE-PLAN.md).
+        # SimonKagstrom/kcov master is the only one that parses it.
+        # shared/coverage.py discovers it at this exact path (or via
+        # $KCOV) — do not move without updating find_kcov().
+        run: |
+          set -e
+          KCOV_SRC="$HOME/.local/src/kcov-master"
+          if [ ! -x "$KCOV_SRC/build/src/kcov" ]; then
+            git clone --depth=1 https://github.com/SimonKagstrom/kcov.git "$KCOV_SRC"
+            cmake -S "$KCOV_SRC" -B "$KCOV_SRC/build" -DCMAKE_BUILD_TYPE=Release
+            cmake --build "$KCOV_SRC/build" -j
+          fi
+          "$KCOV_SRC/build/src/kcov" --version
+
+      - name: Run coverage gate
+        # Baseline thresholds match TEST-REPORT.md at branch head. Any
+        # impl dropping below its threshold fails CI. Raising the floor
+        # is the path to 100%: do the work in a PR, bump the threshold
+        # here in the same PR. The remaining COVERAGE-PLAN items (4 — SPEC
+        # under-specs, 6 — platform seam) close the gap to 100% from here.
+        run: |
+          python shared/coverage.py --baseline rust=97.47,cpp=98.40,go=96.73,zig=93.63

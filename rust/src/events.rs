@@ -264,21 +264,25 @@ pub(crate) fn run(raw: &[String]) -> i32 {
     });
 
     // Emit NDJSON — one line per record. Lock stdout once for the full write.
-    // serde_json::to_string can't fail on EventRecord (no Map<K,V> keys, no
-    // serializers that error on the fixed primitive/string fields), so we
-    // unwrap rather than carrying a dead error branch. Broken-pipe writes
-    // are silently absorbed: `walker events | head` is a normal usage
-    // pattern, not an error.
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    for record in &all_records {
+    emit_records(&mut out, &all_records);
+
+    0
+}
+
+/// Write one NDJSON line per record. serde_json::to_string can't fail on
+/// EventRecord (no Map<K,V> keys, no serializers that error on the fixed
+/// primitive/string fields), so we unwrap rather than carrying a dead error
+/// branch. Broken-pipe writes are silently absorbed: `walker events | head`
+/// is a normal usage pattern, not an error.
+fn emit_records<W: Write>(out: &mut W, records: &[EventRecord]) {
+    for record in records {
         let line = serde_json::to_string(record).expect("EventRecord serializes");
         if writeln!(out, "{line}").is_err() {
             break;
         }
     }
-
-    0
 }
 
 #[cfg(test)]
@@ -372,6 +376,54 @@ mod tests {
             "slug", "sid", 0.0,
         );
         assert!(recs.is_empty());
+    }
+
+    /// Writer that returns `BrokenPipe` on every write. Mimics `walker events
+    /// | head` closing the pipe after the first record.
+    struct BrokenPipeWriter {
+        writes_attempted: usize,
+    }
+
+    impl std::io::Write for BrokenPipeWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            self.writes_attempted += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        fn write_all(&mut self, _buf: &[u8]) -> std::io::Result<()> {
+            self.writes_attempted += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        }
+    }
+
+    #[test]
+    fn emit_records_absorbs_broken_pipe() {
+        let records = vec![
+            EventRecord { ts: 1.0, usd: 0.1, model: s("sonnet"), session_id: s("sid1"), slug: s("slug1") },
+            EventRecord { ts: 2.0, usd: 0.2, model: s("opus"),   session_id: s("sid2"), slug: s("slug2") },
+            EventRecord { ts: 3.0, usd: 0.3, model: s("haiku"),  session_id: s("sid3"), slug: s("slug3") },
+        ];
+        let mut writer = BrokenPipeWriter { writes_attempted: 0 };
+        // Must NOT panic, must NOT propagate the error.
+        emit_records(&mut writer, &records);
+        // First write fails → loop breaks → exactly one attempt despite 3 records.
+        assert_eq!(writer.writes_attempted, 1);
+    }
+
+    #[test]
+    fn emit_records_writes_all_to_healthy_sink() {
+        let records = vec![
+            EventRecord { ts: 1.0, usd: 0.5, model: s("sonnet"), session_id: s("sid"), slug: s("slug") },
+            EventRecord { ts: 2.0, usd: 0.6, model: s("opus"),   session_id: s("sid"), slug: s("slug") },
+        ];
+        let mut buf: Vec<u8> = Vec::new();
+        emit_records(&mut buf, &records);
+        let text = String::from_utf8(buf).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        // Verify the field order matches SPEC (ts, usd, model, session_id, slug).
+        assert!(lines[0].starts_with(r#"{"ts":1.0,"usd":0.5,"model":"sonnet""#),
+                "unexpected line 0: {}", lines[0]);
     }
 
     #[test]

@@ -184,17 +184,17 @@ fn parseTimeArg(s: []const u8, now: f64) !f64 {
     const trimmed = std.mem.trim(u8, s, " \t\r\n");
     if (trimmed.len == 0) return error.Empty;
     const last = trimmed[trimmed.len - 1];
-    if (last == 'd' or last == 'h' or last == 'm' or last == 's') {
+    const mult: f64 = switch (last) {
+        'd' => 86400.0,
+        'h' => 3600.0,
+        'm' => 60.0,
+        's' => 1.0,
+        else => 0.0,
+    };
+    if (mult > 0.0) {
         const head = trimmed[0 .. trimmed.len - 1];
         if (head.len > 0 and isNumeric(head)) {
             const n = try std.fmt.parseFloat(f64, head);
-            const mult: f64 = switch (last) {
-                'd' => 86400.0,
-                'h' => 3600.0,
-                'm' => 60.0,
-                's' => 1.0,
-                else => unreachable,
-            };
             return now - n * mult;
         }
     }
@@ -506,7 +506,7 @@ fn findAllMatches(alloc: Allocator, pattern: *const Pattern, text: []const u8) !
         return out.toOwnedSlice(alloc);
     }
 
-    const prog = pattern.program orelse unreachable;
+    const prog = pattern.program orelse return out.toOwnedSlice(alloc);
     var pos: usize = 0;
     while (pos <= text.len) {
         if (matchHere(prog.items, 0, text, pos, pattern.case_sensitive)) |end_pos| {

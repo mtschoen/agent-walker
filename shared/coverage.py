@@ -431,7 +431,7 @@ def write_report(results: list[Result]) -> None:
     lines.append("=" * 60)
     lines.append("")
     lines.append(f"Status:       {'PASS' if all_100 else 'BASELINE'} "
-                 f"({'100% all impls' if all_100 else 'Phase 0 baseline — coverage gate not yet met'})")
+                 f"({'100% all impls' if all_100 else 'Phase 4 baseline-gated — CI rejects regression vs ci.yml thresholds'})")
     lines.append(f"Conformance:  {'PASS' if conformance_ok else 'FAIL'} ({total_tests} checks across measured impls)")
     lines.append(f"Git:          {short} ({branch})")
     lines.append(f"Target:       100% line/statement coverage in all four implementations")
@@ -464,8 +464,37 @@ def write_report(results: list[Result]) -> None:
     print(f"\n[coverage] wrote {REPORT}")
 
 
+def _parse_baseline(spec: str) -> dict[str, float]:
+    """Parse `rust=97.47,cpp=98.40,...` into a {lang: percent} threshold map."""
+    out: dict[str, float] = {}
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        lang, _, pct = part.partition("=")
+        lang = lang.strip()
+        if lang not in ALL_LANGS:
+            raise ValueError(f"unknown lang in --baseline: {lang!r}")
+        out[lang] = float(pct.strip())
+    return out
+
+
 def main() -> int:
-    langs = [a for a in sys.argv[1:] if a in ALL_LANGS] or ALL_LANGS
+    # Optional `--baseline rust=97.47,cpp=98.40,go=96.73,zig=93.63` flag.
+    # When supplied, gate on per-impl regression instead of strict 100%;
+    # this is the Phase 4 CI gate locking in the documented baseline until
+    # the remaining COVERAGE-PLAN items (4, 6) close the gap to 100%.
+    args = sys.argv[1:]
+    baseline: dict[str, float] = {}
+    if "--baseline" in args:
+        i = args.index("--baseline")
+        if i + 1 >= len(args):
+            sys.stderr.write("--baseline needs a value (e.g. rust=97.47,cpp=98.40)\n")
+            return 2
+        baseline = _parse_baseline(args[i + 1])
+        args = args[:i] + args[i + 2 :]
+
+    langs = [a for a in args if a in ALL_LANGS] or ALL_LANGS
     COVERAGE_DIR.mkdir(exist_ok=True)
     results: list[Result] = []
     for lang in langs:
@@ -489,6 +518,23 @@ def main() -> int:
 
     write_report(results)
     measured = [r for r in results if r.total > 0]
+
+    if baseline:
+        regressions: list[tuple[str, float, float]] = []
+        for r in measured:
+            want = baseline.get(r.lang)
+            if want is None:
+                continue
+            if r.percent < want:
+                regressions.append((r.lang, r.percent, want))
+        if regressions:
+            print("\n[coverage] BASELINE REGRESSION (below documented thresholds):")
+            for lang, got, want in regressions:
+                print(f"  {lang}: {got:.2f}% < baseline {want:.2f}%")
+            return 1
+        print("\n[coverage] all impls at or above documented baseline.")
+        return 0
+
     all_100 = bool(measured) and all(r.covered == r.total for r in measured)
     return 0 if all_100 else 1
 

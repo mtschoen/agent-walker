@@ -1516,6 +1516,11 @@ MALFORMED_CONFIG_VARIANTS: list[tuple[str, str, bool]] = [
     ("unrelated-key",      '{"unrelated": []}',                    False),
     ("empty-extra-array",  '{"extra_roots": []}',                  False),
     ("nonexistent-extra",  '{"extra_roots": ["/does/not/exist"]}', True),
+    # Valid object with wrong-typed extras array. Reaches Go's typed
+    # json.Unmarshal failure branch (walker_roots.go:71); Rust/C++/Zig
+    # silently skip non-string elements. Diagnostic optional — Go emits
+    # one, the others don't.
+    ("wrong-typed-extras", '{"extra_roots":[1,2,3]}',              False),
 ]
 
 
