@@ -91,7 +91,7 @@ Add `shared/coverage.py` (sibling to `conformance.py`) that:
 Add a `--coverage` flag to `conformance.py` or a thin wrapper so one command
 does the whole thing. Document it in `CLAUDE.md`.
 
-### Phase 2 — Gap analysis
+### Phase 2 — Gap analysis — ✅ DONE (see `COVERAGE-GAPS.md`)
 For each language, read the uncovered-line report and classify every gap:
 - **(a) reachable, untested** → Phase 3 test (most gaps),
 - **(b) dead code** → delete it (the escalation ladder's preferred outcome),
