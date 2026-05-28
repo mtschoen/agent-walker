@@ -681,6 +681,183 @@ def check_help(lang: str, binary: Path) -> bool:
     return all_ok
 
 
+def check_cli_argument_matrix(lang: str, binary: Path) -> bool:
+    """Exit-code matrix for arg-validation across every subcommand.
+
+    Each row drives one invocation and asserts:
+      - exit code (always 2 for the error rows, 0 for --version),
+      - stderr-non-empty when exit is 2 (an impl that exits 2 silently
+        violates the SPEC error-diagnostic contract),
+      - an optional ``stderr_must_contain`` substring for cases where a
+        stable token is documented (e.g. ``--period`` in the missing-period
+        error). Wording past that token is per-impl and NOT pinned.
+
+    The matrix is the SPEC §"## CLI" / §"### Help & usage" contract translated
+    into observable behavior. It catches an impl that drifts off the
+    arg-validation grammar — e.g. a panic on unknown subcommand, or a regex
+    engine that silently accepts an unclosed pattern — without pinning any
+    impl's exact diagnostic text. See COVERAGE-GAPS.md gap A18.
+    """
+    all_ok = True
+
+    def run(args: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [str(binary), *args],
+            capture_output=True, text=True, encoding="utf-8", timeout=10,
+        )
+
+    # (label, args, expected_exit, stderr_must_contain_or_None)
+    #
+    # `--no-config` is appended where the error path is hit *after* roots
+    # resolution (so the impl doesn't waste effort on the user's real config).
+    # Several error paths fail before any roots work, so it's harmless either
+    # way; included consistently for the impls that defer the check.
+    cases: list[tuple[str, list[str], int, str | None]] = [
+        # --- cost mode (no subcommand prefix) ---
+        ("cost: missing --period",
+         ["--win-start", "0", "--no-config"], 2, "--period"),
+        ("cost: missing flag value (--period)",
+         ["--period", "--no-config"], 2, "--period"),
+        ("cost: unparseable --period",
+         ["--period", "x", "--win-start", "0", "--no-config"], 2, "--period"),
+        ("cost: unparseable --win-start",
+         ["--period", "60", "--win-start", "nope", "--no-config"], 2, "--win-start"),
+        ("cost: unparseable --now",
+         ["--period", "60", "--win-start", "0", "--now", "nope", "--no-config"], 2, "--now"),
+        ("cost: unknown flag",
+         ["--period", "60", "--win-start", "0", "--frobnicate", "--no-config"], 2, "--frobnicate"),
+        ("cost: unknown subcommand",
+         ["bogus", "--period", "60", "--win-start", "0", "--no-config"], 2, "bogus"),
+
+        # --- events ---
+        ("events: missing --period",
+         ["events", "--no-config"], 2, "--period"),
+        ("events: unparseable --period",
+         ["events", "--period", "x", "--no-config"], 2, "--period"),
+        ("events: unknown flag",
+         ["events", "--period", "60", "--frobnicate", "--no-config"], 2, "--frobnicate"),
+
+        # --- beacons-latest ---
+        ("beacons-latest: missing --session-id",
+         ["beacons-latest", "--no-config"], 2, "--session-id"),
+        ("beacons-latest: unknown flag",
+         ["beacons-latest", "--session-id", "deadbeef", "--frobnicate", "--no-config"],
+         2, "--frobnicate"),
+
+        # --- beacons-history ---
+        ("beacons-history: missing --period",
+         ["beacons-history", "--no-config"], 2, "--period"),
+        ("beacons-history: unparseable --period",
+         ["beacons-history", "--period", "x", "--no-config"], 2, "--period"),
+        ("beacons-history: unknown flag",
+         ["beacons-history", "--period", "60", "--frobnicate", "--no-config"],
+         2, "--frobnicate"),
+
+        # --- search ---
+        ("search: missing pattern",
+         ["search", "--no-config"], 2, None),
+        ("search: empty pattern",
+         ["search", "", "--no-config"], 2, None),
+        ("search: invalid --role",
+         ["search", "hello", "--role", "bogus", "--no-config"], 2, "--role"),
+        ("search: invalid --format",
+         ["search", "hello", "--format", "bogus", "--no-config"], 2, "--format"),
+        ("search: --cwd + --any-cwd mutex",
+         ["search", "hello", "--cwd", "foo", "--any-cwd", "--no-config"],
+         2, "--cwd"),
+        ("search: duplicate positional",
+         ["search", "a", "b", "--no-config"], 2, None),
+        ("search: malformed regex (trailing backslash)",
+         ["search", "\\", "--regex", "--no-config"], 2, None),
+        ("search: unknown flag",
+         ["search", "hello", "--frobnicate", "--no-config"], 2, "--frobnicate"),
+
+        # --- --version (cost + events) — exit 0, stdout non-empty ---
+        # (kept in the same matrix so reporting stays uniform; the stdout-check
+        # below handles the 0-exit case.)
+        ("--version (cost)", ["--version"], 0, None),
+        ("--version (events)", ["events", "--version"], 0, None),
+    ]
+
+    for label, args, expected_exit, must_contain in cases:
+        result = run(args)
+        ok = result.returncode == expected_exit
+        if ok and expected_exit == 2:
+            # All exit-2 paths MUST emit a diagnostic to stderr.
+            if result.stderr.strip() == "":
+                ok = False
+            if ok and must_contain is not None and must_contain not in result.stderr:
+                ok = False
+        if ok and expected_exit == 0:
+            # --version: stdout non-empty (don't pin the version string).
+            if result.stdout.strip() == "":
+                ok = False
+        badge = " OK " if ok else "FAIL"
+        print(f"  [{lang:>4s}] {'cli/' + label:48s} {badge}")
+        if not ok:
+            stderr_preview = result.stderr.strip().splitlines()[:2]
+            stdout_preview = result.stdout.strip().splitlines()[:2]
+            print(
+                f"        exit={result.returncode} (expected {expected_exit}) "
+                f"must_contain={must_contain!r}"
+            )
+            if stderr_preview:
+                print(f"        stderr: {stderr_preview!r}")
+            if stdout_preview:
+                print(f"        stdout: {stdout_preview!r}")
+            all_ok = False
+
+    return all_ok
+
+
+def check_omit_now_smoke(lang: str, binary: Path) -> bool:
+    """One invocation per mode that omits --now → exit 0.
+
+    The other runners always pass --now (so tests are deterministic), which
+    leaves the "current time when --now is omitted" default code path
+    (``current_unix``/``nowUnix``/…) entirely uncovered. This smoke fires
+    each mode against an empty fixture root so the result is trivially
+    empty — we assert only exit 0 (the value is nondeterministic by design).
+
+    See COVERAGE-GAPS.md §B2.
+    """
+    all_ok = True
+
+    with tempfile.TemporaryDirectory(prefix="walker-omit-now-") as empty:
+        # ``empty`` is an existing-but-empty dir → no transcripts → no output.
+        # SPEC.Roots says non-existent extras get skipped silently; we want a
+        # real-dir to keep the no-warning path (some impls emit a stderr line
+        # for the missing-root case which is fine but noisier than needed).
+        cases: list[tuple[str, list[str]]] = [
+            ("cost", ["--period", "60", "--win-start", "0",
+                      "--projects-root", empty, "--no-config"]),
+            ("events", ["events", "--period", "60", "--win-start", "0",
+                        "--projects-root", empty, "--no-config"]),
+            ("beacons-history", ["beacons-history", "--period", "60",
+                                  "--win-start", "0",
+                                  "--projects-root", empty, "--no-config"]),
+            ("beacons-latest", ["beacons-latest", "--session-id", "deadbeef",
+                                "--projects-root", empty, "--no-config"]),
+            ("search", ["search", "hello",
+                        "--projects-root", empty, "--no-config",
+                        "--format", "jsonl"]),
+        ]
+        for label, args in cases:
+            result = subprocess.run(
+                [str(binary), *args],
+                capture_output=True, text=True, encoding="utf-8", timeout=10,
+            )
+            ok = result.returncode == 0
+            badge = " OK " if ok else "FAIL"
+            print(f"  [{lang:>4s}] {'omit-now/' + label:48s} {badge}")
+            if not ok:
+                print(f"        exit={result.returncode} "
+                      f"stderr={result.stderr.strip()[:200]!r}")
+                all_ok = False
+
+    return all_ok
+
+
 def run_walker_env(
     lang: str, binary: Path, meta: dict, env: dict, projects_root: Path | None = None
 ) -> dict:
@@ -803,6 +980,10 @@ def main():
         if not check_events(lang, binary):
             overall_ok = False
         if not check_help(lang, binary):
+            overall_ok = False
+        if not check_cli_argument_matrix(lang, binary):
+            overall_ok = False
+        if not check_omit_now_smoke(lang, binary):
             overall_ok = False
         print()
 
