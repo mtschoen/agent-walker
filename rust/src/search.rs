@@ -880,10 +880,10 @@ mod tests {
         // Cutoff far in the future → entry is filtered out.
         let far_future = SystemTime::now()
             .duration_since(UNIX_EPOCH).unwrap().as_secs_f64() + 1e9;
-        let files = discover_files(&[root.clone()], Some(far_future), None);
+        let files = discover_files(std::slice::from_ref(&root), Some(far_future), None);
         assert!(files.is_empty());
         // Without a cutoff, the file is discovered.
-        let files2 = discover_files(&[root.clone()], None, None);
+        let files2 = discover_files(std::slice::from_ref(&root), None, None);
         assert_eq!(files2.len(), 1);
         let _ = fs::remove_dir_all(&root);
     }

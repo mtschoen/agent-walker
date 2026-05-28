@@ -83,6 +83,50 @@ pub fn read_extra_roots_from_config() -> Vec<PathBuf> {
     extras
 }
 
+pub fn resolve_roots(
+    primary: PathBuf,
+    cli_extras: &[PathBuf],
+    read_config: bool,
+) -> Vec<PathBuf> {
+    let mut combined: Vec<(PathBuf, bool)> = Vec::new();
+    combined.push((primary, true));
+    for p in cli_extras {
+        combined.push((p.clone(), false));
+    }
+    if read_config {
+        for p in read_extra_roots_from_config() {
+            combined.push((p, false));
+        }
+    }
+
+    let mut result = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for (path, is_primary) in combined {
+        if !path.exists() || !path.is_dir() {
+            if !is_primary {
+                eprintln!(
+                    "walker: extra root not a directory, skipping: {}",
+                    path.display()
+                );
+            }
+            continue;
+        }
+        // Dedup by canonical path (realpath) per SPEC, but WALK the original
+        // path. On Windows `fs::canonicalize` returns extended-length `\\?\`
+        // verbatim forms — and a mapped network drive (e.g. `Y:`) resolves to
+        // a UNC target — which the `glob`-based discovery in transcript.rs
+        // cannot enumerate, silently dropping the whole root. The canonical
+        // form is only needed to detect two roots pointing at the same place.
+        let key = fs::canonicalize(&path)
+            .map(|c| c.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+        if seen.insert(key) {
+            result.push(path);
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,48 +259,4 @@ mod tests {
         fs::create_dir_all(&p).unwrap();
         p
     }
-}
-
-pub fn resolve_roots(
-    primary: PathBuf,
-    cli_extras: &[PathBuf],
-    read_config: bool,
-) -> Vec<PathBuf> {
-    let mut combined: Vec<(PathBuf, bool)> = Vec::new();
-    combined.push((primary, true));
-    for p in cli_extras {
-        combined.push((p.clone(), false));
-    }
-    if read_config {
-        for p in read_extra_roots_from_config() {
-            combined.push((p, false));
-        }
-    }
-
-    let mut result = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    for (path, is_primary) in combined {
-        if !path.exists() || !path.is_dir() {
-            if !is_primary {
-                eprintln!(
-                    "walker: extra root not a directory, skipping: {}",
-                    path.display()
-                );
-            }
-            continue;
-        }
-        // Dedup by canonical path (realpath) per SPEC, but WALK the original
-        // path. On Windows `fs::canonicalize` returns extended-length `\\?\`
-        // verbatim forms — and a mapped network drive (e.g. `Y:`) resolves to
-        // a UNC target — which the `glob`-based discovery in transcript.rs
-        // cannot enumerate, silently dropping the whole root. The canonical
-        // form is only needed to detect two roots pointing at the same place.
-        let key = fs::canonicalize(&path)
-            .map(|c| c.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| path.to_string_lossy().into_owned());
-        if seen.insert(key) {
-            result.push(path);
-        }
-    }
-    result
 }

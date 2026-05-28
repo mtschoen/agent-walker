@@ -222,7 +222,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0)) + 1e9;
-        let groups = discover_groups(&[root.clone()], far_future);
+        let groups = discover_groups(std::slice::from_ref(&root), far_future);
         assert!(groups.is_empty(), "future cutoff should prune everything, got {:?}", groups);
         let _ = fs::remove_dir_all(&root);
     }
@@ -235,7 +235,7 @@ mod tests {
         fs::create_dir_all(&subagents).unwrap();
         let agent_file = subagents.join("agent-aaa.jsonl");
         fs::write(&agent_file, b"").unwrap();
-        let groups = discover_groups(&[root.clone()], 0.0);
+        let groups = discover_groups(std::slice::from_ref(&root), 0.0);
         // Subagent file should be discovered under (slug, session-1).
         let key = ("slug".to_string(), "session-1".to_string());
         assert!(groups.contains_key(&key), "expected key in {:?}", groups.keys().collect::<Vec<_>>());

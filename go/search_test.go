@@ -251,8 +251,10 @@ func TestIsSearchNumeric(t *testing.T) {
 	if isSearchNumeric("1a") {
 		t.Error("1a should not be numeric")
 	}
-	if isSearchNumeric("") {
-		// empty is treated as numeric (vacuously true). Just don't crash.
+	// Empty input — function returns true (vacuously). Just don't crash;
+	// assert the actual behavior so staticcheck SA4017 stays quiet.
+	if !isSearchNumeric("") {
+		t.Error("empty string should be considered numeric (vacuous all)")
 	}
 }
 

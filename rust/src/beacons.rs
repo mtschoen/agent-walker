@@ -742,12 +742,8 @@ mod tests {
     fn find_latest_in_path_picks_highest_ts_beacon() {
         let dir = tempdir_path("latest");
         let path = dir.join("session.jsonl");
-        let line_a = format!(
-            r#"{{"timestamp":"2025-01-01T00:00:00Z","message":{{"role":"assistant","content":[{{"type":"text","text":"<progress-beacon>{{\"kind\":\"report\",\"eta_seconds\":1,\"summary\":\"a\"}}</progress-beacon>"}}]}}}}"#
-        );
-        let line_b = format!(
-            r#"{{"timestamp":"2025-01-02T00:00:00Z","message":{{"role":"assistant","content":[{{"type":"text","text":"<progress-beacon>{{\"kind\":\"report\",\"eta_seconds\":2,\"summary\":\"b\"}}</progress-beacon>"}}]}}}}"#
-        );
+        let line_a = r#"{"timestamp":"2025-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"<progress-beacon>{\"kind\":\"report\",\"eta_seconds\":1,\"summary\":\"a\"}</progress-beacon>"}]}}"#.to_string();
+        let line_b = r#"{"timestamp":"2025-01-02T00:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"<progress-beacon>{\"kind\":\"report\",\"eta_seconds\":2,\"summary\":\"b\"}</progress-beacon>"}]}}"#.to_string();
         // Also include a non-assistant + a blank + a malformed JSON to exercise skip ladder.
         let lines = format!(
             "\n   \n{{junk\n{{\"message\":{{\"role\":\"user\"}}}}\n{line_a}\n{line_b}\n"
@@ -807,7 +803,7 @@ mod tests {
         let subagents = slug.join("sid-2").join("subagents");
         fs::create_dir_all(&subagents).unwrap();
         fs::write(subagents.join("agent-x.jsonl"), b"").unwrap();
-        let groups = discover_history_groups(&[root.clone()]);
+        let groups = discover_history_groups(std::slice::from_ref(&root));
         let k1 = ("slug".to_string(), "sid-1".to_string());
         let k2 = ("slug".to_string(), "sid-2".to_string());
         assert!(groups.contains_key(&k1));
