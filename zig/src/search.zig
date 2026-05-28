@@ -335,6 +335,13 @@ fn compileRegex(alloc: Allocator, src: []const u8, case_sensitive: bool) ![]Item
         } else if (c == '.') {
             atom = .dot;
             i += 1;
+        } else if (c == '(' or c == ')' or c == '|' or c == '{' or c == '}') {
+            // Grouping/alternation/bounded-repetition not supported by this
+            // hand-rolled engine. Per SPEC.md §"Search subcommand" the regex
+            // surface is RE2; rather than silently treat these as literals
+            // (parity bug — Rust/C++/Go all reject them), emit a parse error
+            // that maps to exit 2 in run().
+            return error.UnsupportedMetachar;
         } else if (c == '[') {
             var cls = CharClass{ .negated = false };
             i += 1;
