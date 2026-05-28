@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Literal, overload
 
 ROOT = Path(__file__).resolve().parent.parent
 CORPUS = ROOT / "shared" / "corpus"
@@ -1200,6 +1201,13 @@ def check_cli_argument_matrix(lang: str, binary: Path) -> bool:
          ["search", "a", "b", "--no-config"], 2, None),
         ("search: malformed regex (trailing backslash)",
          ["search", "\\", "--regex", "--no-config"], 2, None),
+        # COVERAGE-GAPS.md A7 / SPEC §"Search" — unsupported regex
+        # metachars (grouping, alternation, bounded repetition) must reject
+        # with exit 2. Zig's hand-rolled engine silently accepted `(` as a
+        # literal pre-task-#13; that fix added explicit rejection so all four
+        # impls now parity-fail this case.
+        ("search: malformed regex (unsupported metachar)",
+         ["search", "(", "--regex", "--no-config"], 2, None),
         ("search: unknown flag",
          ["search", "hello", "--frobnicate", "--no-config"], 2, "--frobnicate"),
         # COVERAGE-GAPS.md A4 — `bad time` diagnostic. SPEC §"### search":
@@ -1308,6 +1316,16 @@ def check_omit_now_smoke(lang: str, binary: Path) -> bool:
     return all_ok
 
 
+@overload
+def run_walker_env(
+    lang: str, binary: Path, meta: dict, env: dict, projects_root: Path | None = None,
+    *, return_stderr: Literal[False] = False,
+) -> dict: ...
+@overload
+def run_walker_env(
+    lang: str, binary: Path, meta: dict, env: dict, projects_root: Path | None = None,
+    *, return_stderr: Literal[True],
+) -> tuple[dict, str]: ...
 def run_walker_env(
     lang: str, binary: Path, meta: dict, env: dict, projects_root: Path | None = None,
     return_stderr: bool = False,
