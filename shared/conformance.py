@@ -83,6 +83,13 @@ CANDIDATES = {
 
 
 def find_binary(lang: str) -> Path | None:
+    # Coverage orchestrator (shared/coverage.py) sets WALKER_BIN_<LANG> to an
+    # instrumented build so we can collect coverage without clobbering the
+    # release binaries at the default discovery paths.
+    override = os.environ.get(f"WALKER_BIN_{lang.upper()}")
+    if override:
+        path = Path(override)
+        return path if path.is_file() else None
     for path in CANDIDATES.get(lang, []):
         if path.is_file():
             return path

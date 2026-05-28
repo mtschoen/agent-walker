@@ -1,6 +1,8 @@
 # claude-walker — Plan for 100% test coverage
 
-> Status: **proposed** (not yet started). Author: session 2026-05-27.
+> Status: **Phases 0–1 complete** (instrumented pipeline + baseline
+> `TEST-REPORT.md` live for all four impls via `shared/coverage.py`;
+> gap-filling not started). Author: session 2026-05-27.
 > Goal: every line of production code in **all four impls** exercised by a
 > test, with a checked-in `TEST-REPORT.md` and a CI gate. See
 > `~/.claude/skills/maintaining-full-coverage` for the governing discipline.
@@ -59,9 +61,19 @@ Sources: [go.dev/doc/build-cover](https://go.dev/doc/build-cover) ·
 [Clang Source-based Coverage](https://clang.llvm.org/docs/SourceBasedCodeCoverage.html) ·
 [zig-kcov](https://github.com/roc-lang/zig-kcov) · [Ziggit kcov thread](https://ziggit.dev/t/using-kcov-with-zig-test/3421)
 
+> **Phase 0 finding (Zig is harder than the table implies):** stock kcov 43
+> *and* the roc-lang/zig-kcov fork both fail on the DWARF5 these toolchains
+> now emit — the fork crashes on Clang DWARF5 and silently reports 0 lines on
+> Zig. Two fixes were required: (1) build Zig with the **LLVM backend**
+> (`zig build -Dcoverage=true` sets `exe.use_llvm`) — the 0.16 default
+> self-hosted backend emits DWARF kcov can't parse (it sees `compiler_rt` but
+> not our module); (2) use a build of **SimonKagstrom/kcov master**, which
+> parses DWARF5. `shared/coverage.py` implements this; CI must build kcov
+> master rather than installing a packaged kcov.
+
 ## 4. Phased roadmap
 
-### Phase 0 — Baseline (no new tests)
+### Phase 0 — Baseline (no new tests) — ✅ DONE
 Stand up the four toolchains above, instrument each binary, run the **existing**
 `conformance.py` against the instrumented binaries, and record the starting
 coverage % per language. Deliverable: first `TEST-REPORT.md` with four numbers
@@ -69,7 +81,7 @@ coverage % per language. Deliverable: first `TEST-REPORT.md` with four numbers
 edge cases, and platform branches). This proves the collection pipeline before
 any test-writing.
 
-### Phase 1 — Coverage orchestrator
+### Phase 1 — Coverage orchestrator — ✅ DONE
 Add `shared/coverage.py` (sibling to `conformance.py`) that:
 - builds each impl in its instrumented mode,
 - runs the conformance fixtures with the right env (`GOCOVERDIR`,

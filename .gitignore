@@ -7,6 +7,15 @@ zig/zig-out/
 zig/zig-cache/
 zig/.zig-cache/
 
+# Coverage artifacts (shared/coverage.py)
+/coverage/
+cpp/build-cov/
+go/walker-cov
+go/covdata/
+go/go-cov.txt
+# Instrumented binaries write *.profraw to CWD when run without LLVM_PROFILE_FILE
+*.profraw
+
 # Editor / OS junk
 *.swp
 *.swo
