@@ -175,18 +175,18 @@ fn parse_time_arg(s: &str, now: f64) -> Result<f64, String> {
         return Err("empty value".into());
     }
     if let Some(last) = trimmed.chars().last() {
-        if matches!(last, 'd' | 'h' | 'm' | 's') {
+        let multiplier = match last {
+            'd' => Some(86_400.0_f64),
+            'h' => Some(3_600.0),
+            'm' => Some(60.0),
+            's' => Some(1.0),
+            _ => None,
+        };
+        if let Some(multiplier) = multiplier {
             let head = &trimmed[..trimmed.len() - last.len_utf8()];
             if !head.is_empty() && head.chars().all(|c| c.is_ascii_digit() || c == '.') {
                 let n: f64 = head.parse().map_err(|e| format!("relative prefix: {e}"))?;
-                let secs = match last {
-                    'd' => n * 86_400.0,
-                    'h' => n * 3_600.0,
-                    'm' => n * 60.0,
-                    's' => n,
-                    _ => unreachable!(),
-                };
-                return Ok(now - secs);
+                return Ok(now - n * multiplier);
             }
         }
     }

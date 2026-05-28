@@ -264,19 +264,17 @@ pub(crate) fn run(raw: &[String]) -> i32 {
     });
 
     // Emit NDJSON — one line per record. Lock stdout once for the full write.
+    // serde_json::to_string can't fail on EventRecord (no Map<K,V> keys, no
+    // serializers that error on the fixed primitive/string fields), so we
+    // unwrap rather than carrying a dead error branch. Broken-pipe writes
+    // are silently absorbed: `walker events | head` is a normal usage
+    // pattern, not an error.
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     for record in &all_records {
-        match serde_json::to_string(record) {
-            Ok(line) => {
-                if writeln!(out, "{line}").is_err() {
-                    // Broken pipe — consumer closed reader; not an error.
-                    break;
-                }
-            }
-            Err(e) => {
-                eprintln!("walker: events: serialize error: {e}");
-            }
+        let line = serde_json::to_string(record).expect("EventRecord serializes");
+        if writeln!(out, "{line}").is_err() {
+            break;
         }
     }
 
