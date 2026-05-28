@@ -800,6 +800,79 @@ def check_search_multi_root(lang: str, binary: Path) -> bool:
     return all_ok
 
 
+def check_search_duplicate_root(lang: str, binary: Path) -> bool:
+    """A20: duplicate-root dedup. Passing the same path via both
+    `--projects-root` AND `--extra-projects-root` must produce the SAME hits +
+    summary as a single-root invocation (no double-counted hits, roots_walked
+    still 1). All four impls canonicalize each root via realpath (Rust
+    `fs::canonicalize`, C++ `fs::canonical`, Go `filepath.EvalSymlinks`, Zig
+    `realpath`/path-clean) and dedup via the canonical key before walking.
+
+    We exercise the dedup path by:
+      1) running search against a single root P and capturing baseline output;
+      2) running the SAME pattern + flags against `--projects-root P
+         --extra-projects-root P` and asserting identical hits + summary
+         (including roots_walked=1).
+
+    Reuses the 01-basic scenario (3 hits, 3 sessions) for the substrate.
+    """
+    if not SEARCH_CORPUS.is_dir():
+        return True
+    if lang not in IMPLS_WITH_SEARCH:
+        print(f"  [{lang:>4s}] search dedup -- skipping (not in IMPLS_WITH_SEARCH)")
+        return True
+    scenario_name = "01-basic"
+    expected_file = SEARCH_CORPUS / scenario_name / "expected.json"
+    if not expected_file.is_file():
+        return True
+    data = json.loads(expected_file.read_text(encoding="utf-8"))
+    now_unix = data["_meta"]["now_unix"]
+    combo = data["combos"]["default"]
+    label = f"search-dedup/{scenario_name}/duplicate-root"
+
+    with tempfile.TemporaryDirectory(prefix=f"walker-search-dedup-") as tmp:
+        tmp_path = Path(tmp)
+        shutil.copytree(SEARCH_CORPUS / scenario_name, tmp_path / scenario_name)
+        try:
+            baseline_hits, baseline_summary = run_walker_search(
+                lang, binary, tmp_path,
+                combo["pattern"], combo["flags"], now_unix,
+            )
+            # Pass the SAME root via --extra-projects-root. Both args resolve
+            # to the same canonical inode -> dedup must drop the duplicate.
+            dup_hits, dup_summary = run_walker_search(
+                lang, binary, tmp_path,
+                combo["pattern"], combo["flags"], now_unix,
+                extras=[tmp_path],
+            )
+        except Exception as e:
+            print(f"  [{lang:>4s}] {label:48s} FAIL  {e}")
+            return False
+
+    problems: list[str] = []
+    if dup_hits != baseline_hits:
+        problems.append(
+            f"hits diverged from baseline: got {len(dup_hits)} vs baseline {len(baseline_hits)}"
+        )
+    if dup_summary != baseline_summary:
+        problems.append(
+            f"summary diverged: got {dup_summary!r} vs baseline {baseline_summary!r}"
+        )
+    # Explicit: roots_walked MUST be 1, not 2 (dedup pre-walk).
+    walked = (dup_summary or {}).get("roots_walked")
+    if walked != 1:
+        problems.append(f"roots_walked: got {walked!r}, expected 1 (dedup pre-walk)")
+
+    if problems:
+        print(f"  [{lang:>4s}] {label:48s} FAIL  " + "; ".join(problems))
+        return False
+    print(
+        f"  [{lang:>4s}] {label:48s}  OK   hits={len(dup_hits)} "
+        f"roots_walked={walked}"
+    )
+    return True
+
+
 def _events_sort_key(record: dict) -> tuple:
     """Stable sort key for events-mode NDJSON records (multiset comparison)."""
     return (
@@ -1549,6 +1622,8 @@ def main():
         if not check_search_truncated(lang, binary):
             overall_ok = False
         if not check_search_multi_root(lang, binary):
+            overall_ok = False
+        if not check_search_duplicate_root(lang, binary):
             overall_ok = False
         if not check_events(lang, binary):
             overall_ok = False
