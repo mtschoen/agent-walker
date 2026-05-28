@@ -914,6 +914,25 @@ def check_cli_argument_matrix(lang: str, binary: Path) -> bool:
          ["search", "\\", "--regex", "--no-config"], 2, None),
         ("search: unknown flag",
          ["search", "hello", "--frobnicate", "--no-config"], 2, "--frobnicate"),
+        # COVERAGE-GAPS.md A4 — `bad time` diagnostic. SPEC §"### search":
+        # "unparseable --since/--until (`bad time: ...`)". Exit code is the
+        # shared contract; the exact diagnostic wording (whether the flag
+        # name appears, vs. only the offending value or the `bad time:`
+        # token) is per-impl — cpp's parse_time_arg path emits "not RFC3339
+        # or relative: ..." without the flag name, rust prepends "bad time:
+        # --since=...", etc. So we pin only exit=2 + non-empty stderr here.
+        # Each of these targets a distinct code path:
+        #   malformed-{since,until} -> parse_iso8601 fallback + error format
+        #   empty value             -> parse_time_arg's "empty value" branch
+        #   missing value           -> iter.next().ok_or("--since needs a value")
+        ("search: malformed --since",
+         ["search", "hello", "--since", "not-a-time", "--no-config"], 2, None),
+        ("search: malformed --until",
+         ["search", "hello", "--until", "tomorrow", "--no-config"], 2, None),
+        ("search: empty --since value",
+         ["search", "hello", "--since", "", "--no-config"], 2, None),
+        ("search: --since missing value",
+         ["search", "hello", "--since"], 2, None),
 
         # --- --version (cost + events) — exit 0, stdout non-empty ---
         # (kept in the same matrix so reporting stays uniform; the stdout-check
