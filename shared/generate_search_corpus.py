@@ -1138,6 +1138,187 @@ def scenario_14_snippet_whitespace_nudge():
     return scenario, files, expected
 
 
+REGEX_CLASS_SPECS = [
+    # (combo_name, description, text, pattern, match_offsets)
+    # Patterns are raw strings: r"\d+" -> the two chars `\d+`.
+    # Offsets are byte offsets within `text`; with default snippet_chars=240
+    # snippet == text.
+    ("digit-class",
+     "\\d+ — digit class escape",
+     "alpha 7 beta", r"\d+", [[6, 7]]),
+    ("non-digit-class",
+     "\\D+ — non-digit class escape, greedy",
+     "alpha-7-beta", r"\D+", [[0, 6], [7, 12]]),
+    ("word-class",
+     "\\w+ — word class escape",
+     "foo bar", r"\w+", [[0, 3], [4, 7]]),
+    ("non-word-class",
+     "\\W — non-word class escape",
+     "ping!pong", r"\W", [[4, 5]]),
+    ("default-escape",
+     "\\! — default-escape arm (literal `!`, escape char NOT in dDwWsSntr)",
+     "ping!pong", r"\!", [[4, 5]]),
+    ("space-class",
+     "\\s — whitespace class escape (single ASCII space)",
+     "foo bar", r"\s", [[3, 4]]),
+    ("non-space-class",
+     "\\S+ — non-whitespace class escape, greedy",
+     "foo bar", r"\S+", [[0, 3], [4, 7]]),
+    ("dot-metachar",
+     ". — dot atom (any byte except newline)",
+     "section 5: end", r"5.", [[8, 10]]),
+    ("escaped-dot",
+     "\\. — escaped dot literal",
+     "literal a.b dot", r"a\.b", [[8, 11]]),
+    ("class-range",
+     "[a-z]+ — char class with range expansion",
+     "items cat dog", r"[a-z]+", [[0, 5], [6, 9], [10, 13]]),
+    ("class-negated",
+     "[^a-z]+ — negated class (case-sensitive so uppercase/digits land)",
+     "code Z and 9 here", r"[^a-z]+", [[4, 7], [10, 13]]),
+    ("class-simple",
+     "[abc]+ — class set without ranges",
+     "show me a or b or c", r"[abc]+", [[8, 9], [13, 14], [18, 19]]),
+    ("quant-star",
+     "a*b — `*` quantifier with backtracking",
+     "aaab tail", r"a*b", [[0, 4]]),
+    ("quant-opt",
+     "colou?r — `?` quantifier",
+     "color colour", r"colou?r", [[0, 5], [6, 12]]),
+    ("quant-plus-on-class",
+     "[0-9]+x — `+` quantifier on a class atom",
+     "123x done", r"[0-9]+x", [[0, 4]]),
+    ("class-escape-in-class",
+     "[\\n\\t\\r] — escape-in-class arm; matches a tab between letters",
+     "left\tright", r"[\n\t\r]", [[4, 5]]),
+]
+
+
+def _make_regex_class_scenario(index: int, name: str, description: str,
+                                text: str, pattern: str,
+                                match_offsets: list[list[int]]):
+    """A7 helper: each pattern gets its OWN scenario dir so walker only scans
+    one message — eliminates cross-pattern leakage when the regex matches
+    multiple sessions in the same scenario dir.
+
+    Naming: `15a-regex-class-<name>` ... `15p-regex-...`. Letters keep the
+    sort order stable for kcov-comparison diffs.
+
+    `flags` is fixed at --regex --case-sensitive: the engine's case-insensitive
+    class expansion would let some negated/positive classes match both halves
+    of the alphabet and offsets drift across impls.
+    """
+    suffix = chr(ord('a') + index)
+    scenario = f"15{suffix}-regex-{name}"
+    ts = NOW_UNIX - 5000 + index * 100
+    files = {
+        "sid1.jsonl": [assistant_text(ts, f"msg_15{suffix}_a1", text)],
+    }
+    expected = {
+        "default": {
+            "description": description,
+            "pattern": pattern,
+            "flags": ["--regex", "--case-sensitive"],
+            "hits": [hit(
+                session_id="sid1", cwd_slug=scenario, line_number=1,
+                timestamp=iso(ts), role="assistant", snippet=text,
+                match_offsets=match_offsets,
+                context_before=[], context_after=[],
+            )],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+    }
+    return scenario, files, expected
+
+
+def _regex_class_scenario_factory(index: int):
+    """Return a zero-arg scenario function bound to spec[index]. Returning a
+    closure lets us register each as a separate entry in SCENARIOS."""
+    name, description, text, pattern, match_offsets = REGEX_CLASS_SPECS[index]
+    def scenario_fn():
+        return _make_regex_class_scenario(
+            index, name, description, text, pattern, match_offsets,
+        )
+    scenario_fn.__name__ = f"scenario_15{chr(ord('a') + index)}_regex_{name.replace('-', '_')}"
+    scenario_fn.__doc__ = description
+    return scenario_fn
+
+
+# Generated scenario functions: one per row of REGEX_CLASS_SPECS.
+REGEX_CLASS_SCENARIOS = [
+    _regex_class_scenario_factory(i) for i in range(len(REGEX_CLASS_SPECS))
+]
+
+
+def scenario_16_same_timestamp():
+    """A16: Two messages with the SAME timestamp in two different sessions
+    must sort by (session_id, line_number) for deterministic order.
+
+    Layout:
+      sid_a.jsonl line 1 at T
+      sid_a.jsonl line 2 at T (same ts, same session) — tiebreak by line_number
+      sid_b.jsonl line 1 at T (same ts, different session) — tiebreak by session_id
+
+    With case-insensitive default search for "needle" all three match.
+    Expected order (per all four impls' sort comparator: timestamp desc, then
+    session_id asc, then line_number asc):
+      1. sid_a / line 1
+      2. sid_a / line 2
+      3. sid_b / line 1
+    """
+    scenario = "16-same-timestamp"
+    t = NOW_UNIX - 1000
+    text_a1 = "needle one in session A line 1"
+    text_a2 = "needle two in session A line 2"
+    text_b1 = "needle three in session B line 1"
+    files = {
+        "sid_a.jsonl": [
+            assistant_text(t, "msg_16_a1", text_a1),
+            assistant_text(t, "msg_16_a2", text_a2),
+        ],
+        "sid_b.jsonl": [
+            assistant_text(t, "msg_16_b1", text_b1),
+        ],
+    }
+    o_a1 = find_offset(text_a1, "needle")
+    o_a2 = find_offset(text_a2, "needle")
+    o_b1 = find_offset(text_b1, "needle")
+    # All three hits have identical timestamps. The deterministic sort key is
+    # (session_id asc, line_number asc) after timestamp-desc primary. Context
+    # is the message's intra-file neighbors only (no cross-file context).
+    hit_a1 = hit(
+        session_id="sid_a", cwd_slug=scenario, line_number=1,
+        timestamp=iso(t), role="assistant", snippet=text_a1,
+        match_offsets=[[o_a1[0], o_a1[1]]],
+        context_before=[],
+        context_after=[ctx("assistant", text_a2, iso(t))],
+    )
+    hit_a2 = hit(
+        session_id="sid_a", cwd_slug=scenario, line_number=2,
+        timestamp=iso(t), role="assistant", snippet=text_a2,
+        match_offsets=[[o_a2[0], o_a2[1]]],
+        context_before=[ctx("assistant", text_a1, iso(t))],
+        context_after=[],
+    )
+    hit_b1 = hit(
+        session_id="sid_b", cwd_slug=scenario, line_number=1,
+        timestamp=iso(t), role="assistant", snippet=text_b1,
+        match_offsets=[[o_b1[0], o_b1[1]]],
+        context_before=[],
+        context_after=[],
+    )
+    expected = {
+        "tiebreak": {
+            "description": "Same timestamp across hits: sort by session_id asc, then line_number asc.",
+            "pattern": "needle",
+            "flags": [],
+            "hits": [hit_a1, hit_a2, hit_b1],
+            "summary": summary(hits=3, sessions_matched=2),
+        },
+    }
+    return scenario, files, expected
+
+
 def multi_root_scenario_01_two_roots():
     """Same pattern in a primary-root session AND an extra-root session.
 
@@ -1196,6 +1377,8 @@ SCENARIOS = [
     scenario_12_tool_use_and_result_array,
     scenario_13_time_units_and_edges,
     scenario_14_snippet_whitespace_nudge,
+    *REGEX_CLASS_SCENARIOS,
+    scenario_16_same_timestamp,
 ]
 
 MULTI_ROOT_SCENARIOS = [
