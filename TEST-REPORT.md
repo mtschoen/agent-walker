@@ -1,50 +1,50 @@
-claude-walker test report — 2026-05-28T02:42:39+00:00
+claude-walker test report — 2026-05-28T02:42:54+00:00
 ============================================================
 
 Status:       BASELINE (Phase 0 baseline — coverage gate not yet met)
-Conformance:  PASS (328 checks across measured impls)
-Git:          67d1e65 (coverage-phase3-cli)
+Conformance:  PASS (240 checks across measured impls)
+Git:          67d1e65 (coverage-phase3-config)
 Target:       100% line/statement coverage in all four implementations
 
 Per-implementation coverage
 ------------------------------------------------------------
 impl   metric         covered/total    cover   conformance
-rust   lines              1297/1523   85.16%   PASS (82 ok)
-cpp    lines              1995/2190   91.10%   PASS (82 ok)
-go     statements          995/1235   80.57%   PASS (82 ok)
-zig    lines              1727/2079   83.07%   PASS (82 ok)
+rust   lines              1253/1523   82.27%   PASS (60 ok)
+cpp    lines              1956/2190   89.32%   PASS (60 ok)
+go     statements          955/1235   77.33%   PASS (60 ok)
+zig    lines              1683/2079   80.95%   PASS (60 ok)
 
-### rust — 85.16% (226 lines uncovered)
-    beacons.rs               341/401    85.04%   <-- 60 uncovered
+### rust — 82.27% (270 lines uncovered)
+    beacons.rs               332/401    82.79%   <-- 69 uncovered
     content.rs                38/64     59.38%   <-- 26 uncovered
-    events.rs                156/174    89.66%   <-- 18 uncovered
-    main.rs                  200/208    96.15%   <-- 8 uncovered
-    search.rs                424/512    82.81%   <-- 88 uncovered
+    events.rs                147/174    84.48%   <-- 27 uncovered
+    main.rs                  183/208    87.98%   <-- 25 uncovered
+    search.rs                407/512    79.49%   <-- 105 uncovered
     transcript.rs             71/81     87.65%   <-- 10 uncovered
-    walker_roots.rs           67/83     80.72%   <-- 16 uncovered
+    walker_roots.rs           75/83     90.36%   <-- 8 uncovered
 
-### cpp — 91.10% (195 lines uncovered)
-    beacons.cpp              724/791    91.53%   <-- 67 uncovered
+### cpp — 89.32% (234 lines uncovered)
+    beacons.cpp              712/791    90.01%   <-- 79 uncovered
     common.hpp                83/96     86.46%   <-- 13 uncovered
-    events.cpp               286/304    94.08%   <-- 18 uncovered
+    events.cpp               275/304    90.46%   <-- 29 uncovered
     json_writer.hpp           13/23     56.52%   <-- 10 uncovered
-    main.cpp                 310/311    99.68%   <-- 1 uncovered
+    main.cpp                 302/311    97.11%   <-- 9 uncovered
     pricing.hpp               34/34    100.00%
-    search.cpp               483/560    86.25%   <-- 77 uncovered
-    walker_roots.hpp          62/71     87.32%   <-- 9 uncovered
+    search.cpp               471/560    84.11%   <-- 89 uncovered
+    walker_roots.hpp          66/71     92.96%   <-- 5 uncovered
 
-### go — 80.57% (240 statements uncovered)
-    beacons.go               285/367    77.66%   <-- 82 uncovered
-    events.go                115/138    83.33%   <-- 23 uncovered
-    main.go                  224/249    89.96%   <-- 25 uncovered
-    search.go                329/427    77.05%   <-- 98 uncovered
-    walker_roots.go           42/54     77.78%   <-- 12 uncovered
+### go — 77.33% (280 statements uncovered)
+    beacons.go               274/367    74.66%   <-- 93 uncovered
+    events.go                107/138    77.54%   <-- 31 uncovered
+    main.go                  212/249    85.14%   <-- 37 uncovered
+    search.go                315/427    73.77%   <-- 112 uncovered
+    walker_roots.go           47/54     87.04%   <-- 7 uncovered
 
-### zig — 83.07% (352 lines uncovered)
-    beacons.zig              429/493    87.02%   <-- 64 uncovered
-    events.zig               155/172    90.12%   <-- 17 uncovered
-    main.zig                 496/523    94.84%   <-- 27 uncovered
-    search.zig               582/816    71.32%   <-- 234 uncovered
-    walker_roots.zig          65/75     86.67%   <-- 10 uncovered
+### zig — 80.95% (396 lines uncovered)
+    beacons.zig              427/493    86.61%   <-- 66 uncovered
+    events.zig               151/172    87.79%   <-- 21 uncovered
+    main.zig                 481/523    91.97%   <-- 42 uncovered
+    search.zig               555/816    68.01%   <-- 261 uncovered
+    walker_roots.zig          69/75     92.00%   <-- 6 uncovered
 
 Regenerate: `python shared/coverage.py`  (see CLAUDE.md)
