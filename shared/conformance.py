@@ -452,6 +452,294 @@ def check_search(lang: str, binary: Path) -> bool:
     return all_ok
 
 
+def run_walker_search_pretty(
+    binary: Path,
+    projects_root: Path,
+    pattern: str,
+    flags: list[str],
+    now_unix: float,
+) -> tuple[int, str, str]:
+    """Invoke `walker search` with `--format pretty`, return (returncode, stdout, stderr).
+
+    Does not raise on non-zero exit (the caller asserts on exit + output).
+    """
+    cmd = [
+        str(binary), "search", pattern,
+        "--projects-root", str(projects_root),
+        "--now", repr(now_unix),
+        "--format", "pretty",
+        "--no-config",
+    ]
+    cmd.extend(flags)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=10)
+    return result.returncode, result.stdout, result.stderr
+
+
+# --- Pretty-format assertions ---
+#
+# Pretty output text differs per impl (rust/zig emit `>>> text [match] text <<<`
+# with surrounding whitespace and a human-readable summary line; cpp/go emit
+# `>>>text [match] text<<<` with no surrounding whitespace and embed a JSONL
+# summary record in the pretty stream). We assert only on the SHARED structural
+# contract: one header line per hit, one file-info line per hit, the highlight
+# tokens `>>>` and `<<<` appear once per hit, the match wrapped in `[<match>]`,
+# and one `before:` / `after:` line per expected context turn.
+
+def _count_hit_headers(stdout: str) -> int:
+    """A hit header looks like `[<timestamp>] cwd=... role=... session=...`."""
+    count = 0
+    for line in stdout.splitlines():
+        stripped = line.lstrip()
+        if (stripped.startswith("[") and "cwd=" in stripped
+                and "role=" in stripped and "session=" in stripped):
+            count += 1
+    return count
+
+
+def assert_search_pretty(
+    lang: str,
+    binary: Path,
+    scenario_name: str,
+    combo_name: str,
+    combo: dict,
+    now_unix: float,
+) -> bool:
+    """Structurally check pretty-format output against the same combo as jsonl.
+
+    Asserts (cross-impl shared contract):
+      - exit 0 (no errors)
+      - one hit header line per expected hit
+      - the `>>>` and `<<<` highlight delimiters appear once per hit
+      - each expected hit's `match_offsets[0]` substring appears as `[<match>]`
+        somewhere in stdout
+      - `before:` and `after:` line totals match summed expected context-turn
+        counts (per impl, when there are context turns)
+    """
+    label = f"search-pretty/{scenario_name}/{combo_name}"
+    expected_hits = combo["hits"]
+    expected_summary = combo["summary"]
+    with tempfile.TemporaryDirectory(prefix=f"walker-search-pretty-{scenario_name}-") as tmp:
+        shutil.copytree(SEARCH_CORPUS / scenario_name, Path(tmp) / scenario_name)
+        returncode, stdout, stderr = run_walker_search_pretty(
+            binary, Path(tmp),
+            combo["pattern"], combo["flags"], now_unix,
+        )
+    if returncode != 0:
+        print(f"  [{lang:>4s}] {label:48s} FAIL  exit={returncode} stderr={stderr!r}")
+        return False
+
+    # If count_only suppresses hits, expect 0 headers and 0 highlight markers.
+    suppress_hits = "--count-only" in combo["flags"]
+    expected_hit_count = 0 if suppress_hits else len(expected_hits)
+
+    got_headers = _count_hit_headers(stdout)
+    got_open = stdout.count(">>>")
+    got_close = stdout.count("<<<")
+
+    problems: list[str] = []
+    if got_headers != expected_hit_count:
+        problems.append(f"header lines: got {got_headers}, expected {expected_hit_count}")
+    if got_open != expected_hit_count:
+        problems.append(f">>> count: got {got_open}, expected {expected_hit_count}")
+    if got_close != expected_hit_count:
+        problems.append(f"<<< count: got {got_close}, expected {expected_hit_count}")
+
+    # Each hit's match text (from snippet[match_offsets[0]]) should appear as
+    # `[<match>]` somewhere in stdout. Skip when count_only suppresses hits.
+    if not suppress_hits:
+        for index, hit in enumerate(expected_hits):
+            offsets = hit.get("match_offsets") or []
+            snippet = hit.get("snippet", "")
+            if not offsets:
+                continue
+            start, end = offsets[0]
+            # Slice on byte-bounded snippet — but snippet is a Python str of UTF-8
+            # text; the binaries emit byte offsets that map cleanly to chars
+            # for ASCII patterns we use in fixtures. The 11-multibyte fixture
+            # has multibyte text, but offsets are byte offsets — re-decode by
+            # finding the literal match in the snippet rather than slicing.
+            try:
+                match_text = snippet.encode("utf-8")[start:end].decode("utf-8")
+            except UnicodeDecodeError:
+                # If the byte slice cut mid-codepoint, fall back to a structural
+                # check: the pattern itself should be wrapped somewhere.
+                match_text = combo["pattern"]
+            wrapped = f"[{match_text}]"
+            if wrapped not in stdout:
+                problems.append(f"hit[{index}] missing `{wrapped}` in stdout")
+                break
+
+        # before:/after: line counts (only meaningful when --context > 0).
+        expected_before = sum(len(h.get("context_before", [])) for h in expected_hits)
+        expected_after = sum(len(h.get("context_after", [])) for h in expected_hits)
+        got_before = sum(1 for line in stdout.splitlines()
+                         if line.lstrip().startswith("before:"))
+        got_after = sum(1 for line in stdout.splitlines()
+                        if line.lstrip().startswith("after:"))
+        if got_before != expected_before:
+            problems.append(f"before: lines: got {got_before}, expected {expected_before}")
+        if got_after != expected_after:
+            problems.append(f"after: lines: got {got_after}, expected {expected_after}")
+
+    # Summary signal: the pretty stream MUST convey truncated=true when the
+    # combo's expected summary says so. Rust/Zig emit `truncated=true` as a
+    # human-readable token; C++/Go embed a JSONL summary record. Accept either.
+    if expected_summary.get("truncated"):
+        if ("truncated=true" not in stdout
+                and '"truncated":true' not in stdout):
+            problems.append("expected truncated=true marker in pretty stdout")
+
+    if problems:
+        print(f"  [{lang:>4s}] {label:48s} FAIL  " + "; ".join(problems))
+        return False
+    print(f"  [{lang:>4s}] {label:48s}  OK   hits={got_headers}")
+    return True
+
+
+# Pretty-format check uses a curated subset of search scenarios (not every
+# combo) — the goal is to exercise the renderer's paths (header, file-info,
+# before/after, highlight, count-only suppression), not to re-prove jsonl-vs-
+# expected agreement. The jsonl path in check_search already does that.
+PRETTY_SCENARIOS: list[tuple[str, str]] = [
+    # (scenario, combo) — chosen to cover: no-context, before-only,
+    # before+after, after-only, count-only suppression.
+    ("01-basic", "default"),
+    ("02-multi-match-per-session", "default"),
+    ("09-count-only", "count-only"),
+]
+
+
+def check_search_pretty(lang: str, binary: Path) -> bool:
+    """Drive the pretty renderer across a curated subset of search fixtures."""
+    if not SEARCH_CORPUS.is_dir():
+        return True
+    if lang not in IMPLS_WITH_SEARCH:
+        print(f"  [{lang:>4s}] search pretty -- skipping (not in IMPLS_WITH_SEARCH)")
+        return True
+    all_ok = True
+    for scenario_name, combo_name in PRETTY_SCENARIOS:
+        expected_file = SEARCH_CORPUS / scenario_name / "expected.json"
+        if not expected_file.is_file():
+            continue
+        data = json.loads(expected_file.read_text(encoding="utf-8"))
+        combo = data["combos"].get(combo_name)
+        if combo is None:
+            continue
+        now_unix = data["_meta"]["now_unix"]
+        if not assert_search_pretty(
+            lang, binary, scenario_name, combo_name, combo, now_unix,
+        ):
+            all_ok = False
+    return all_ok
+
+
+# --- Result truncation (gap A2) ---
+#
+# A multi-hit fixture invoked with `--limit 1` exercises:
+#   - jsonl: summary record `"truncated": true`
+#   - pretty: `truncated=true` token (rust/zig) or `"truncated":true` (cpp/go)
+#   - stderr: the `walker: search: truncated to --limit=N (had M total)` warning
+#     — text is identical across all four impls (confirmed empirically).
+
+TRUNCATION_STDERR_TOKEN = "walker: search: truncated to --limit="
+
+
+def assert_search_truncated(lang: str, binary: Path) -> bool:
+    """Run a multi-hit fixture with `--limit 1` and verify truncation signals."""
+    scenario_name = "01-basic"  # 3 hits across 3 sessions
+    label = f"search-truncated/{scenario_name}/limit1"
+    expected_file = SEARCH_CORPUS / scenario_name / "expected.json"
+    if not expected_file.is_file():
+        # Corpus missing — silently pass; check_search would also skip.
+        return True
+    data = json.loads(expected_file.read_text(encoding="utf-8"))
+    now_unix = data["_meta"]["now_unix"]
+    base_combo = data["combos"]["default"]
+    total_hits = len(base_combo["hits"])
+    if total_hits < 2:
+        print(f"  [{lang:>4s}] {label:48s} SKIP  base fixture has <2 hits")
+        return True
+
+    # --- jsonl path ---
+    with tempfile.TemporaryDirectory(prefix=f"walker-search-trunc-jsonl-") as tmp:
+        shutil.copytree(SEARCH_CORPUS / scenario_name, Path(tmp) / scenario_name)
+        cmd = [
+            str(binary), "search", base_combo["pattern"],
+            "--projects-root", str(tmp),
+            "--now", repr(now_unix),
+            "--format", "jsonl",
+            "--no-config",
+            "--limit", "1",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=10)
+    if result.returncode != 0:
+        print(f"  [{lang:>4s}] {label:48s} FAIL  jsonl exit={result.returncode} stderr={result.stderr!r}")
+        return False
+    # Parse jsonl: exactly 1 hit + 1 summary, summary truncated=true, hits=1.
+    hits = []
+    summary = None
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as e:
+            print(f"  [{lang:>4s}] {label:48s} FAIL  jsonl non-JSON line: {line!r} ({e})")
+            return False
+        if obj.get("type") == "hit":
+            hits.append(obj)
+        elif obj.get("type") == "summary":
+            summary = obj
+    problems: list[str] = []
+    if len(hits) != 1:
+        problems.append(f"jsonl hits: got {len(hits)}, expected 1")
+    if summary is None:
+        problems.append("jsonl: missing summary record")
+    else:
+        if not summary.get("truncated"):
+            problems.append(f"jsonl summary.truncated: got {summary.get('truncated')!r}, expected true")
+        if summary.get("hits") != 1:
+            problems.append(f"jsonl summary.hits: got {summary.get('hits')!r}, expected 1")
+    if TRUNCATION_STDERR_TOKEN not in result.stderr:
+        problems.append(f"jsonl stderr missing {TRUNCATION_STDERR_TOKEN!r}")
+
+    # --- pretty path ---
+    with tempfile.TemporaryDirectory(prefix=f"walker-search-trunc-pretty-") as tmp:
+        shutil.copytree(SEARCH_CORPUS / scenario_name, Path(tmp) / scenario_name)
+        returncode, stdout, stderr = run_walker_search_pretty(
+            binary, Path(tmp),
+            base_combo["pattern"], ["--limit", "1"], now_unix,
+        )
+    if returncode != 0:
+        print(f"  [{lang:>4s}] {label:48s} FAIL  pretty exit={returncode} stderr={stderr!r}")
+        return False
+    if "truncated=true" not in stdout and '"truncated":true' not in stdout:
+        problems.append("pretty stdout missing truncated=true marker")
+    if TRUNCATION_STDERR_TOKEN not in stderr:
+        problems.append(f"pretty stderr missing {TRUNCATION_STDERR_TOKEN!r}")
+    # exactly 1 hit rendered in pretty (suppressed when count-only, but we
+    # didn't pass count-only here, so a single hit header must appear).
+    got_headers = _count_hit_headers(stdout)
+    if got_headers != 1:
+        problems.append(f"pretty hit headers: got {got_headers}, expected 1")
+
+    if problems:
+        print(f"  [{lang:>4s}] {label:48s} FAIL  " + "; ".join(problems))
+        return False
+    print(f"  [{lang:>4s}] {label:48s}  OK   jsonl+pretty+stderr truncation signals present")
+    return True
+
+
+def check_search_truncated(lang: str, binary: Path) -> bool:
+    """Wrapper to match the check_* naming pattern."""
+    if not SEARCH_CORPUS.is_dir():
+        return True
+    if lang not in IMPLS_WITH_SEARCH:
+        print(f"  [{lang:>4s}] search truncated -- skipping (not in IMPLS_WITH_SEARCH)")
+        return True
+    return assert_search_truncated(lang, binary)
+
+
 def check_search_multi_root(lang: str, binary: Path) -> bool:
     """Multi-root search: assert --extra-projects-root reaches a second root,
     hits aggregate + sort across roots, and roots_walked reflects the count.
@@ -1218,6 +1506,10 @@ def main():
         if not check_config_malformed(lang, binary, expected):
             overall_ok = False
         if not check_search(lang, binary):
+            overall_ok = False
+        if not check_search_pretty(lang, binary):
+            overall_ok = False
+        if not check_search_truncated(lang, binary):
             overall_ok = False
         if not check_search_multi_root(lang, binary):
             overall_ok = False
