@@ -1,0 +1,1 @@
+{"type": "assistant", "timestamp": "2026-05-10T10:58:20.000Z", "message": {"id": "msg_15n_a1", "role": "assistant", "model": "claude-opus-4-7", "content": [{"type": "text", "text": "color colour"}], "usage": {"input_tokens": 50, "output_tokens": 25, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}

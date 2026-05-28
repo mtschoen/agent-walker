@@ -1,0 +1,1 @@
+{"type": "user", "timestamp": "2026-05-10T11:43:20.000Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_12_c", "content": [{"type": "text", "text": "before block"}, {"type": "text", "text": "needle in array block"}, {"type": "text", "text": "after block"}]}]}}

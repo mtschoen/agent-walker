@@ -22,6 +22,14 @@ pub fn build(b: *std.Build) void {
         .root_module = root_module,
     });
 
+    // Coverage builds force the LLVM backend. Zig 0.16's default self-hosted
+    // x86_64 backend emits DWARF that kcov cannot parse (it sees compiler_rt
+    // but not our main module); LLVM-emitted DWARF is kcov-readable. Production
+    // builds stay on the faster self-hosted backend. Driven by
+    // shared/coverage.py via `zig build -Dcoverage=true -Doptimize=Debug`.
+    const coverage = b.option(bool, "coverage", "Force LLVM backend so kcov can read DWARF (coverage builds only)") orelse false;
+    if (coverage) exe.use_llvm = true;
+
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);

@@ -239,6 +239,138 @@ def fixture_07_web_search():
     return name, [expected_record(t, slug, session_id)]
 
 
+def fixture_08_dirty_ladder():
+    """A8: dirty-line skip ladder for the events scanner. Same shape as the
+    cost-mode dirty ladder — every bad-line variety the line filter must
+    reject, sandwiching one valid turn that should be emitted.
+    """
+    name = "08-dirty-ladder"
+    slug = "project-theta"
+    session_id = "sess-008"
+    good = turn("msg-008-good", _IN_WINDOW, "claude-sonnet-4-6", 1000, 100)
+    lines: list[dict | str] = [
+        "",
+        "   ",
+        '{"type":"assistant","timestamp":',
+        "this is not JSON at all",
+        json.dumps([1, 2, 3]),
+        json.dumps({
+            "type": "user", "timestamp": iso_z(_IN_WINDOW),
+            "message": {"role": "user", "content": "hi"},
+        }),
+        json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant", "id": "no-ts-events",
+                        "model": "claude-opus-4-7", "usage": {"input_tokens": 99}},
+        }),
+        json.dumps({
+            "type": "assistant", "timestamp": "definitely-not-iso",
+            "message": {"role": "assistant", "id": "bad-ts-events",
+                        "model": "claude-opus-4-7", "usage": {"input_tokens": 99}},
+        }),
+        json.dumps({
+            "type": "assistant", "timestamp": iso_z(_IN_WINDOW),
+            "message": {"role": "user", "id": "role-mismatch-events",
+                        "model": "claude-opus-4-7", "usage": {"input_tokens": 99}},
+        }),
+        good,
+    ]
+    write_fixture(name, slug, session_id, lines)
+    return name, [expected_record(good, slug, session_id)]
+
+
+def fixture_09_subagent():
+    """A9: assistant turn lives in a subagent transcript
+    (`<slug>/<sid>/subagents/agent-*.jsonl`). Events scanner must discover
+    and emit it.
+    """
+    name = "09-subagent"
+    slug = "project-iota"
+    session_id = "sess-009"
+    parent_turn = turn("msg-009-parent", _IN_WINDOW, "claude-opus-4-7", 1000, 200)
+    sub_turn = turn("msg-009-sub", _IN_WINDOW, "claude-haiku-4-5", 300, 50)
+    # Parent file: <slug>/<session>.jsonl
+    write_fixture(name, slug, session_id, [parent_turn])
+    # Subagent file: <slug>/<session>/subagents/agent-x.jsonl
+    sub_path = EVENTS_CORPUS / name / slug / session_id / "subagents" / "agent-x.jsonl"
+    sub_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(sub_path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(sub_turn))
+        f.write("\n")
+    return name, [
+        expected_record(parent_turn, slug, session_id),
+        expected_record(sub_turn, slug, session_id),
+    ]
+
+
+def fixture_10_escape_chars():
+    """A13: assistant turn whose model id contains characters that need JSON
+    escaping (quotes, backslash, control bytes). Events output must remain
+    valid JSON and round-trip exactly.
+
+    Note: the slug also exercises escaping — it comes from a directory
+    name, and our fixture loader uses a normal directory name; we exercise
+    the model-id and session-id paths here.
+    """
+    name = "10-escape-chars"
+    # Slug is a directory name, so we can't use control bytes here.
+    slug = "project-kappa"
+    # Session id is a filename stem on disk — keep it Windows-safe (no
+    # `\ " : < > | ? *`). The escape-output code path is exercised by the
+    # `nasty_model` field below, which sees the same JSON writer.
+    session_id = "sess-010-escape-chars"
+    nasty_model = "claude-sonnet-quote\"backslash\\newline\ntab\tctl\x01"
+    t = turn("msg-010", _IN_WINDOW, nasty_model, 1000, 100)
+    write_fixture(name, slug, session_id, [t])
+    return name, [expected_record(t, slug, session_id)]
+
+
+def fixture_11_iso_variants():
+    """A14: events scanner must accept non-Z ISO offsets and fractional seconds,
+    and skip malformed timestamps. Three turns: +05:30 offset, fractional-Z,
+    and a malformed timestamp (skipped).
+    """
+    name = "11-iso-variants"
+    slug = "project-lambda"
+    session_id = "sess-011"
+    from datetime import timedelta
+    fresh_utc = datetime.fromtimestamp(_IN_WINDOW, tz=timezone.utc)
+    offset = timedelta(hours=5, minutes=30)
+    local = fresh_utc + offset
+    iso_offset = local.strftime("%Y-%m-%dT%H:%M:%S") + "+05:30"
+    iso_frac = fresh_utc.strftime("%Y-%m-%dT%H:%M:%S.123456Z")
+    # Build turns by hand to control the timestamp string format exactly.
+    t_offset = {
+        "type": "assistant", "timestamp": iso_offset,
+        "message": {"id": "msg-011-offset", "role": "assistant",
+                    "model": "claude-opus-4-7",
+                    "usage": {"input_tokens": 1000, "output_tokens": 500,
+                              "cache_read_input_tokens": 0,
+                              "cache_creation_input_tokens": 0}},
+    }
+    t_frac = {
+        "type": "assistant", "timestamp": iso_frac,
+        "message": {"id": "msg-011-frac", "role": "assistant",
+                    "model": "claude-sonnet-4-6",
+                    "usage": {"input_tokens": 500, "output_tokens": 100,
+                              "cache_read_input_tokens": 0,
+                              "cache_creation_input_tokens": 0}},
+    }
+    t_malformed = {
+        "type": "assistant", "timestamp": "2026-13-99T99:99:99Z",
+        "message": {"id": "msg-011-malformed", "role": "assistant",
+                    "model": "claude-opus-4-7",
+                    "usage": {"input_tokens": 999999}},
+    }
+    write_fixture(name, slug, session_id, [t_offset, t_frac, t_malformed])
+    # Expected records: only the two well-formed turns. Compute expected
+    # records by reusing expected_record (which parses the timestamp).
+    return name, [
+        expected_record(t_offset, slug, session_id),
+        expected_record(t_frac, slug, session_id),
+    ]
+
+
 FIXTURES = [
     fixture_01_empty,
     fixture_02_single,
@@ -247,6 +379,10 @@ FIXTURES = [
     fixture_05_cache_mix,
     fixture_06_malformed_mixed,
     fixture_07_web_search,
+    fixture_08_dirty_ladder,
+    fixture_09_subagent,
+    fixture_10_escape_chars,
+    fixture_11_iso_variants,
 ]
 
 

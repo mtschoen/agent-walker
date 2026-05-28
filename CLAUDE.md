@@ -89,18 +89,72 @@ warning-clean:
   `~/go/bin`; see `~/.claude/notes/reference_static_analysis_tools.md`).
 - **Zig** — `cd zig && zig fmt --check src/ && zig build`.
 
+## Coverage
+
+`python shared/coverage.py [rust cpp go zig]` (default: all) builds each
+impl **instrumented**, drives the existing `conformance.py` fixtures
+through it (the harness runs the binary as a subprocess, so coverage env
+is inherited), collects per-language line/statement coverage, and writes
+`TEST-REPORT.md` at the repo root. Exits non-zero until every measured
+impl hits 100%. Roadmap + phase status: `COVERAGE-PLAN.md`.
+
+`--baseline rust=97.47,cpp=98.40,go=96.73,zig=93.63` switches the gate
+from "must be 100%" to "must not regress vs documented thresholds" —
+this is the Phase 4 CI mode locked in until COVERAGE-PLAN items 4 and 6
+close the remaining gap. Raise the floors in the same PR that raises
+coverage.
+
+Per-impl mechanism (see module docstring for detail):
+- **Rust** — cargo-llvm-cov "external test" show-env workflow; the
+  release `strip`/`lto` settings that corrupt coverage mapping are
+  overridden via `CARGO_PROFILE_RELEASE_*` env, not in `Cargo.toml`.
+  Needs `cargo install cargo-llvm-cov` + `rustup component add llvm-tools-preview`.
+- **C++** — `-DWALKER_COVERAGE=ON` CMake option (instruments the `walker`
+  target only) into a separate `cpp/build-cov` tree; `llvm-profdata` +
+  `llvm-cov`, with `-ignore-filename-regex=_deps/` dropping vendored simdjson.
+- **Go** — `go build -cover` + `GOCOVERDIR` per run + `go tool covdata`.
+- **Zig** — `zig build -Dcoverage=true` forces the **LLVM backend**; the
+  0.16 default self-hosted backend emits DWARF kcov can't parse (kcov sees
+  `compiler_rt` but not our module → 0 lines). Runs under a **DWARF5-capable
+  kcov** — stock kcov 43 and the liyu1981/zig-kcov fork both fail (crash on
+  clang DWARF5, silent 0 lines on Zig); a build of **SimonKagstrom/kcov
+  master** works. `coverage.py` looks for it at
+  `~/.local/src/kcov-master/build/src/kcov` or `$KCOV`. Each conformance
+  invocation accumulates into one kcov outdir.
+
+`WALKER_BIN_<LANG>` env vars (honored by `conformance.find_binary`) point
+the harness at the instrumented builds without clobbering release binaries
+— except Rust/Zig, whose coverage builds do replace the binary at the
+default discovery path (rebuild release to restore). Coverage runs leave
+`*.profraw` in CWD if an instrumented binary is later run bare; gitignored.
+
 ## CI
 
 `.gitea/workflows/ci.yml` builds all four impls on `ubuntu-latest` +
 `windows-latest` (the llamabox Gitea Actions runners) and runs
-`python shared/conformance.py rust cpp go zig` on each. Triggers on
-push to `main`, pull_request to `main`, and `workflow_dispatch`.
+`python shared/conformance.py rust cpp go zig` on each. A third
+`coverage-linux` job builds kcov-master and runs
+`python shared/coverage.py --baseline …` to gate per-impl regression
+against the documented baseline. Triggers on push to `main`,
+pull_request to `main`, and `workflow_dispatch`.
 
 **Footgun:** `conformance.py` silently prints SKIP and exits 0 when
 a binary is missing — a misnamed output path would masquerade as a
 green run. The workflow has an explicit "Verify all binaries built"
 step that `test -f` / `Test-Path`s every expected artifact before
 invoking the harness. Keep that step intact if you ever rework CI.
+
+**kcov needs the personality syscall — runner has a custom seccomp
+profile.** Docker's default seccomp blocks `personality(ADDR_NO_RANDOMIZE)`,
+which kcov uses to disable ASLR for accurate addr→line mapping. The
+llamabox act_runner runs job containers with
+`--security-opt seccomp=/etc/gitea-runner/seccomp-kcov.json` — Docker
+default + 2 additional allow-rules (values 262144 and 262152 covering
+`ADDR_NO_RANDOMIZE` and `ADDR_NO_RANDOMIZE|PER_LINUX32`). The repo
+canonical copy is `.gitea/seccomp-kcov.json`; if you ever change it,
+also re-`install` it to `/etc/gitea-runner/` and `systemctl restart
+act_runner` on llamabox. The runner config option line lives in
+`/etc/gitea-runner/config.yaml` under `container.options`.
 
 ## macOS
 

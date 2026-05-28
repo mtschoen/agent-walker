@@ -64,6 +64,56 @@
         "session_id": "sess-007",
         "slug": "project-eta"
       }
+    ],
+    "08-dirty-ladder": [
+      {
+        "ts": 1747899940.0,
+        "usd": 0.0045,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-008",
+        "slug": "project-theta"
+      }
+    ],
+    "09-subagent": [
+      {
+        "ts": 1747899940.0,
+        "usd": 0.01,
+        "model": "claude-opus-4-7",
+        "session_id": "sess-009",
+        "slug": "project-iota"
+      },
+      {
+        "ts": 1747899940.0,
+        "usd": 0.00055,
+        "model": "claude-haiku-4-5",
+        "session_id": "sess-009",
+        "slug": "project-iota"
+      }
+    ],
+    "10-escape-chars": [
+      {
+        "ts": 1747899940.0,
+        "usd": 0.0045,
+        "model": "claude-sonnet-quote\"backslash\\newline\ntab\tctl\u0001",
+        "session_id": "sess-010-escape-chars",
+        "slug": "project-kappa"
+      }
+    ],
+    "11-iso-variants": [
+      {
+        "ts": 1747899940.0,
+        "usd": 0.0175,
+        "model": "claude-opus-4-7",
+        "session_id": "sess-011",
+        "slug": "project-lambda"
+      },
+      {
+        "ts": 1747899940.123456,
+        "usd": 0.003,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-011",
+        "slug": "project-lambda"
+      }
     ]
   }
 }

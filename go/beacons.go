@@ -624,12 +624,11 @@ func runBeaconsHistory(args []string) {
 	// beaconRegex is safe for concurrent use (regexp.Regexp is documented
 	// thread-safe for its Find/Match methods). sonic.Unmarshal is also
 	// documented thread-safe. Mirrors the cost-mode pattern in main.go.
+	// runtime.NumCPU is documented to return a value >= 1, so no lower
+	// clamp is needed; cap at 8 to avoid runaway parallelism on big hosts.
 	numWorkers := runtime.NumCPU()
 	if numWorkers > 8 {
 		numWorkers = 8
-	}
-	if numWorkers < 1 {
-		numWorkers = 1
 	}
 
 	work := make(chan []string, len(groupSlices))

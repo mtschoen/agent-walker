@@ -28,3 +28,14 @@ if(MSVC)
 else()
     target_compile_options(walker PRIVATE $<$<CONFIG:Release>:-O3>)
 endif()
+
+# Clang source-based coverage. Applied to the walker target only so vendored
+# simdjson (build/_deps) stays uninstrumented; system/STL headers that leak
+# coverage mapping are filtered out of the report via -ignore-filename-regex
+# in shared/coverage.py. Configure a dedicated build dir with
+# -DWALKER_COVERAGE=ON (Clang required) — never mix with the Release build.
+option(WALKER_COVERAGE "Build walker with Clang source-based coverage instrumentation" OFF)
+if(WALKER_COVERAGE)
+    target_compile_options(walker PRIVATE -fprofile-instr-generate -fcoverage-mapping -O0 -g)
+    target_link_options(walker PRIVATE -fprofile-instr-generate -fcoverage-mapping)
+endif()

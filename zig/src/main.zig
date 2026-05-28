@@ -304,7 +304,6 @@ extern "c" fn _NSGetArgv() *[*][*:0]u8;
 extern "c" fn _NSGetArgc() *c_int;
 
 fn getArgsDarwin(alloc: Allocator) ![][]const u8 {
-    if (!is_darwin) unreachable;
     const argc: usize = @intCast(_NSGetArgc().*);
     const argv = _NSGetArgv().*;
     var out: std.ArrayList([]const u8) = .empty;
@@ -352,7 +351,6 @@ fn getArgsLinux(alloc: Allocator) ![][]const u8 {
 }
 
 fn getArgsWindows(alloc: Allocator) ![][]const u8 {
-    if (!is_windows) unreachable;
     const wcmd = platform.GetCommandLineW();
     const wlen = std.mem.len(wcmd);
     const ws = wcmd[0..wlen];
@@ -572,7 +570,9 @@ pub fn modelCost(inp: u64, out_: u64, cr: u64, cw: u64, web_searches: u64, model
 // ─── ISO 8601 ────────────────────────────────────────────────────────────────
 
 pub fn parseTs(s: []const u8) !f64 {
-    if (s.len < 20 or s[s.len - 1] != 'Z') return error.Bad;
+    // Accept ISO 8601: "YYYY-MM-DDTHH:MM:SS[.frac][Z|+HH:MM|-HH:MM]".
+    // Rust/C++/Go all accept the numeric-offset form; Zig must too.
+    if (s.len < 19) return error.Bad;
     if (s[4] != '-' or s[7] != '-' or s[10] != 'T' or s[13] != ':' or s[16] != ':')
         return error.Bad;
     const yr: i32 = try std.fmt.parseInt(i32, s[0..4], 10);
@@ -581,13 +581,47 @@ pub fn parseTs(s: []const u8) !f64 {
     const hr: u32 = try std.fmt.parseInt(u32, s[11..13], 10);
     const mn: u32 = try std.fmt.parseInt(u32, s[14..16], 10);
     const sc: u32 = try std.fmt.parseInt(u32, s[17..19], 10);
+    // Per SPEC: malformed ISO 8601 → skip. Range-validate so values like
+    // "2026-13-99T99:99:99Z" don't silently roll into a real epoch second.
+    if (mo < 1 or mo > 12) return error.Bad;
+    const dim_max: u32 = @intCast(dim(mo, yr));
+    if (dy < 1 or dy > dim_max) return error.Bad;
+    if (hr > 23 or mn > 59 or sc > 60) return error.Bad;
+    // Fractional seconds (optional).
     var frac: f64 = 0.0;
-    if (s.len > 21 and s[19] == '.') {
-        const fs = s[20 .. s.len - 1];
+    var pos: usize = 19;
+    if (pos < s.len and s[pos] == '.') {
+        pos += 1;
+        const start = pos;
+        while (pos < s.len and s[pos] >= '0' and s[pos] <= '9') : (pos += 1) {}
+        if (pos == start) return error.Bad;
+        const fs = s[start..pos];
         const fn_ = try std.fmt.parseInt(u64, fs, 10);
         frac = @as(f64, @floatFromInt(fn_)) / std.math.pow(f64, 10.0, @as(f64, @floatFromInt(fs.len)));
     }
-    return @as(f64, @floatFromInt(calToUnix(yr, mo, dy, hr, mn, sc))) + frac;
+    // Timezone: optional Z, +HH:MM, -HH:MM, or absent (naive UTC).
+    var tz_offset_sec: i64 = 0;
+    if (pos < s.len) {
+        const c = s[pos];
+        if (c == 'Z') {
+            pos += 1;
+        } else if (c == '+' or c == '-') {
+            // Need +HH:MM (5 more chars).
+            if (pos + 6 > s.len) return error.Bad;
+            if (s[pos + 3] != ':') return error.Bad;
+            const tz_h: i64 = try std.fmt.parseInt(i64, s[pos + 1 .. pos + 3], 10);
+            const tz_m: i64 = try std.fmt.parseInt(i64, s[pos + 4 .. pos + 6], 10);
+            if (tz_h > 23 or tz_m > 59) return error.Bad;
+            const sign: i64 = if (c == '-') -1 else 1;
+            tz_offset_sec = sign * (tz_h * 3600 + tz_m * 60);
+            pos += 6;
+        } else {
+            return error.Bad;
+        }
+    }
+    if (pos != s.len) return error.Bad;
+    const epoch_sec: i64 = calToUnix(yr, mo, dy, hr, mn, sc) - tz_offset_sec;
+    return @as(f64, @floatFromInt(epoch_sec)) + frac;
 }
 
 fn leap(y: i32) bool {
@@ -662,9 +696,8 @@ pub fn parseStringValue(scanner: *std.json.Scanner, alloc: Allocator) !?[]const 
     }
     const tok = try scanner.nextAlloc(alloc, .alloc_if_needed);
     return switch (tok) {
-        .string => |s| s,
-        .allocated_string => |s| s,
-        else => unreachable,
+        .string, .allocated_string => |s| s,
+        else => null,
     };
 }
 
@@ -679,9 +712,8 @@ pub fn parseU64Value(scanner: *std.json.Scanner, alloc: Allocator) !u64 {
     }
     const tok = try scanner.nextAlloc(alloc, .alloc_if_needed);
     const slice: []const u8 = switch (tok) {
-        .number => |s| s,
-        .allocated_number => |s| s,
-        else => unreachable,
+        .number, .allocated_number => |s| s,
+        else => return 0,
     };
     if (std.fmt.parseInt(i64, slice, 10)) |n| {
         return if (n >= 0) @intCast(n) else 0;

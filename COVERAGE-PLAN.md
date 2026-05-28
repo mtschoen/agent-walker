@@ -1,6 +1,18 @@
 # claude-walker — Plan for 100% test coverage
 
-> Status: **proposed** (not yet started). Author: session 2026-05-27.
+> Status: **Phases 0–4 live; gap to 100% closes in follow-up PRs** (2026-05-28).
+> Pipeline + baseline live (Phases 0–1, `shared/coverage.py` → `TEST-REPORT.md`).
+> Gap matrix written (Phase 2 → `COVERAGE-GAPS.md`). Phase 3 ran three rounds of
+> parallel fan-out (Batches B/C/D + sub-batches A-i/A-ii/A-iii + R3-α/β/γ),
+> then small follow-ups landed items 1/2/3 from the resume list (Zig §F
+> unreachable-asserts restructured, Go walker_roots:71 covered via a
+> wrong-typed-extras fixture, Rust events broken-pipe branch tested in-process).
+> Phase 4 CI gate live: `.gitea/workflows/ci.yml::coverage-linux` runs
+> `shared/coverage.py --baseline …` and fails on regression. Current:
+> **rust 97.47% · cpp 98.40% · go 96.73% · zig 93.63%** (locked as baseline).
+> Three real bugs fixed along the way (2× Zig `parseTs`, 1× Zig regex parity).
+> Remaining work to 100% — items 4 (SPEC under-specs) and 6 (platform seam) —
+> in §"Resume points" below.
 > Goal: every line of production code in **all four impls** exercised by a
 > test, with a checked-in `TEST-REPORT.md` and a CI gate. See
 > `~/.claude/skills/maintaining-full-coverage` for the governing discipline.
@@ -59,9 +71,19 @@ Sources: [go.dev/doc/build-cover](https://go.dev/doc/build-cover) ·
 [Clang Source-based Coverage](https://clang.llvm.org/docs/SourceBasedCodeCoverage.html) ·
 [zig-kcov](https://github.com/roc-lang/zig-kcov) · [Ziggit kcov thread](https://ziggit.dev/t/using-kcov-with-zig-test/3421)
 
+> **Phase 0 finding (Zig is harder than the table implies):** stock kcov 43
+> *and* the roc-lang/zig-kcov fork both fail on the DWARF5 these toolchains
+> now emit — the fork crashes on Clang DWARF5 and silently reports 0 lines on
+> Zig. Two fixes were required: (1) build Zig with the **LLVM backend**
+> (`zig build -Dcoverage=true` sets `exe.use_llvm`) — the 0.16 default
+> self-hosted backend emits DWARF kcov can't parse (it sees `compiler_rt` but
+> not our module); (2) use a build of **SimonKagstrom/kcov master**, which
+> parses DWARF5. `shared/coverage.py` implements this; CI must build kcov
+> master rather than installing a packaged kcov.
+
 ## 4. Phased roadmap
 
-### Phase 0 — Baseline (no new tests)
+### Phase 0 — Baseline (no new tests) — ✅ DONE
 Stand up the four toolchains above, instrument each binary, run the **existing**
 `conformance.py` against the instrumented binaries, and record the starting
 coverage % per language. Deliverable: first `TEST-REPORT.md` with four numbers
@@ -69,7 +91,7 @@ coverage % per language. Deliverable: first `TEST-REPORT.md` with four numbers
 edge cases, and platform branches). This proves the collection pipeline before
 any test-writing.
 
-### Phase 1 — Coverage orchestrator
+### Phase 1 — Coverage orchestrator — ✅ DONE
 Add `shared/coverage.py` (sibling to `conformance.py`) that:
 - builds each impl in its instrumented mode,
 - runs the conformance fixtures with the right env (`GOCOVERDIR`,
@@ -79,7 +101,7 @@ Add `shared/coverage.py` (sibling to `conformance.py`) that:
 Add a `--coverage` flag to `conformance.py` or a thin wrapper so one command
 does the whole thing. Document it in `CLAUDE.md`.
 
-### Phase 2 — Gap analysis
+### Phase 2 — Gap analysis — ✅ DONE (see `COVERAGE-GAPS.md`)
 For each language, read the uncovered-line report and classify every gap:
 - **(a) reachable, untested** → Phase 3 test (most gaps),
 - **(b) dead code** → delete it (the escalation ladder's preferred outcome),
@@ -87,6 +109,44 @@ For each language, read the uncovered-line report and classify every gap:
   after §5's restructure attempt and explicit human sign-off.
 Produce a behavior-keyed gap matrix (rows = behaviors, columns = 4 langs) so
 shared gaps get fixed once via fixtures.
+
+### Resume points (for a future session)
+
+Coverage today: rust 97.47% / cpp 98.40% / go 96.73% / zig 93.63% — locked
+as the CI baseline. The gap matrix in `COVERAGE-GAPS.md` is still the
+right index. Items 1/2/3/5 below have **landed**; 4 and 6 remain:
+
+1. ~~**Zig §F unreachable-asserts**~~ — landed. The 8 token-switch /
+   platform-assert sites were restructured (combined `.number,
+   .allocated_number` arms with `else => return null`; deleted the
+   `if (!is_*) unreachable;` defensive guards; folded `parseTimeArg`'s
+   outer suffix-check into the switch so `else => 0.0` is reachable;
+   replaced `prog orelse unreachable` with a defined fallback).
+2. ~~**Walker_roots.go:71 typed-unmarshal**~~ — landed. Added a
+   `wrong-typed-extras` variant to `MALFORMED_CONFIG_VARIANTS` in
+   `shared/conformance.py`: a body of `{"extra_roots":[1,2,3]}` reaches
+   Go's typed `json.Unmarshal` failure branch (line 71); Rust/C++/Zig
+   silently skip non-string elements, both consistent with SPEC.
+3. ~~**Rust `events.rs` broken-pipe + serialize branches**~~ — landed.
+   Extracted `emit_records<W: Write>` and added an in-process test using
+   a `BrokenPipeWriter` that returns `ErrorKind::BrokenPipe` on first
+   write; verifies the loop breaks after one attempt without panicking.
+4. **SPEC under-specifications surfaced by Phase 3 agents** — three
+   pretty-format divergences (highlight delimiter spacing, summary line
+   format, Go dropping post-match suffix) and three `--include-tool-blocks`
+   tool_use input formatting divergences (rust quotes / cpp unwraps /
+   go preserves bytes). Each needs a SPEC decision before a parity test
+   can be tightened beyond "substring presence" — not coverage work
+   per se but blocks the last few search.* lines.
+5. ~~**Phase 4 CI gate**~~ — landed. `.gitea/workflows/ci.yml` gained a
+   `coverage-linux` job that builds SimonKagstrom/kcov master and runs
+   `python shared/coverage.py --baseline rust=97.47,cpp=98.40,go=96.73,zig=93.63`.
+   Regression below any threshold fails the job. Raise the floors in the
+   same PR that raises coverage; the macOS check stays local-only.
+6. **Platform branches (§D, the long pole)** — Windows + macOS
+   discovery code. Per §5 of this plan, the preferred path is the
+   restructure-for-testability seam (inject home dir, dir-lister,
+   clock). Saved for last; large refactor across all four impls.
 
 ### Phase 3 — Fill the gaps
 - **Shared behavior gaps** → new `conformance.py` fixtures via the

@@ -270,3 +270,119 @@ jobs:
       - name: Run conformance
         shell: pwsh
         run: python shared/conformance.py rust cpp go zig
+
+  coverage-linux:
+    name: Coverage Gate (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build + coverage + kcov runtime deps
+        # clang + llvm: required for the C++ source-based coverage path
+        #   (clang++ produces .profraw via -fprofile-instr-generate, then
+        #   llvm-profdata/llvm-cov merge + report).
+        # libclang-rt-NN-dev: provides libclang_rt.profile-x86_64.a, the
+        #   runtime linked when `-fprofile-instr-generate` is used. The
+        #   unversioned `clang` apt meta-package does NOT pull this in
+        #   automatically — installed separately after we learn the
+        #   actual clang major version from `clang --version`.
+        # libdw/libcurl/libelf/binutils-dev: kcov build dependencies.
+        # cmake: needed for both kcov and the C++ instrumented build.
+        run: |
+          set -e
+          if command -v sudo >/dev/null 2>&1; then SUDO=sudo; else SUDO=; fi
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends \
+            cmake build-essential pkg-config git curl tar xz-utils \
+            clang llvm \
+            libdw-dev libcurl4-openssl-dev libelf-dev libiberty-dev \
+            binutils-dev zlib1g-dev
+          CLANG_VERSION=$(clang --version | grep -oP 'clang version \K\d+' | head -1)
+          if [ -z "$CLANG_VERSION" ]; then
+            echo "::error::could not detect installed clang major version"
+            exit 1
+          fi
+          echo "installed clang major version: $CLANG_VERSION"
+          $SUDO apt-get install -y --no-install-recommends \
+            "libclang-rt-${CLANG_VERSION}-dev"
+          # Confirm the profile runtime is actually present before
+          # proceeding — otherwise the cmake build will fail late with a
+          # missing libclang_rt.profile-x86_64.a linker error.
+          test -f "/usr/lib/llvm-${CLANG_VERSION}/lib/clang/${CLANG_VERSION}/lib/linux/libclang_rt.profile-x86_64.a" \
+            || { echo "::error::libclang_rt.profile-x86_64.a missing after install"; exit 1; }
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        # External-test workflow for collecting Rust coverage off the
+        # conformance harness (see shared/coverage.py::cov_rust).
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Install Zig 0.16.0
+        run: |
+          set -e
+          ZIG_VERSION=0.16.0
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
+          mkdir -p "$HOME/.local/zig"
+          tar -xf /tmp/zig.tar.xz -C "$HOME/.local/zig" --strip-components=1
+          echo "$HOME/.local/zig" >> "$GITHUB_PATH"
+          "$HOME/.local/zig/zig" version
+
+      - name: Build kcov-master (DWARF5-capable)
+        # Stock kcov 43 and liyu1981/zig-kcov both fail on Zig 0.16's
+        # LLVM-backend DWARF5 output (see CLAUDE.md / COVERAGE-PLAN.md).
+        # SimonKagstrom/kcov master is the only one that parses it.
+        # shared/coverage.py discovers it at this exact path (or via
+        # $KCOV) — do not move without updating find_kcov().
+        run: |
+          set -e
+          KCOV_SRC="$HOME/.local/src/kcov-master"
+          if [ ! -x "$KCOV_SRC/build/src/kcov" ]; then
+            git clone --depth=1 https://github.com/SimonKagstrom/kcov.git "$KCOV_SRC"
+            cmake -S "$KCOV_SRC" -B "$KCOV_SRC/build" -DCMAKE_BUILD_TYPE=Release
+            cmake --build "$KCOV_SRC/build" -j
+          fi
+          "$KCOV_SRC/build/src/kcov" --version
+
+      - name: Run coverage gate
+        # Baseline thresholds match TEST-REPORT.md at branch head. Any
+        # impl dropping below its threshold fails CI. Raising the floor
+        # is the path to 100%: do the work in a PR, bump the threshold
+        # here in the same PR. The remaining COVERAGE-PLAN items (4 — SPEC
+        # under-specs, 6 — platform seam) close the gap to 100% from here.
+        run: |
+          python shared/coverage.py --baseline rust=97.47,cpp=98.40,go=96.73,zig=93.63
+
+      - name: Post coverage status
+        # Posts a Gitea commit status (context=claude-walker/coverage) with
+        # the cumulative pooled % in the description. Shows up as its own
+        # check line on the PR with the percent inline — the workflow's own
+        # status line can't be re-described per-run. Modeled on projdash's
+        # ci/post-coverage-status.py. `if: always()` so the percent posts
+        # even when the gate fails (state then reflects the read, not the
+        # gate verdict — the gate's own status line still goes red).
+        #
+        # GITEA_TLS_INSECURE=1: opt into skipping TLS verification on the
+        # POST. The llamabox runner container already runs with
+        # GIT_SSL_NO_VERIFY=true and NODE_TLS_REJECT_UNAUTHORIZED=0 (see
+        # reference_act_runner_llamabox.md) because the mkcert root isn't
+        # in the runner's trust store. Same trade-off, same trusted network.
+        # To do this properly, install the mkcert CA into the runner image
+        # and drop this env var (and the SSL-skip branch in post-coverage-
+        # status.py would become dead code).
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITEA_TLS_INSECURE: "1"
+        run: python3 ci/post-coverage-status.py

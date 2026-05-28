@@ -98,6 +98,85 @@ def user_tool_result(unix_ts: float, tool_use_id: str, content: str) -> dict:
     }
 
 
+def user_tool_result_array(unix_ts: float, tool_use_id: str, texts: list[str]) -> dict:
+    """User entry whose content is a tool_result whose `content` is itself an
+    array of text blocks (a shape some Claude API responses use).
+
+    Default search skips it; --include-tool-blocks concatenates the inner text
+    blocks (mirrors content.rs::extract_text 'tool_result content array' branch).
+    """
+    return {
+        "type": "user",
+        "timestamp": iso(unix_ts),
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": [{"type": "text", "text": t} for t in texts],
+                }
+            ],
+        },
+    }
+
+
+def assistant_with_tool_use(
+    unix_ts: float, msg_id: str, text: str, tool_use_id: str, tool_name: str,
+    tool_input: dict | str,
+) -> dict:
+    """Assistant entry mixing a text block with a tool_use block. `tool_input`
+    may be a dict (modern, structured) or a string (older clients that ship
+    pre-stringified JSON). Both shapes round-trip through serde_json::Value /
+    nlohmann::json / encoding/json / std.json — the impls dump the whole value
+    back via Value::to_string-equivalent."""
+    return {
+        "type": "assistant",
+        "timestamp": iso(unix_ts),
+        "message": {
+            "id": msg_id,
+            "role": "assistant",
+            "model": "claude-opus-4-7",
+            "content": [
+                {"type": "text", "text": text},
+                {
+                    "type": "tool_use",
+                    "id": tool_use_id,
+                    "name": tool_name,
+                    "input": tool_input,
+                },
+            ],
+            "usage": {
+                "input_tokens": 50,
+                "output_tokens": 25,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            },
+        },
+    }
+
+
+def assistant_text_no_timestamp(msg_id: str, text: str) -> dict:
+    """Assistant entry missing the top-level `timestamp` field. Under a
+    `--since`/`--until` filter the scanner MUST skip it (covers the
+    'else if since.is_some() || until.is_some()' branch in every impl)."""
+    return {
+        "type": "assistant",
+        "message": {
+            "id": msg_id,
+            "role": "assistant",
+            "model": "claude-opus-4-7",
+            "content": [{"type": "text", "text": text}],
+            "usage": {
+                "input_tokens": 50,
+                "output_tokens": 25,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            },
+        },
+    }
+
+
 def write_jsonl(path: Path, lines: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
@@ -785,6 +864,461 @@ def scenario_11_multibyte_snippet_boundary():
     return scenario, files, expected
 
 
+def scenario_12_tool_use_and_result_array():
+    """Cover the tool_use input + tool_result content-array branches.
+
+    SPEC §"Search" + CONTENT extraction: with `--include-tool-blocks`, search
+    pulls (a) tool_use.input and (b) tool_result.content when the latter is an
+    array of text blocks (not just the string shape exercised by scenario 05).
+    Without the flag those branches must be invisible.
+
+    Layout — two sessions, each isolating one shape:
+
+      sid_a: assistant text "ok" + tool_use w/ STRING input "the needle here"
+              -> hits the `tool_use if include_tool_blocks` branch in every
+                 impl's extract_text equivalent. The exact in-snippet form is
+                 PER-IMPL drift (rust dumps via Value::to_string() — quoted;
+                 cpp unwraps strings — unquoted; go preserves source bytes —
+                 quoted), so this combo uses `--count-only` and asserts only
+                 the hit count, not the snippet bytes.
+      sid_c: user content = [tool_result whose content is a text-block array]
+              -> hits the `tool_result.content as_array` branch. All impls
+                 join inner text blocks with "\n" deterministically.
+
+    sid_a has a non-empty text block ("ok") so default-mode still scans the
+    message and walks all blocks — verifying the tool branches stay gated by
+    --include-tool-blocks even when the entry is NOT pure tool_use. sid_c is
+    pure tool_result-array, default-skipped via is_only_tool_blocks.
+    """
+    scenario = "12-tool-use-and-result-array"
+    t_a, t_c = NOW_UNIX - 3000, NOW_UNIX - 1000
+
+    text_a = "ok"
+    string_input = "the needle here"
+    arr_texts = ["before block", "needle in array block", "after block"]
+
+    files = {
+        "sid_a.jsonl": [
+            assistant_with_tool_use(
+                t_a, "msg_12_a", text_a, "toolu_12_a", "fake_tool", string_input,
+            ),
+        ],
+        "sid_c.jsonl": [
+            user_tool_result_array(t_c, "toolu_12_c", arr_texts),
+        ],
+    }
+
+    blob_c = "\n".join(arr_texts)
+    snip_c, off_c = snippet_and_offsets(blob_c, "needle", 240)
+
+    hit_c = hit(
+        session_id="sid_c", cwd_slug=scenario, line_number=1,
+        timestamp=iso(t_c), role="user", snippet=snip_c,
+        match_offsets=off_c,
+    )
+
+    expected = {
+        "default": {
+            "description": "Default mode: tool_use input and tool_result-array "
+                           "are invisible (sid_a 'ok' text has no needle, "
+                           "sid_c is only-tool-blocks). 0 hits.",
+            "pattern": "needle",
+            "flags": [],
+            "hits": [],
+            "summary": summary(hits=0, sessions_matched=0),
+        },
+        "include-tool-blocks-array": {
+            "description": "--include-tool-blocks finds the needle inside a "
+                           "tool_result.content text-block array (sid_c only; "
+                           "sid_a's tool_use input snippet is per-impl).",
+            "pattern": "needle",
+            "flags": ["--include-tool-blocks", "--cwd", scenario, "--role", "user"],
+            "hits": [hit_c],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+        "include-tool-blocks-count": {
+            "description": "--include-tool-blocks + --count-only across both "
+                           "sessions: count alone (snippet bytes for tool_use "
+                           "differ per impl, so we don't pin them).",
+            "pattern": "needle",
+            "flags": ["--include-tool-blocks", "--count-only"],
+            "hits": [],
+            "summary": summary(hits=2, sessions_matched=2),
+        },
+    }
+    return scenario, files, expected
+
+
+def scenario_13_time_units_and_edges():
+    """Exercise every `--since`/`--until` relative-unit arm + an ISO absolute,
+    a message past `--until`, and an entry with no top-level timestamp.
+
+    Layout — one session, four entries:
+      e1 (t-30d):   "needle thirty days ago"
+      e2 (t-2h):    "needle two hours ago"
+      e3 (t-45s):   "needle forty-five seconds ago"
+      e4 (no ts):   "needle but no timestamp"  (must be skipped under any
+                                                  --since/--until filter; emits
+                                                  under no-time-filter cases)
+
+    Combos:
+      since-2h:   e3 only (e2 is exactly at the boundary; we set t-2h-1 below
+                  to land it inside). e1 too old, e4 has no ts -> skipped.
+      since-30m:  e3 only.
+      since-10s:  empty (e3 is 45s ago, older than 10s).
+      since-iso:  RFC3339 absolute matching the --since=2h cutoff exactly.
+      until-1h:   e1 only (e3/e2 are newer than the --until cutoff; e4 skipped
+                  because it has no timestamp under a time filter).
+      no-filter:  all four entries with timestamps emit; the e4 (no-ts) entry
+                  emits too (no time filter -> the missing-timestamp branch
+                  is not reached). The newest-first sort key for e4 is
+                  whatever the scanner emits — every impl falls back to "" in
+                  the JSON output. (Asserted below.)
+    """
+    scenario = "13-time-units-and-edges"
+    # Slack the t-2h entry past the 2h boundary so it filters reliably across
+    # impls (a hair past the cutoff, not exactly on it).
+    t_e1 = NOW_UNIX - 30 * DAY
+    t_e2 = NOW_UNIX - 7201.0   # 2h 1s old
+    t_e3 = NOW_UNIX - 45.0     # 45s old
+    text_e1 = "needle thirty days ago"
+    text_e2 = "needle two hours ago"
+    text_e3 = "needle forty-five seconds ago"
+    text_e4 = "needle but no timestamp"
+
+    files = {
+        "sid1.jsonl": [
+            assistant_text(t_e1, "msg_13_e1", text_e1),
+            assistant_text(t_e2, "msg_13_e2", text_e2),
+            assistant_text(t_e3, "msg_13_e3", text_e3),
+            assistant_text_no_timestamp("msg_13_e4", text_e4),
+        ],
+    }
+
+    o_e1 = find_offset(text_e1, "needle")
+    o_e2 = find_offset(text_e2, "needle")
+    o_e3 = find_offset(text_e3, "needle")
+    o_e4 = find_offset(text_e4, "needle")
+
+    h_e1 = hit(
+        session_id="sid1", cwd_slug=scenario, line_number=1,
+        timestamp=iso(t_e1), role="assistant", snippet=text_e1,
+        match_offsets=[[o_e1[0], o_e1[1]]],
+        context_before=[],
+        context_after=[ctx("assistant", text_e2, iso(t_e2))],
+    )
+    h_e2 = hit(
+        session_id="sid1", cwd_slug=scenario, line_number=2,
+        timestamp=iso(t_e2), role="assistant", snippet=text_e2,
+        match_offsets=[[o_e2[0], o_e2[1]]],
+        context_before=[ctx("assistant", text_e1, iso(t_e1))],
+        context_after=[ctx("assistant", text_e3, iso(t_e3))],
+    )
+    h_e3 = hit(
+        session_id="sid1", cwd_slug=scenario, line_number=3,
+        timestamp=iso(t_e3), role="assistant", snippet=text_e3,
+        match_offsets=[[o_e3[0], o_e3[1]]],
+        context_before=[ctx("assistant", text_e2, iso(t_e2))],
+        # e4 has no timestamp -> emits as ts="" in context (matches scanner
+        # default-fallback across all four impls).
+        context_after=[ctx("assistant", text_e4, "")],
+    )
+    h_e4 = hit(
+        session_id="sid1", cwd_slug=scenario, line_number=4,
+        timestamp="", role="assistant", snippet=text_e4,
+        match_offsets=[[o_e4[0], o_e4[1]]],
+        context_before=[ctx("assistant", text_e3, iso(t_e3))],
+        context_after=[],
+    )
+
+    # An RFC3339 timestamp equal to "2h ago" relative to NOW_UNIX, so
+    # since-iso must produce the same hits as since-2h.
+    iso_2h_cutoff = iso(NOW_UNIX - 7200.0)
+
+    expected = {
+        "since-2h": {
+            "description": "--since 2h: only the 45s-old entry survives (e2 is "
+                           "past 2h boundary; e4 skipped — no timestamp).",
+            "pattern": "needle",
+            "flags": ["--since", "2h"],
+            "hits": [h_e3],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+        "since-30m": {
+            "description": "--since 30m: only the 45s-old entry survives.",
+            "pattern": "needle",
+            "flags": ["--since", "30m"],
+            "hits": [h_e3],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+        "since-10s": {
+            "description": "--since 10s: nothing matches (e3 is 45s old; "
+                           "e4 still skipped under any time filter).",
+            "pattern": "needle",
+            "flags": ["--since", "10s"],
+            "hits": [],
+            "summary": summary(hits=0, sessions_matched=0),
+        },
+        "since-iso": {
+            "description": "--since RFC3339 absolute (equiv. to 2h relative).",
+            "pattern": "needle",
+            "flags": ["--since", iso_2h_cutoff],
+            "hits": [h_e3],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+        "until-1h": {
+            "description": "--until 1h: the 30d and ~2h entries match (e3 newer "
+                           "than cutoff; e4 skipped — missing timestamp + filter).",
+            "pattern": "needle",
+            "flags": ["--until", "1h"],
+            "hits": [h_e2, h_e1],
+            "summary": summary(hits=2, sessions_matched=1),
+        },
+        "no-filter": {
+            "description": "No --since/--until: all four entries match, e4 "
+                           "(no-ts) emits with empty timestamp string.",
+            "pattern": "needle",
+            "flags": [],
+            # h_e4 has timestamp "" so newest-first puts it last (lexicographic
+            # comparison; empty < any RFC3339 string).
+            "hits": [h_e3, h_e2, h_e1, h_e4],
+            "summary": summary(hits=4, sessions_matched=1),
+        },
+    }
+    return scenario, files, expected
+
+
+def scenario_14_snippet_whitespace_nudge():
+    """A match deep inside a long ASCII paragraph where the raw snippet cuts
+    land mid-word, with ASCII whitespace within ±20 bytes of each cut so the
+    whitespace-nudge loop fires on BOTH sides (left and right).
+
+    Scenario 11 already exercises the char-boundary nudge with no whitespace
+    nearby. This sibling covers the orthogonal axis: whitespace IS available,
+    so the nudge moves the cut outward to a word boundary, producing a snippet
+    that begins after whitespace and ends at whitespace. snippet_and_offsets()
+    mirrors the impl exactly, so the expected output comes from the helper.
+    """
+    scenario = "14-snippet-whitespace-nudge"
+    t1 = NOW_UNIX - 1000
+    # Build a paragraph: pad words on both sides of "needle" so the raw cut at
+    # ±half snippet_chars lands inside a word, with whitespace within ±20.
+    # snippet_chars=60 -> half=30. We place spaces at byte offsets ~10-15 from
+    # the cut so the whitespace nudge picks them up.
+    left = "alpha beta gamma delta epsilon zeta eta theta iota kappa "
+    right = " lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi"
+    text = left + "needle" + right
+    files = {"sid1.jsonl": [assistant_text(t1, "msg_14_a1", text)]}
+    snip, offsets = snippet_and_offsets(text, "needle", 60)
+    # Sanity: the snippet should start/end at a whitespace-trimmed boundary
+    # AND must NOT be the full text (cuts were made + nudged). If either
+    # condition fails the helper drifted from the impls' algorithm.
+    assert snip != text, "snippet did not get cut — bump padding length"
+    assert not snip.startswith(" ") and not snip.endswith(" "), (
+        "whitespace nudge produced leading/trailing space"
+    )
+    hits = [
+        hit(
+            session_id="sid1", cwd_slug=scenario, line_number=1,
+            timestamp=iso(t1), role="assistant", snippet=snip,
+            match_offsets=offsets,
+        ),
+    ]
+    expected = {
+        "snippet-chars-60": {
+            "description": "Long ASCII paragraph + small --snippet-chars: both "
+                           "snippet cuts land mid-word and get nudged outward "
+                           "to whitespace boundaries (no codepoint splits).",
+            "pattern": "needle",
+            "flags": ["--snippet-chars", "60"],
+            "hits": hits,
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+    }
+    return scenario, files, expected
+
+
+REGEX_CLASS_SPECS = [
+    # (combo_name, description, text, pattern, match_offsets)
+    # Patterns are raw strings: r"\d+" -> the two chars `\d+`.
+    # Offsets are byte offsets within `text`; with default snippet_chars=240
+    # snippet == text.
+    ("digit-class",
+     "\\d+ — digit class escape",
+     "alpha 7 beta", r"\d+", [[6, 7]]),
+    ("non-digit-class",
+     "\\D+ — non-digit class escape, greedy",
+     "alpha-7-beta", r"\D+", [[0, 6], [7, 12]]),
+    ("word-class",
+     "\\w+ — word class escape",
+     "foo bar", r"\w+", [[0, 3], [4, 7]]),
+    ("non-word-class",
+     "\\W — non-word class escape",
+     "ping!pong", r"\W", [[4, 5]]),
+    ("default-escape",
+     "\\! — default-escape arm (literal `!`, escape char NOT in dDwWsSntr)",
+     "ping!pong", r"\!", [[4, 5]]),
+    ("space-class",
+     "\\s — whitespace class escape (single ASCII space)",
+     "foo bar", r"\s", [[3, 4]]),
+    ("non-space-class",
+     "\\S+ — non-whitespace class escape, greedy",
+     "foo bar", r"\S+", [[0, 3], [4, 7]]),
+    ("dot-metachar",
+     ". — dot atom (any byte except newline)",
+     "section 5: end", r"5.", [[8, 10]]),
+    ("escaped-dot",
+     "\\. — escaped dot literal",
+     "literal a.b dot", r"a\.b", [[8, 11]]),
+    ("class-range",
+     "[a-z]+ — char class with range expansion",
+     "items cat dog", r"[a-z]+", [[0, 5], [6, 9], [10, 13]]),
+    ("class-negated",
+     "[^a-z]+ — negated class (case-sensitive so uppercase/digits land)",
+     "code Z and 9 here", r"[^a-z]+", [[4, 7], [10, 13]]),
+    ("class-simple",
+     "[abc]+ — class set without ranges",
+     "show me a or b or c", r"[abc]+", [[8, 9], [13, 14], [18, 19]]),
+    ("quant-star",
+     "a*b — `*` quantifier with backtracking",
+     "aaab tail", r"a*b", [[0, 4]]),
+    ("quant-opt",
+     "colou?r — `?` quantifier",
+     "color colour", r"colou?r", [[0, 5], [6, 12]]),
+    ("quant-plus-on-class",
+     "[0-9]+x — `+` quantifier on a class atom",
+     "123x done", r"[0-9]+x", [[0, 4]]),
+    ("class-escape-in-class",
+     "[\\n\\t\\r] — escape-in-class arm; matches a tab between letters",
+     "left\tright", r"[\n\t\r]", [[4, 5]]),
+]
+
+
+def _make_regex_class_scenario(index: int, name: str, description: str,
+                                text: str, pattern: str,
+                                match_offsets: list[list[int]]):
+    """A7 helper: each pattern gets its OWN scenario dir so walker only scans
+    one message — eliminates cross-pattern leakage when the regex matches
+    multiple sessions in the same scenario dir.
+
+    Naming: `15a-regex-class-<name>` ... `15p-regex-...`. Letters keep the
+    sort order stable for kcov-comparison diffs.
+
+    `flags` is fixed at --regex --case-sensitive: the engine's case-insensitive
+    class expansion would let some negated/positive classes match both halves
+    of the alphabet and offsets drift across impls.
+    """
+    suffix = chr(ord('a') + index)
+    scenario = f"15{suffix}-regex-{name}"
+    ts = NOW_UNIX - 5000 + index * 100
+    files = {
+        "sid1.jsonl": [assistant_text(ts, f"msg_15{suffix}_a1", text)],
+    }
+    expected = {
+        "default": {
+            "description": description,
+            "pattern": pattern,
+            "flags": ["--regex", "--case-sensitive"],
+            "hits": [hit(
+                session_id="sid1", cwd_slug=scenario, line_number=1,
+                timestamp=iso(ts), role="assistant", snippet=text,
+                match_offsets=match_offsets,
+                context_before=[], context_after=[],
+            )],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+    }
+    return scenario, files, expected
+
+
+def _regex_class_scenario_factory(index: int):
+    """Return a zero-arg scenario function bound to spec[index]. Returning a
+    closure lets us register each as a separate entry in SCENARIOS."""
+    name, description, text, pattern, match_offsets = REGEX_CLASS_SPECS[index]
+    def scenario_fn():
+        return _make_regex_class_scenario(
+            index, name, description, text, pattern, match_offsets,
+        )
+    scenario_fn.__name__ = f"scenario_15{chr(ord('a') + index)}_regex_{name.replace('-', '_')}"
+    scenario_fn.__doc__ = description
+    return scenario_fn
+
+
+# Generated scenario functions: one per row of REGEX_CLASS_SPECS.
+REGEX_CLASS_SCENARIOS = [
+    _regex_class_scenario_factory(i) for i in range(len(REGEX_CLASS_SPECS))
+]
+
+
+def scenario_16_same_timestamp():
+    """A16: Two messages with the SAME timestamp in two different sessions
+    must sort by (session_id, line_number) for deterministic order.
+
+    Layout:
+      sid_a.jsonl line 1 at T
+      sid_a.jsonl line 2 at T (same ts, same session) — tiebreak by line_number
+      sid_b.jsonl line 1 at T (same ts, different session) — tiebreak by session_id
+
+    With case-insensitive default search for "needle" all three match.
+    Expected order (per all four impls' sort comparator: timestamp desc, then
+    session_id asc, then line_number asc):
+      1. sid_a / line 1
+      2. sid_a / line 2
+      3. sid_b / line 1
+    """
+    scenario = "16-same-timestamp"
+    t = NOW_UNIX - 1000
+    text_a1 = "needle one in session A line 1"
+    text_a2 = "needle two in session A line 2"
+    text_b1 = "needle three in session B line 1"
+    files = {
+        "sid_a.jsonl": [
+            assistant_text(t, "msg_16_a1", text_a1),
+            assistant_text(t, "msg_16_a2", text_a2),
+        ],
+        "sid_b.jsonl": [
+            assistant_text(t, "msg_16_b1", text_b1),
+        ],
+    }
+    o_a1 = find_offset(text_a1, "needle")
+    o_a2 = find_offset(text_a2, "needle")
+    o_b1 = find_offset(text_b1, "needle")
+    # All three hits have identical timestamps. The deterministic sort key is
+    # (session_id asc, line_number asc) after timestamp-desc primary. Context
+    # is the message's intra-file neighbors only (no cross-file context).
+    hit_a1 = hit(
+        session_id="sid_a", cwd_slug=scenario, line_number=1,
+        timestamp=iso(t), role="assistant", snippet=text_a1,
+        match_offsets=[[o_a1[0], o_a1[1]]],
+        context_before=[],
+        context_after=[ctx("assistant", text_a2, iso(t))],
+    )
+    hit_a2 = hit(
+        session_id="sid_a", cwd_slug=scenario, line_number=2,
+        timestamp=iso(t), role="assistant", snippet=text_a2,
+        match_offsets=[[o_a2[0], o_a2[1]]],
+        context_before=[ctx("assistant", text_a1, iso(t))],
+        context_after=[],
+    )
+    hit_b1 = hit(
+        session_id="sid_b", cwd_slug=scenario, line_number=1,
+        timestamp=iso(t), role="assistant", snippet=text_b1,
+        match_offsets=[[o_b1[0], o_b1[1]]],
+        context_before=[],
+        context_after=[],
+    )
+    expected = {
+        "tiebreak": {
+            "description": "Same timestamp across hits: sort by session_id asc, then line_number asc.",
+            "pattern": "needle",
+            "flags": [],
+            "hits": [hit_a1, hit_a2, hit_b1],
+            "summary": summary(hits=3, sessions_matched=2),
+        },
+    }
+    return scenario, files, expected
+
+
 def multi_root_scenario_01_two_roots():
     """Same pattern in a primary-root session AND an extra-root session.
 
@@ -840,6 +1374,11 @@ SCENARIOS = [
     scenario_09_count_only,
     scenario_10_context_zero,
     scenario_11_multibyte_snippet_boundary,
+    scenario_12_tool_use_and_result_array,
+    scenario_13_time_units_and_edges,
+    scenario_14_snippet_whitespace_nudge,
+    *REGEX_CLASS_SCENARIOS,
+    scenario_16_same_timestamp,
 ]
 
 MULTI_ROOT_SCENARIOS = [

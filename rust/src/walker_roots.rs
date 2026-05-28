@@ -126,3 +126,138 @@ pub fn resolve_roots(
     }
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::Mutex;
+
+    // Env vars are process-global; serialize tests that mutate them.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Run `body` with HOME and USERPROFILE saved, set to the given values
+    /// (None => remove), then restored regardless of panic.
+    fn with_home_env<F, R>(home: Option<&str>, userprofile: Option<&str>, body: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved_home = std::env::var_os("HOME");
+        let saved_up = std::env::var_os("USERPROFILE");
+        match home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match userprofile {
+            Some(v) => std::env::set_var("USERPROFILE", v),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        let result = body();
+        match saved_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match saved_up {
+            Some(v) => std::env::set_var("USERPROFILE", v),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        result
+    }
+
+    #[test]
+    fn home_directory_prefers_home_on_unix() {
+        // On Linux, HOME is canonical even if USERPROFILE is set.
+        with_home_env(Some("/tmp/fakehome"), Some("/tmp/fakeprofile"), || {
+            let h = home_directory().unwrap();
+            if cfg!(windows) {
+                assert_eq!(h, std::ffi::OsString::from("/tmp/fakeprofile"));
+            } else {
+                assert_eq!(h, std::ffi::OsString::from("/tmp/fakehome"));
+            }
+        });
+    }
+
+    #[test]
+    fn home_directory_falls_back_to_userprofile_when_home_unset() {
+        // HOME unset on Unix → USERPROFILE secondary kicks in (line 28 else branch).
+        with_home_env(None, Some("/tmp/fakeprofile"), || {
+            let h = home_directory();
+            assert_eq!(h, Some(std::ffi::OsString::from("/tmp/fakeprofile")));
+        });
+    }
+
+    #[test]
+    fn home_directory_returns_none_when_both_env_unset() {
+        with_home_env(None, None, || {
+            assert!(home_directory().is_none());
+        });
+    }
+
+    #[test]
+    fn walker_config_path_falls_back_when_no_home() {
+        // Covers line 35: the None arm of walker_config_path().
+        with_home_env(None, None, || {
+            let p = walker_config_path();
+            assert_eq!(p, PathBuf::from(".claude/walker-roots.json"));
+        });
+    }
+
+    #[test]
+    fn read_extra_roots_returns_empty_when_config_missing() {
+        // Covers line 42: config !exists silent path.
+        let tmp = tempdir_path("walker-cfg-missing");
+        with_home_env(Some(tmp.to_str().unwrap()), None, || {
+            // No .claude dir at all → config doesn't exist.
+            let v = read_extra_roots_from_config();
+            assert!(v.is_empty());
+        });
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn read_extra_roots_unreadable_returns_empty() {
+        // Covers line 46: fs::read_to_string Err branch.
+        // Make the config file a directory so open fails with IsADirectory.
+        let tmp = tempdir_path("walker-cfg-unreadable");
+        let claude_dir = tmp.join(".claude");
+        let bogus_config = claude_dir.join("walker-roots.json");
+        fs::create_dir_all(&bogus_config).unwrap();
+        with_home_env(Some(tmp.to_str().unwrap()), None, || {
+            // .exists() returns true for a directory; fs::read_to_string errors.
+            let v = read_extra_roots_from_config();
+            assert!(v.is_empty());
+        });
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn read_extra_roots_skips_non_string_elements() {
+        // Covers the `element.as_str()` returns None branch (the `else` of
+        // the `if let Some(s) = …` at line 77).
+        let tmp = tempdir_path("walker-cfg-mixed");
+        let claude_dir = tmp.join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        let config_path = claude_dir.join("walker-roots.json");
+        // "extra_roots" with an integer (non-string), a valid string, an empty
+        // string, and a null. Only the valid non-empty string survives.
+        fs::write(&config_path, br#"{"extra_roots":[42,"/tmp/x","",null]}"#).unwrap();
+        with_home_env(Some(tmp.to_str().unwrap()), None, || {
+            let v = read_extra_roots_from_config();
+            assert_eq!(v, vec![PathBuf::from("/tmp/x")]);
+        });
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    fn tempdir_path(suffix: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        p.push(format!("rust-walker-test-{suffix}-{pid}-{nanos}"));
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+}

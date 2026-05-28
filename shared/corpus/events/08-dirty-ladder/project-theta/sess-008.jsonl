@@ -1,0 +1,10 @@
+
+   
+{"type":"assistant","timestamp":
+this is not JSON at all
+[1, 2, 3]
+{"type": "user", "timestamp": "2025-05-22T07:45:40.000Z", "message": {"role": "user", "content": "hi"}}
+{"type": "assistant", "message": {"role": "assistant", "id": "no-ts-events", "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}}
+{"type": "assistant", "timestamp": "definitely-not-iso", "message": {"role": "assistant", "id": "bad-ts-events", "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}}
+{"type": "assistant", "timestamp": "2025-05-22T07:45:40.000Z", "message": {"role": "user", "id": "role-mismatch-events", "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}}
+{"type": "assistant", "timestamp": "2025-05-22T07:45:40.000Z", "message": {"id": "msg-008-good", "role": "assistant", "model": "claude-sonnet-4-6", "usage": {"input_tokens": 1000, "output_tokens": 100, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}

@@ -60,6 +60,77 @@
       "session_count": 1,
       "n_pairs": 2,
       "bias_factor": 1.25
+    },
+    "subagent_history": {
+      "pairs": [
+        {
+          "begin_eta": 200.0,
+          "actual_elapsed": 300.0
+        }
+      ],
+      "session_count": 1,
+      "n_pairs": 1,
+      "bias_factor": 1.5
+    },
+    "even_pair_count": {
+      "pairs": [
+        {
+          "begin_eta": 200.0,
+          "actual_elapsed": 100.0
+        },
+        {
+          "begin_eta": 100.0,
+          "actual_elapsed": 100.0
+        },
+        {
+          "begin_eta": 100.0,
+          "actual_elapsed": 200.0
+        },
+        {
+          "begin_eta": 100.0,
+          "actual_elapsed": 400.0
+        }
+      ],
+      "session_count": 1,
+      "n_pairs": 4,
+      "bias_factor": 1.5
+    },
+    "all_zero_eta": {
+      "pairs": [
+        {
+          "begin_eta": 0.0,
+          "actual_elapsed": 100.0
+        },
+        {
+          "begin_eta": 0.0,
+          "actual_elapsed": 100.0
+        }
+      ],
+      "session_count": 1,
+      "n_pairs": 2,
+      "bias_factor": null
+    },
+    "idle_gap_history": {
+      "pairs": [
+        {
+          "begin_eta": 500.0,
+          "actual_elapsed": 1000.0
+        }
+      ],
+      "session_count": 1,
+      "n_pairs": 1,
+      "bias_factor": 1.8
+    },
+    "dirty_ladder_history": {
+      "pairs": [
+        {
+          "begin_eta": 300.0,
+          "actual_elapsed": 300.0
+        }
+      ],
+      "session_count": 1,
+      "n_pairs": 1,
+      "bias_factor": 1.0
     }
   }
 }

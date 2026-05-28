@@ -190,9 +190,8 @@ fn parseF64Value(scanner: *std.json.Scanner, alloc: Allocator) !?f64 {
     }
     const tok = try scanner.nextAlloc(alloc, .alloc_if_needed);
     const slice: []const u8 = switch (tok) {
-        .number => |s| s,
-        .allocated_number => |s| s,
-        else => unreachable,
+        .number, .allocated_number => |s| s,
+        else => return null,
     };
     return std.fmt.parseFloat(f64, slice) catch null;
 }
@@ -207,9 +206,8 @@ fn parseI64Value(scanner: *std.json.Scanner, alloc: Allocator) !?i64 {
     }
     const tok = try scanner.nextAlloc(alloc, .alloc_if_needed);
     const slice: []const u8 = switch (tok) {
-        .number => |s| s,
-        .allocated_number => |s| s,
-        else => unreachable,
+        .number, .allocated_number => |s| s,
+        else => return null,
     };
     if (std.fmt.parseInt(i64, slice, 10)) |n| return n else |_| {}
     if (std.fmt.parseFloat(f64, slice)) |f| return @intFromFloat(f) else |_| {}

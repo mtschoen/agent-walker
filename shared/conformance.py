@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Literal, overload
 
 ROOT = Path(__file__).resolve().parent.parent
 CORPUS = ROOT / "shared" / "corpus"
@@ -83,6 +84,13 @@ CANDIDATES = {
 
 
 def find_binary(lang: str) -> Path | None:
+    # Coverage orchestrator (shared/coverage.py) sets WALKER_BIN_<LANG> to an
+    # instrumented build so we can collect coverage without clobbering the
+    # release binaries at the default discovery paths.
+    override = os.environ.get(f"WALKER_BIN_{lang.upper()}")
+    if override:
+        path = Path(override)
+        return path if path.is_file() else None
     for path in CANDIDATES.get(lang, []):
         if path.is_file():
             return path
@@ -445,6 +453,294 @@ def check_search(lang: str, binary: Path) -> bool:
     return all_ok
 
 
+def run_walker_search_pretty(
+    binary: Path,
+    projects_root: Path,
+    pattern: str,
+    flags: list[str],
+    now_unix: float,
+) -> tuple[int, str, str]:
+    """Invoke `walker search` with `--format pretty`, return (returncode, stdout, stderr).
+
+    Does not raise on non-zero exit (the caller asserts on exit + output).
+    """
+    cmd = [
+        str(binary), "search", pattern,
+        "--projects-root", str(projects_root),
+        "--now", repr(now_unix),
+        "--format", "pretty",
+        "--no-config",
+    ]
+    cmd.extend(flags)
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=10)
+    return result.returncode, result.stdout, result.stderr
+
+
+# --- Pretty-format assertions ---
+#
+# Pretty output text differs per impl (rust/zig emit `>>> text [match] text <<<`
+# with surrounding whitespace and a human-readable summary line; cpp/go emit
+# `>>>text [match] text<<<` with no surrounding whitespace and embed a JSONL
+# summary record in the pretty stream). We assert only on the SHARED structural
+# contract: one header line per hit, one file-info line per hit, the highlight
+# tokens `>>>` and `<<<` appear once per hit, the match wrapped in `[<match>]`,
+# and one `before:` / `after:` line per expected context turn.
+
+def _count_hit_headers(stdout: str) -> int:
+    """A hit header looks like `[<timestamp>] cwd=... role=... session=...`."""
+    count = 0
+    for line in stdout.splitlines():
+        stripped = line.lstrip()
+        if (stripped.startswith("[") and "cwd=" in stripped
+                and "role=" in stripped and "session=" in stripped):
+            count += 1
+    return count
+
+
+def assert_search_pretty(
+    lang: str,
+    binary: Path,
+    scenario_name: str,
+    combo_name: str,
+    combo: dict,
+    now_unix: float,
+) -> bool:
+    """Structurally check pretty-format output against the same combo as jsonl.
+
+    Asserts (cross-impl shared contract):
+      - exit 0 (no errors)
+      - one hit header line per expected hit
+      - the `>>>` and `<<<` highlight delimiters appear once per hit
+      - each expected hit's `match_offsets[0]` substring appears as `[<match>]`
+        somewhere in stdout
+      - `before:` and `after:` line totals match summed expected context-turn
+        counts (per impl, when there are context turns)
+    """
+    label = f"search-pretty/{scenario_name}/{combo_name}"
+    expected_hits = combo["hits"]
+    expected_summary = combo["summary"]
+    with tempfile.TemporaryDirectory(prefix=f"walker-search-pretty-{scenario_name}-") as tmp:
+        shutil.copytree(SEARCH_CORPUS / scenario_name, Path(tmp) / scenario_name)
+        returncode, stdout, stderr = run_walker_search_pretty(
+            binary, Path(tmp),
+            combo["pattern"], combo["flags"], now_unix,
+        )
+    if returncode != 0:
+        print(f"  [{lang:>4s}] {label:48s} FAIL  exit={returncode} stderr={stderr!r}")
+        return False
+
+    # If count_only suppresses hits, expect 0 headers and 0 highlight markers.
+    suppress_hits = "--count-only" in combo["flags"]
+    expected_hit_count = 0 if suppress_hits else len(expected_hits)
+
+    got_headers = _count_hit_headers(stdout)
+    got_open = stdout.count(">>>")
+    got_close = stdout.count("<<<")
+
+    problems: list[str] = []
+    if got_headers != expected_hit_count:
+        problems.append(f"header lines: got {got_headers}, expected {expected_hit_count}")
+    if got_open != expected_hit_count:
+        problems.append(f">>> count: got {got_open}, expected {expected_hit_count}")
+    if got_close != expected_hit_count:
+        problems.append(f"<<< count: got {got_close}, expected {expected_hit_count}")
+
+    # Each hit's match text (from snippet[match_offsets[0]]) should appear as
+    # `[<match>]` somewhere in stdout. Skip when count_only suppresses hits.
+    if not suppress_hits:
+        for index, hit in enumerate(expected_hits):
+            offsets = hit.get("match_offsets") or []
+            snippet = hit.get("snippet", "")
+            if not offsets:
+                continue
+            start, end = offsets[0]
+            # Slice on byte-bounded snippet — but snippet is a Python str of UTF-8
+            # text; the binaries emit byte offsets that map cleanly to chars
+            # for ASCII patterns we use in fixtures. The 11-multibyte fixture
+            # has multibyte text, but offsets are byte offsets — re-decode by
+            # finding the literal match in the snippet rather than slicing.
+            try:
+                match_text = snippet.encode("utf-8")[start:end].decode("utf-8")
+            except UnicodeDecodeError:
+                # If the byte slice cut mid-codepoint, fall back to a structural
+                # check: the pattern itself should be wrapped somewhere.
+                match_text = combo["pattern"]
+            wrapped = f"[{match_text}]"
+            if wrapped not in stdout:
+                problems.append(f"hit[{index}] missing `{wrapped}` in stdout")
+                break
+
+        # before:/after: line counts (only meaningful when --context > 0).
+        expected_before = sum(len(h.get("context_before", [])) for h in expected_hits)
+        expected_after = sum(len(h.get("context_after", [])) for h in expected_hits)
+        got_before = sum(1 for line in stdout.splitlines()
+                         if line.lstrip().startswith("before:"))
+        got_after = sum(1 for line in stdout.splitlines()
+                        if line.lstrip().startswith("after:"))
+        if got_before != expected_before:
+            problems.append(f"before: lines: got {got_before}, expected {expected_before}")
+        if got_after != expected_after:
+            problems.append(f"after: lines: got {got_after}, expected {expected_after}")
+
+    # Summary signal: the pretty stream MUST convey truncated=true when the
+    # combo's expected summary says so. Rust/Zig emit `truncated=true` as a
+    # human-readable token; C++/Go embed a JSONL summary record. Accept either.
+    if expected_summary.get("truncated"):
+        if ("truncated=true" not in stdout
+                and '"truncated":true' not in stdout):
+            problems.append("expected truncated=true marker in pretty stdout")
+
+    if problems:
+        print(f"  [{lang:>4s}] {label:48s} FAIL  " + "; ".join(problems))
+        return False
+    print(f"  [{lang:>4s}] {label:48s}  OK   hits={got_headers}")
+    return True
+
+
+# Pretty-format check uses a curated subset of search scenarios (not every
+# combo) — the goal is to exercise the renderer's paths (header, file-info,
+# before/after, highlight, count-only suppression), not to re-prove jsonl-vs-
+# expected agreement. The jsonl path in check_search already does that.
+PRETTY_SCENARIOS: list[tuple[str, str]] = [
+    # (scenario, combo) — chosen to cover: no-context, before-only,
+    # before+after, after-only, count-only suppression.
+    ("01-basic", "default"),
+    ("02-multi-match-per-session", "default"),
+    ("09-count-only", "count-only"),
+]
+
+
+def check_search_pretty(lang: str, binary: Path) -> bool:
+    """Drive the pretty renderer across a curated subset of search fixtures."""
+    if not SEARCH_CORPUS.is_dir():
+        return True
+    if lang not in IMPLS_WITH_SEARCH:
+        print(f"  [{lang:>4s}] search pretty -- skipping (not in IMPLS_WITH_SEARCH)")
+        return True
+    all_ok = True
+    for scenario_name, combo_name in PRETTY_SCENARIOS:
+        expected_file = SEARCH_CORPUS / scenario_name / "expected.json"
+        if not expected_file.is_file():
+            continue
+        data = json.loads(expected_file.read_text(encoding="utf-8"))
+        combo = data["combos"].get(combo_name)
+        if combo is None:
+            continue
+        now_unix = data["_meta"]["now_unix"]
+        if not assert_search_pretty(
+            lang, binary, scenario_name, combo_name, combo, now_unix,
+        ):
+            all_ok = False
+    return all_ok
+
+
+# --- Result truncation (gap A2) ---
+#
+# A multi-hit fixture invoked with `--limit 1` exercises:
+#   - jsonl: summary record `"truncated": true`
+#   - pretty: `truncated=true` token (rust/zig) or `"truncated":true` (cpp/go)
+#   - stderr: the `walker: search: truncated to --limit=N (had M total)` warning
+#     — text is identical across all four impls (confirmed empirically).
+
+TRUNCATION_STDERR_TOKEN = "walker: search: truncated to --limit="
+
+
+def assert_search_truncated(lang: str, binary: Path) -> bool:
+    """Run a multi-hit fixture with `--limit 1` and verify truncation signals."""
+    scenario_name = "01-basic"  # 3 hits across 3 sessions
+    label = f"search-truncated/{scenario_name}/limit1"
+    expected_file = SEARCH_CORPUS / scenario_name / "expected.json"
+    if not expected_file.is_file():
+        # Corpus missing — silently pass; check_search would also skip.
+        return True
+    data = json.loads(expected_file.read_text(encoding="utf-8"))
+    now_unix = data["_meta"]["now_unix"]
+    base_combo = data["combos"]["default"]
+    total_hits = len(base_combo["hits"])
+    if total_hits < 2:
+        print(f"  [{lang:>4s}] {label:48s} SKIP  base fixture has <2 hits")
+        return True
+
+    # --- jsonl path ---
+    with tempfile.TemporaryDirectory(prefix=f"walker-search-trunc-jsonl-") as tmp:
+        shutil.copytree(SEARCH_CORPUS / scenario_name, Path(tmp) / scenario_name)
+        cmd = [
+            str(binary), "search", base_combo["pattern"],
+            "--projects-root", str(tmp),
+            "--now", repr(now_unix),
+            "--format", "jsonl",
+            "--no-config",
+            "--limit", "1",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=10)
+    if result.returncode != 0:
+        print(f"  [{lang:>4s}] {label:48s} FAIL  jsonl exit={result.returncode} stderr={result.stderr!r}")
+        return False
+    # Parse jsonl: exactly 1 hit + 1 summary, summary truncated=true, hits=1.
+    hits = []
+    summary = None
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as e:
+            print(f"  [{lang:>4s}] {label:48s} FAIL  jsonl non-JSON line: {line!r} ({e})")
+            return False
+        if obj.get("type") == "hit":
+            hits.append(obj)
+        elif obj.get("type") == "summary":
+            summary = obj
+    problems: list[str] = []
+    if len(hits) != 1:
+        problems.append(f"jsonl hits: got {len(hits)}, expected 1")
+    if summary is None:
+        problems.append("jsonl: missing summary record")
+    else:
+        if not summary.get("truncated"):
+            problems.append(f"jsonl summary.truncated: got {summary.get('truncated')!r}, expected true")
+        if summary.get("hits") != 1:
+            problems.append(f"jsonl summary.hits: got {summary.get('hits')!r}, expected 1")
+    if TRUNCATION_STDERR_TOKEN not in result.stderr:
+        problems.append(f"jsonl stderr missing {TRUNCATION_STDERR_TOKEN!r}")
+
+    # --- pretty path ---
+    with tempfile.TemporaryDirectory(prefix=f"walker-search-trunc-pretty-") as tmp:
+        shutil.copytree(SEARCH_CORPUS / scenario_name, Path(tmp) / scenario_name)
+        returncode, stdout, stderr = run_walker_search_pretty(
+            binary, Path(tmp),
+            base_combo["pattern"], ["--limit", "1"], now_unix,
+        )
+    if returncode != 0:
+        print(f"  [{lang:>4s}] {label:48s} FAIL  pretty exit={returncode} stderr={stderr!r}")
+        return False
+    if "truncated=true" not in stdout and '"truncated":true' not in stdout:
+        problems.append("pretty stdout missing truncated=true marker")
+    if TRUNCATION_STDERR_TOKEN not in stderr:
+        problems.append(f"pretty stderr missing {TRUNCATION_STDERR_TOKEN!r}")
+    # exactly 1 hit rendered in pretty (suppressed when count-only, but we
+    # didn't pass count-only here, so a single hit header must appear).
+    got_headers = _count_hit_headers(stdout)
+    if got_headers != 1:
+        problems.append(f"pretty hit headers: got {got_headers}, expected 1")
+
+    if problems:
+        print(f"  [{lang:>4s}] {label:48s} FAIL  " + "; ".join(problems))
+        return False
+    print(f"  [{lang:>4s}] {label:48s}  OK   jsonl+pretty+stderr truncation signals present")
+    return True
+
+
+def check_search_truncated(lang: str, binary: Path) -> bool:
+    """Wrapper to match the check_* naming pattern."""
+    if not SEARCH_CORPUS.is_dir():
+        return True
+    if lang not in IMPLS_WITH_SEARCH:
+        print(f"  [{lang:>4s}] search truncated -- skipping (not in IMPLS_WITH_SEARCH)")
+        return True
+    return assert_search_truncated(lang, binary)
+
+
 def check_search_multi_root(lang: str, binary: Path) -> bool:
     """Multi-root search: assert --extra-projects-root reaches a second root,
     hits aggregate + sort across roots, and roots_walked reflects the count.
@@ -502,6 +798,79 @@ def check_search_multi_root(lang: str, binary: Path) -> bool:
             if not ok:
                 all_ok = False
     return all_ok
+
+
+def check_search_duplicate_root(lang: str, binary: Path) -> bool:
+    """A20: duplicate-root dedup. Passing the same path via both
+    `--projects-root` AND `--extra-projects-root` must produce the SAME hits +
+    summary as a single-root invocation (no double-counted hits, roots_walked
+    still 1). All four impls canonicalize each root via realpath (Rust
+    `fs::canonicalize`, C++ `fs::canonical`, Go `filepath.EvalSymlinks`, Zig
+    `realpath`/path-clean) and dedup via the canonical key before walking.
+
+    We exercise the dedup path by:
+      1) running search against a single root P and capturing baseline output;
+      2) running the SAME pattern + flags against `--projects-root P
+         --extra-projects-root P` and asserting identical hits + summary
+         (including roots_walked=1).
+
+    Reuses the 01-basic scenario (3 hits, 3 sessions) for the substrate.
+    """
+    if not SEARCH_CORPUS.is_dir():
+        return True
+    if lang not in IMPLS_WITH_SEARCH:
+        print(f"  [{lang:>4s}] search dedup -- skipping (not in IMPLS_WITH_SEARCH)")
+        return True
+    scenario_name = "01-basic"
+    expected_file = SEARCH_CORPUS / scenario_name / "expected.json"
+    if not expected_file.is_file():
+        return True
+    data = json.loads(expected_file.read_text(encoding="utf-8"))
+    now_unix = data["_meta"]["now_unix"]
+    combo = data["combos"]["default"]
+    label = f"search-dedup/{scenario_name}/duplicate-root"
+
+    with tempfile.TemporaryDirectory(prefix=f"walker-search-dedup-") as tmp:
+        tmp_path = Path(tmp)
+        shutil.copytree(SEARCH_CORPUS / scenario_name, tmp_path / scenario_name)
+        try:
+            baseline_hits, baseline_summary = run_walker_search(
+                lang, binary, tmp_path,
+                combo["pattern"], combo["flags"], now_unix,
+            )
+            # Pass the SAME root via --extra-projects-root. Both args resolve
+            # to the same canonical inode -> dedup must drop the duplicate.
+            dup_hits, dup_summary = run_walker_search(
+                lang, binary, tmp_path,
+                combo["pattern"], combo["flags"], now_unix,
+                extras=[tmp_path],
+            )
+        except Exception as e:
+            print(f"  [{lang:>4s}] {label:48s} FAIL  {e}")
+            return False
+
+    problems: list[str] = []
+    if dup_hits != baseline_hits:
+        problems.append(
+            f"hits diverged from baseline: got {len(dup_hits)} vs baseline {len(baseline_hits)}"
+        )
+    if dup_summary != baseline_summary:
+        problems.append(
+            f"summary diverged: got {dup_summary!r} vs baseline {baseline_summary!r}"
+        )
+    # Explicit: roots_walked MUST be 1, not 2 (dedup pre-walk).
+    walked = (dup_summary or {}).get("roots_walked")
+    if walked != 1:
+        problems.append(f"roots_walked: got {walked!r}, expected 1 (dedup pre-walk)")
+
+    if problems:
+        print(f"  [{lang:>4s}] {label:48s} FAIL  " + "; ".join(problems))
+        return False
+    print(
+        f"  [{lang:>4s}] {label:48s}  OK   hits={len(dup_hits)} "
+        f"roots_walked={walked}"
+    )
+    return True
 
 
 def _events_sort_key(record: dict) -> tuple:
@@ -613,6 +982,149 @@ def check_events(lang: str, binary: Path) -> bool:
     return all_ok
 
 
+def check_empty_root(lang: str, binary: Path, expected: dict) -> bool:
+    """A17: every mode pointed at a nonexistent --projects-root must exit 0
+    with empty/zero output (no crash, no stderr noise that consumers
+    misinterpret as a fault). Covers cost / events / beacons-latest /
+    beacons-history / search.
+
+    The harness already exercises the *existing-but-empty* root case (the
+    `04-empty` cost fixture), but never the *nonexistent* path. The
+    discovery layer must skip a non-existent root silently per SPEC.md
+    §Roots: "Non-existent extras are skipped silently with a stderr
+    diagnostic. ... walker must keep going."
+    """
+    meta = expected["_meta"]
+    all_ok = True
+
+    with tempfile.TemporaryDirectory(prefix="walker-empty-root-") as tmp:
+        # A path that DOES NOT EXIST under tmp.
+        missing = Path(tmp) / "does-not-exist"
+        common_args = [
+            "--projects-root", str(missing),
+            "--no-config",
+            "--now", repr(meta["now_unix"]),
+        ]
+
+        # 1. cost mode (bare flags) — JSON with zero totals, exit 0.
+        cmd = [str(binary),
+               "--period", str(meta["period_seconds"]),
+               "--win-start", repr(meta["win_start_unix"]),
+               *common_args]
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                encoding="utf-8", timeout=10)
+        cost_ok = result.returncode == 0
+        if cost_ok:
+            try:
+                line = result.stdout.strip().splitlines()[-1]
+                payload = json.loads(line)
+                cost_ok = (
+                    abs(payload.get("trailing_usd", 1) - 0.0) < TOLERANCE
+                    and abs(payload.get("window_usd", 1) - 0.0) < TOLERANCE
+                )
+            except Exception:
+                cost_ok = False
+        print(f"  [{lang:>4s}] {'empty-root: cost':38s} "
+              f"{' OK ' if cost_ok else 'FAIL'}")
+        if not cost_ok:
+            print(f"        exit={result.returncode} stdout={result.stdout!r}")
+            all_ok = False
+
+        # 2. events — exit 0, no NDJSON records (empty stdout).
+        cmd = [str(binary), "events",
+               "--period", str(meta["period_seconds"]),
+               "--win-start", repr(meta["win_start_unix"]),
+               *common_args]
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                encoding="utf-8", timeout=10)
+        # events allows empty stdout per SPEC §events ("Exit 0 even when
+        # the output stream is empty.").
+        events_ok = result.returncode == 0 and all(
+            not line.strip() for line in result.stdout.splitlines()
+        )
+        print(f"  [{lang:>4s}] {'empty-root: events':38s} "
+              f"{' OK ' if events_ok else 'FAIL'}")
+        if not events_ok:
+            print(f"        exit={result.returncode} stdout={result.stdout!r}")
+            all_ok = False
+
+        # 3. beacons-latest — exit 0, beacon = null.
+        cmd = [str(binary), "beacons-latest",
+               "--session-id", "no-such-session",
+               *common_args]
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                encoding="utf-8", timeout=10)
+        bl_ok = result.returncode == 0
+        if bl_ok:
+            try:
+                line = result.stdout.strip().splitlines()[-1]
+                payload = json.loads(line)
+                bl_ok = payload.get("beacon") is None
+            except Exception:
+                bl_ok = False
+        print(f"  [{lang:>4s}] {'empty-root: beacons-latest':38s} "
+              f"{' OK ' if bl_ok else 'FAIL'}")
+        if not bl_ok:
+            print(f"        exit={result.returncode} stdout={result.stdout!r}")
+            all_ok = False
+
+        # 4. beacons-history — exit 0, n_pairs = 0, bias_factor = null.
+        cmd = [str(binary), "beacons-history",
+               "--period", str(meta["period_seconds"]),
+               "--win-start", repr(meta["win_start_unix"]),
+               *common_args]
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                encoding="utf-8", timeout=10)
+        bh_ok = result.returncode == 0
+        if bh_ok:
+            try:
+                line = result.stdout.strip().splitlines()[-1]
+                payload = json.loads(line)
+                bh_ok = (
+                    payload.get("n_pairs") == 0
+                    and payload.get("bias_factor") is None
+                )
+            except Exception:
+                bh_ok = False
+        print(f"  [{lang:>4s}] {'empty-root: beacons-history':38s} "
+              f"{' OK ' if bh_ok else 'FAIL'}")
+        if not bh_ok:
+            print(f"        exit={result.returncode} stdout={result.stdout!r}")
+            all_ok = False
+
+        # 5. search — exit 0, zero hits in jsonl output.
+        if lang in IMPLS_WITH_SEARCH:
+            cmd = [str(binary), "search", "pattern",
+                   "--format", "jsonl",
+                   *common_args]
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    encoding="utf-8", timeout=10)
+            search_ok = result.returncode == 0
+            hits_count = 0
+            summary_ok = False
+            if search_ok:
+                try:
+                    for line in result.stdout.splitlines():
+                        if not line.strip():
+                            continue
+                        obj = json.loads(line)
+                        kind = obj.get("type")
+                        if kind == "hit":
+                            hits_count += 1
+                        elif kind == "summary":
+                            summary_ok = obj.get("hits", -1) == 0
+                except Exception:
+                    search_ok = False
+            search_ok = search_ok and hits_count == 0 and summary_ok
+            print(f"  [{lang:>4s}] {'empty-root: search':38s} "
+                  f"{' OK ' if search_ok else 'FAIL'}")
+            if not search_ok:
+                print(f"        exit={result.returncode} stdout={result.stdout!r}")
+                all_ok = False
+
+    return all_ok
+
+
 def check_help(lang: str, binary: Path) -> bool:
     """Parity guard for the friendly help / default output.
 
@@ -674,12 +1186,229 @@ def check_help(lang: str, binary: Path) -> bool:
     return all_ok
 
 
+def check_cli_argument_matrix(lang: str, binary: Path) -> bool:
+    """Exit-code matrix for arg-validation across every subcommand.
+
+    Each row drives one invocation and asserts:
+      - exit code (always 2 for the error rows, 0 for --version),
+      - stderr-non-empty when exit is 2 (an impl that exits 2 silently
+        violates the SPEC error-diagnostic contract),
+      - an optional ``stderr_must_contain`` substring for cases where a
+        stable token is documented (e.g. ``--period`` in the missing-period
+        error). Wording past that token is per-impl and NOT pinned.
+
+    The matrix is the SPEC §"## CLI" / §"### Help & usage" contract translated
+    into observable behavior. It catches an impl that drifts off the
+    arg-validation grammar — e.g. a panic on unknown subcommand, or a regex
+    engine that silently accepts an unclosed pattern — without pinning any
+    impl's exact diagnostic text. See COVERAGE-GAPS.md gap A18.
+    """
+    all_ok = True
+
+    def run(args: list[str]) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [str(binary), *args],
+            capture_output=True, text=True, encoding="utf-8", timeout=10,
+        )
+
+    # (label, args, expected_exit, stderr_must_contain_or_None)
+    #
+    # `--no-config` is appended where the error path is hit *after* roots
+    # resolution (so the impl doesn't waste effort on the user's real config).
+    # Several error paths fail before any roots work, so it's harmless either
+    # way; included consistently for the impls that defer the check.
+    cases: list[tuple[str, list[str], int, str | None]] = [
+        # --- cost mode (no subcommand prefix) ---
+        ("cost: missing --period",
+         ["--win-start", "0", "--no-config"], 2, "--period"),
+        ("cost: missing flag value (--period)",
+         ["--period", "--no-config"], 2, "--period"),
+        ("cost: unparseable --period",
+         ["--period", "x", "--win-start", "0", "--no-config"], 2, "--period"),
+        ("cost: unparseable --win-start",
+         ["--period", "60", "--win-start", "nope", "--no-config"], 2, "--win-start"),
+        ("cost: unparseable --now",
+         ["--period", "60", "--win-start", "0", "--now", "nope", "--no-config"], 2, "--now"),
+        ("cost: unknown flag",
+         ["--period", "60", "--win-start", "0", "--frobnicate", "--no-config"], 2, "--frobnicate"),
+        ("cost: unknown subcommand",
+         ["bogus", "--period", "60", "--win-start", "0", "--no-config"], 2, "bogus"),
+
+        # --- events ---
+        ("events: missing --period",
+         ["events", "--no-config"], 2, "--period"),
+        ("events: unparseable --period",
+         ["events", "--period", "x", "--no-config"], 2, "--period"),
+        ("events: unknown flag",
+         ["events", "--period", "60", "--frobnicate", "--no-config"], 2, "--frobnicate"),
+
+        # --- beacons-latest ---
+        ("beacons-latest: missing --session-id",
+         ["beacons-latest", "--no-config"], 2, "--session-id"),
+        ("beacons-latest: unknown flag",
+         ["beacons-latest", "--session-id", "deadbeef", "--frobnicate", "--no-config"],
+         2, "--frobnicate"),
+
+        # --- beacons-history ---
+        ("beacons-history: missing --period",
+         ["beacons-history", "--no-config"], 2, "--period"),
+        ("beacons-history: unparseable --period",
+         ["beacons-history", "--period", "x", "--no-config"], 2, "--period"),
+        ("beacons-history: unknown flag",
+         ["beacons-history", "--period", "60", "--frobnicate", "--no-config"],
+         2, "--frobnicate"),
+
+        # --- search ---
+        ("search: missing pattern",
+         ["search", "--no-config"], 2, None),
+        ("search: empty pattern",
+         ["search", "", "--no-config"], 2, None),
+        ("search: invalid --role",
+         ["search", "hello", "--role", "bogus", "--no-config"], 2, "--role"),
+        ("search: invalid --format",
+         ["search", "hello", "--format", "bogus", "--no-config"], 2, "--format"),
+        ("search: --cwd + --any-cwd mutex",
+         ["search", "hello", "--cwd", "foo", "--any-cwd", "--no-config"],
+         2, "--cwd"),
+        ("search: duplicate positional",
+         ["search", "a", "b", "--no-config"], 2, None),
+        ("search: malformed regex (trailing backslash)",
+         ["search", "\\", "--regex", "--no-config"], 2, None),
+        # COVERAGE-GAPS.md A7 / SPEC §"Search" — unsupported regex
+        # metachars (grouping, alternation, bounded repetition) must reject
+        # with exit 2. Zig's hand-rolled engine silently accepted `(` as a
+        # literal pre-task-#13; that fix added explicit rejection so all four
+        # impls now parity-fail this case.
+        ("search: malformed regex (unsupported metachar)",
+         ["search", "(", "--regex", "--no-config"], 2, None),
+        ("search: unknown flag",
+         ["search", "hello", "--frobnicate", "--no-config"], 2, "--frobnicate"),
+        # COVERAGE-GAPS.md A4 — `bad time` diagnostic. SPEC §"### search":
+        # "unparseable --since/--until (`bad time: ...`)". Exit code is the
+        # shared contract; the exact diagnostic wording (whether the flag
+        # name appears, vs. only the offending value or the `bad time:`
+        # token) is per-impl — cpp's parse_time_arg path emits "not RFC3339
+        # or relative: ..." without the flag name, rust prepends "bad time:
+        # --since=...", etc. So we pin only exit=2 + non-empty stderr here.
+        # Each of these targets a distinct code path:
+        #   malformed-{since,until} -> parse_iso8601 fallback + error format
+        #   empty value             -> parse_time_arg's "empty value" branch
+        #   missing value           -> iter.next().ok_or("--since needs a value")
+        ("search: malformed --since",
+         ["search", "hello", "--since", "not-a-time", "--no-config"], 2, None),
+        ("search: malformed --until",
+         ["search", "hello", "--until", "tomorrow", "--no-config"], 2, None),
+        ("search: empty --since value",
+         ["search", "hello", "--since", "", "--no-config"], 2, None),
+        ("search: --since missing value",
+         ["search", "hello", "--since"], 2, None),
+
+        # --- --version (cost + events) — exit 0, stdout non-empty ---
+        # (kept in the same matrix so reporting stays uniform; the stdout-check
+        # below handles the 0-exit case.)
+        ("--version (cost)", ["--version"], 0, None),
+        ("--version (events)", ["events", "--version"], 0, None),
+    ]
+
+    for label, args, expected_exit, must_contain in cases:
+        result = run(args)
+        ok = result.returncode == expected_exit
+        if ok and expected_exit == 2:
+            # All exit-2 paths MUST emit a diagnostic to stderr.
+            if result.stderr.strip() == "":
+                ok = False
+            if ok and must_contain is not None and must_contain not in result.stderr:
+                ok = False
+        if ok and expected_exit == 0:
+            # --version: stdout non-empty (don't pin the version string).
+            if result.stdout.strip() == "":
+                ok = False
+        badge = " OK " if ok else "FAIL"
+        print(f"  [{lang:>4s}] {'cli/' + label:48s} {badge}")
+        if not ok:
+            stderr_preview = result.stderr.strip().splitlines()[:2]
+            stdout_preview = result.stdout.strip().splitlines()[:2]
+            print(
+                f"        exit={result.returncode} (expected {expected_exit}) "
+                f"must_contain={must_contain!r}"
+            )
+            if stderr_preview:
+                print(f"        stderr: {stderr_preview!r}")
+            if stdout_preview:
+                print(f"        stdout: {stdout_preview!r}")
+            all_ok = False
+
+    return all_ok
+
+
+def check_omit_now_smoke(lang: str, binary: Path) -> bool:
+    """One invocation per mode that omits --now → exit 0.
+
+    The other runners always pass --now (so tests are deterministic), which
+    leaves the "current time when --now is omitted" default code path
+    (``current_unix``/``nowUnix``/…) entirely uncovered. This smoke fires
+    each mode against an empty fixture root so the result is trivially
+    empty — we assert only exit 0 (the value is nondeterministic by design).
+
+    See COVERAGE-GAPS.md §B2.
+    """
+    all_ok = True
+
+    with tempfile.TemporaryDirectory(prefix="walker-omit-now-") as empty:
+        # ``empty`` is an existing-but-empty dir → no transcripts → no output.
+        # SPEC.Roots says non-existent extras get skipped silently; we want a
+        # real-dir to keep the no-warning path (some impls emit a stderr line
+        # for the missing-root case which is fine but noisier than needed).
+        cases: list[tuple[str, list[str]]] = [
+            ("cost", ["--period", "60", "--win-start", "0",
+                      "--projects-root", empty, "--no-config"]),
+            ("events", ["events", "--period", "60", "--win-start", "0",
+                        "--projects-root", empty, "--no-config"]),
+            ("beacons-history", ["beacons-history", "--period", "60",
+                                  "--win-start", "0",
+                                  "--projects-root", empty, "--no-config"]),
+            ("beacons-latest", ["beacons-latest", "--session-id", "deadbeef",
+                                "--projects-root", empty, "--no-config"]),
+            ("search", ["search", "hello",
+                        "--projects-root", empty, "--no-config",
+                        "--format", "jsonl"]),
+        ]
+        for label, args in cases:
+            result = subprocess.run(
+                [str(binary), *args],
+                capture_output=True, text=True, encoding="utf-8", timeout=10,
+            )
+            ok = result.returncode == 0
+            badge = " OK " if ok else "FAIL"
+            print(f"  [{lang:>4s}] {'omit-now/' + label:48s} {badge}")
+            if not ok:
+                print(f"        exit={result.returncode} "
+                      f"stderr={result.stderr.strip()[:200]!r}")
+                all_ok = False
+
+    return all_ok
+
+
+@overload
 def run_walker_env(
-    lang: str, binary: Path, meta: dict, env: dict, projects_root: Path | None = None
-) -> dict:
+    lang: str, binary: Path, meta: dict, env: dict, projects_root: Path | None = None,
+    *, return_stderr: Literal[False] = False,
+) -> dict: ...
+@overload
+def run_walker_env(
+    lang: str, binary: Path, meta: dict, env: dict, projects_root: Path | None = None,
+    *, return_stderr: Literal[True],
+) -> tuple[dict, str]: ...
+def run_walker_env(
+    lang: str, binary: Path, meta: dict, env: dict, projects_root: Path | None = None,
+    return_stderr: bool = False,
+) -> dict | tuple[dict, str]:
     """Run cost mode WITHOUT --no-config (so walker-roots.json is read) under a
     custom environment (to control home-dir resolution). With projects_root
-    omitted, the binary falls back to its default <home>/.claude/projects."""
+    omitted, the binary falls back to its default <home>/.claude/projects.
+
+    Returns the parsed JSON dict. With return_stderr=True returns
+    (dict, stderr_text) so callers can assert on diagnostic emission."""
     cmd = [
         str(binary),
         "--period", str(meta["period_seconds"]),
@@ -696,7 +1425,10 @@ def run_walker_env(
             f"{binary.name} exited {result.returncode}\nstderr:\n{result.stderr}"
         )
     line = result.stdout.strip().splitlines()[-1]
-    return json.loads(line)
+    parsed = json.loads(line)
+    if return_stderr:
+        return parsed, result.stderr
+    return parsed
 
 
 def check_config_resolution(lang: str, binary: Path, expected: dict) -> bool:
@@ -761,6 +1493,103 @@ def check_config_resolution(lang: str, binary: Path, expected: dict) -> bool:
     return ok
 
 
+# Malformed walker-roots.json variants. Each tuple is
+#   (label, body, expect_diagnostic)
+# where `body` is the file contents and `expect_diagnostic` is True when the
+# binary MUST emit a stderr diagnostic (parse error or wrong-shape root).
+# Variants that produce silent no-extras (missing key, empty array, valid
+# unrelated-key object) have expect_diagnostic=False.
+#
+# Per SPEC.md::Roots, every variant must:
+#   1. NOT crash (the binary keeps going with no extras),
+#   2. yield totals matching the default-root-only scan (i.e. no extras pulled
+#      in from the malformed file).
+# The "nonexistent-extra" variant has a syntactically valid file but its one
+# extra path does not exist; SPEC says the binary emits a stderr "extra root
+# not a directory, skipping" line and continues.
+MALFORMED_CONFIG_VARIANTS: list[tuple[str, str, bool]] = [
+    ("empty",              "",                                     False),
+    ("malformed-json",     "{not valid json",                      True),
+    ("non-object-array",   "[]",                                   True),
+    ("non-object-scalar",  '"hello"',                              True),
+    ("missing-key",        "{}",                                   False),
+    ("unrelated-key",      '{"unrelated": []}',                    False),
+    ("empty-extra-array",  '{"extra_roots": []}',                  False),
+    ("nonexistent-extra",  '{"extra_roots": ["/does/not/exist"]}', True),
+    # Valid object with wrong-typed extras array. Reaches Go's typed
+    # json.Unmarshal failure branch (walker_roots.go:71); Rust/C++/Zig
+    # silently skip non-string elements. Diagnostic optional — Go emits
+    # one, the others don't.
+    ("wrong-typed-extras", '{"extra_roots":[1,2,3]}',              False),
+]
+
+
+def check_config_malformed(lang: str, binary: Path, expected: dict) -> bool:
+    """Exercise every malformed walker-roots.json variant.
+
+    For each variant: lay out a fake home with one populated fixture under
+    ~/.claude/projects/<fixture>/, drop the malformed body at
+    ~/.claude/walker-roots.json, run cost mode WITHOUT --no-config under
+    controlled HOME, and assert:
+      (a) exit 0 (graceful, no crash);
+      (b) totals match the single-fixture target (NO extras pulled in);
+      (c) for variants where SPEC requires a diagnostic, stderr is non-empty.
+
+    Picks the priciest fixture so a 0-cost masquerade can't pass."""
+    meta = expected["_meta"]
+    names = list(expected["fixtures"].keys())
+    if not names:
+        print(f"  [{lang:>4s}] {'config-malformed':20s} SKIP  no fixtures")
+        return True
+    fixture = max(names, key=lambda n: expected["fixtures"][n]["trailing_usd"])
+    target = {
+        "trailing_usd": expected["fixtures"][fixture]["trailing_usd"],
+        "window_usd": expected["fixtures"][fixture]["window_usd"],
+    }
+    overall = True
+    for variant_label, body, expect_diagnostic in MALFORMED_CONFIG_VARIANTS:
+        label = f"config-malformed:{variant_label}"
+        with tempfile.TemporaryDirectory(prefix="walker-cfg-mal-home-") as home, \
+             tempfile.TemporaryDirectory(prefix="walker-cfg-mal-bogus-") as bogus:
+            home_p = Path(home)
+            shutil.copytree(CORPUS / fixture, home_p / ".claude" / "projects" / fixture)
+            (home_p / ".claude" / "walker-roots.json").write_text(body, encoding="utf-8")
+            env = dict(os.environ)
+            if sys.platform == "win32":
+                env["USERPROFILE"], env["HOME"] = str(home_p), str(bogus)
+            else:
+                env["HOME"], env["USERPROFILE"] = str(home_p), str(bogus)
+            try:
+                got, stderr_text = run_walker_env(
+                    lang, binary, meta, env, return_stderr=True
+                )
+            except Exception as e:
+                print(f"  [{lang:>4s}] {label:38s} FAIL  {e}")
+                overall = False
+                continue
+        ok_totals, dt, dw = within_tolerance(got, target)
+        if expect_diagnostic:
+            ok_stderr = bool(stderr_text.strip())
+        else:
+            # Silent path: stderr SHOULD be empty (but a benign warning isn't a
+            # failure — only an exit-nonzero or wrong totals would be). Don't
+            # assert stderr is empty; just record it for the operator.
+            ok_stderr = True
+        ok = ok_totals and ok_stderr
+        badge = " OK " if ok else "FAIL"
+        diag_hint = ""
+        if expect_diagnostic and not ok_stderr:
+            diag_hint = "  (expected stderr diagnostic, got none)"
+        print(
+            f"  [{lang:>4s}] {label:38s} {badge}  "
+            f"trailing=${got.get('trailing_usd', 0):.6f} (d=${dt:+.6f})  "
+            f"window=${got.get('window_usd', 0):.6f} (d=${dw:+.6f}){diag_hint}"
+        )
+        if not ok:
+            overall = False
+    return overall
+
+
 def main():
     if not EXPECTED.is_file():
         print(f"missing {EXPECTED} -- run shared/generate_corpus.py first")
@@ -789,13 +1618,27 @@ def main():
             overall_ok = False
         if not check_config_resolution(lang, binary, expected):
             overall_ok = False
+        if not check_config_malformed(lang, binary, expected):
+            overall_ok = False
         if not check_search(lang, binary):
             overall_ok = False
+        if not check_search_pretty(lang, binary):
+            overall_ok = False
+        if not check_search_truncated(lang, binary):
+            overall_ok = False
         if not check_search_multi_root(lang, binary):
+            overall_ok = False
+        if not check_search_duplicate_root(lang, binary):
             overall_ok = False
         if not check_events(lang, binary):
             overall_ok = False
         if not check_help(lang, binary):
+            overall_ok = False
+        if not check_empty_root(lang, binary, expected):
+            overall_ok = False
+        if not check_cli_argument_matrix(lang, binary):
+            overall_ok = False
+        if not check_omit_now_smoke(lang, binary):
             overall_ok = False
         print()
 
