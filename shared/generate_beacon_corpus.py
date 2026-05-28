@@ -77,6 +77,54 @@ def write_jsonl(path: Path, lines: list[dict]) -> None:
             f.write("\n")
 
 
+def write_jsonl_mixed(path: Path, entries: list) -> None:
+    """Like write_jsonl but accepts a mix of dicts (json-dumped) and raw
+    strings (written verbatim). Used by the A8 dirty-ladder fixtures so we
+    can inject genuinely malformed / blank lines around valid entries."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for entry in entries:
+            f.write(entry if isinstance(entry, str) else json.dumps(entry))
+            f.write("\n")
+
+
+def dirty_ladder_lines(good_entry: dict) -> list:
+    """Reusable A8 ladder of bad/dirty lines surrounding one valid entry.
+    Each kind of bad line maps to a `skip` branch in the line filter:
+      1. blank line
+      2. whitespace-only line
+      3. malformed JSON (unclosed object)
+      4. malformed JSON (bareword garbage)
+      5. non-object root (JSON array)
+      6. non-assistant role entry
+      7. assistant missing `timestamp`
+      8. assistant with unparseable timestamp
+      9. assistant with type=assistant but role=user (role mismatch)
+    Note: an assistant with empty content but valid metadata IS counted as a
+    zero-cost turn per SPEC §Filters (no content-emptiness check), so it
+    doesn't belong in the skip-ladder — handled separately if needed.
+    """
+    return [
+        "",
+        "   ",
+        '{"type":"assistant","timestamp":',
+        "this is not JSON at all",
+        json.dumps([1, 2, 3]),
+        {"type": "user", "timestamp": iso(NOW_UNIX - 800),
+         "message": {"role": "user", "content": "hi"}},
+        {"type": "assistant",
+         "message": {"role": "assistant", "id": "no-ts",
+                     "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}},
+        {"type": "assistant", "timestamp": "definitely-not-iso",
+         "message": {"role": "assistant", "id": "bad-ts",
+                     "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}},
+        {"type": "assistant", "timestamp": iso(NOW_UNIX - 500),
+         "message": {"role": "user", "id": "role-mismatch",
+                     "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}},
+        good_entry,
+    ]
+
+
 def bias_of(pairs: list[tuple[float, float]]) -> float | None:
     """median(active_elapsed / begin_eta). Even count -> mean of two middle.
 
@@ -85,7 +133,14 @@ def bias_of(pairs: list[tuple[float, float]]) -> float | None:
     """
     if not pairs:
         return None
-    return statistics.median(sorted(active / eta for eta, active in pairs))
+    # Per SPEC: when all begin_eta <= 0, the bias is undefined → return None.
+    if all(eta <= 0 for eta, _ in pairs):
+        return None
+    # Compute ratios skipping pairs whose eta <= 0 to avoid div-by-zero.
+    ratios = [active / eta for eta, active in pairs if eta > 0]
+    if not ratios:
+        return None
+    return statistics.median(sorted(ratios))
 
 
 def history_expected(pairs: list[tuple[float, float]], session_count: int) -> dict:
@@ -94,6 +149,47 @@ def history_expected(pairs: list[tuple[float, float]], session_count: int) -> di
         "session_count": session_count,
         "n_pairs": len(pairs),
         "bias_factor": bias_of(pairs),
+    }
+
+
+def history_expected_with_idle(
+    pairs_full: list[tuple[float, float, float]], session_count: int
+) -> dict:
+    """Pairs encoded as (begin_eta, actual_elapsed, idle_excluded). Used when
+    a fixture exercises the idle-gap exclusion path (A15)."""
+    pairs = [(eta, actual) for eta, actual, _ in pairs_full]
+    if not pairs:
+        bias = None
+    elif all(eta <= 0 for eta, _, _ in pairs_full):
+        bias = None
+    else:
+        ratios = []
+        for eta, actual, idle in pairs_full:
+            if eta <= 0:
+                continue
+            active = max(0.0, actual - idle)
+            ratios.append(active / eta)
+        bias = statistics.median(sorted(ratios)) if ratios else None
+    return {
+        "pairs": [{"begin_eta": e, "actual_elapsed": a} for e, a in pairs],
+        "session_count": session_count,
+        "n_pairs": len(pairs),
+        "bias_factor": bias,
+    }
+
+
+def user_entry(unix_ts: float, msg_id: str, content) -> dict:
+    """A `type: "user"` entry. content may be a bare string (real user prompt)
+    or a list of content blocks (e.g., tool_result blocks). Used by A15 to
+    distinguish real-user idle gaps from agent-waiting-on-tool gaps."""
+    return {
+        "type": "user",
+        "timestamp": iso(unix_ts),
+        "message": {
+            "id": msg_id,
+            "role": "user",
+            "content": content,
+        },
     }
 
 
@@ -277,12 +373,291 @@ def scenario_back_to_back():
         [(100.0, 100.0), (200.0, 300.0)], session_count=1)
 
 
+# --- A9 / A10 / A12 / A13 / A14 scenarios for beacons-latest ---------------
+
+def scenario_subagent_latest():
+    """A9: walker queries a session_id whose transcript lives in a subagent
+    file (`subagents/agent-<session_id>.jsonl`), not a top-level parent file.
+
+    Layout: scenario dir is the slug. Beacons-latest discovery is:
+      <root>/*/<session_id>.jsonl                         (parent)
+      <root>/*/*/subagents/agent-<session_id>.jsonl       (subagent)
+    so the subagent file IS named for the session id. We supply
+    `--session-id myagent` and place the beacon in
+    `<scenario>/parent/subagents/agent-myagent.jsonl`.
+    """
+    sid = "myagent"  # the subagent's session id (= --session-id arg)
+    parent_session = "parent"  # the enclosing parent transcript's stem
+    t1, t2 = NOW_UNIX - 400, NOW_UNIX - 100
+    parent_lines = [
+        assistant_with_text(t1, "msg_sub_p001", "no beacon in the parent"),
+    ]
+    subagent_lines = [
+        assistant_with_text(t2, "msg_sub_a001",
+            beacon_text(beacon_json("end", 0, "subagent finished"))),
+    ]
+    files = {
+        f"{parent_session}.jsonl": parent_lines,
+        f"{parent_session}/subagents/agent-{sid}.jsonl": subagent_lines,
+    }
+    expected = {
+        "session_id": sid,
+        "beacon": {"kind": "end", "eta_seconds": 0,
+                   "summary": "subagent finished", "drift": "nominal"},
+        "emitted_at": t2,
+        "age_seconds": NOW_UNIX - t2,
+    }
+    return "subagent_latest", files, expected
+
+
+def scenario_int_numeric_forms():
+    """A10: `eta_seconds` is a JSON integer (30, not 30.0), and `beats_left`
+    is present. Walker must parse int-typed numeric fields without rejecting
+    the beacon as malformed.
+    """
+    sid = "session"
+    t1 = NOW_UNIX - 200
+    raw_int = json.dumps({
+        "kind": "begin",
+        "eta_seconds": 30,           # int, not float
+        "summary": "int eta",
+        "drift": "nominal",
+        "beats_left": 5,             # int
+    })
+    lines = [assistant_with_text(t1, "msg_int_001", beacon_text(raw_int))]
+    expected = {
+        "session_id": sid,
+        "beacon": {"kind": "begin", "eta_seconds": 30,
+                   "summary": "int eta", "drift": "nominal",
+                   "beats_left": 5},
+        "emitted_at": t1,
+        "age_seconds": NOW_UNIX - t1,
+    }
+    return "int_numeric_forms", sid, lines, expected
+
+
+def scenario_matcher_edges():
+    """A12: `<progress-beacon>` open tag not followed by `{`, and a separate
+    turn with `{...}` but no closing tag. Walker must NOT emit a spurious
+    beacon — the latest result must be None.
+
+    Two turns so we exercise both shapes; the LATER turn is the
+    unterminated one, and walker walks backwards.
+    """
+    sid = "session"
+    t1, t2 = NOW_UNIX - 300, NOW_UNIX - 200
+    # Open tag not followed by `{`: tag present, body is plain text.
+    lines = [
+        assistant_with_text(t1, "msg_me_001",
+            "Working... <progress-beacon>oops not JSON</progress-beacon> end"),
+        # `{...}` present but no closing tag — should not match.
+        assistant_with_text(t2, "msg_me_002",
+            "Working... <progress-beacon>{\"kind\":\"begin\","
+            "\"eta_seconds\":60,\"summary\":\"unterminated\"} <other> end"),
+    ]
+    expected = {
+        "session_id": sid,
+        "beacon": None,
+        "emitted_at": None,
+        "age_seconds": None,
+    }
+    return "matcher_edges", sid, lines, expected
+
+
+def scenario_escape_chars_latest():
+    """A13: beacon summary contains control chars and special punctuation that
+    must be JSON-escaped on output. Walker must emit valid JSON.
+    """
+    sid = "session"
+    t1 = NOW_UNIX - 100
+    # Summary with quotes, backslash, and control bytes. Build via dict so
+    # json.dumps does the escaping for us (matches what walker will emit).
+    nasty = "quote\"slash\\back\nnewline\ttab\rret\bbs\x01ctl"
+    raw = json.dumps({
+        "kind": "report",
+        "eta_seconds": 42,
+        "summary": nasty,
+        "drift": "nominal",
+    })
+    lines = [assistant_with_text(t1, "msg_esc_001", beacon_text(raw))]
+    expected = {
+        "session_id": sid,
+        "beacon": {"kind": "report", "eta_seconds": 42,
+                   "summary": nasty, "drift": "nominal"},
+        "emitted_at": t1,
+        "age_seconds": NOW_UNIX - t1,
+    }
+    return "escape_chars", sid, lines, expected
+
+
+def scenario_dirty_ladder_latest():
+    """A8: dirty/skip-ladder transcript with one valid beacon at the end.
+    Walker must skip every bad line and return the trailing beacon.
+    """
+    sid = "session"
+    t1 = NOW_UNIX - 100
+    valid = beacon_json("report", 99, "after the ladder")
+    valid_line = assistant_with_text(t1, "msg_dl_good", beacon_text(valid))
+    # Inject bad lines as raw strings; write_jsonl only json-dumps dicts,
+    # so we need to write them manually below. To keep write_jsonl's contract
+    # simple, just include them as additional valid-ish entries that get
+    # filtered out by the line filter — except we DO want to exercise the
+    # malformed-JSON / blank-line / role-mismatch ladder. Tactic: write the
+    # mixed file manually below in main(), keyed by scenario name.
+    return "dirty_ladder_latest", sid, valid_line, {
+        "session_id": sid,
+        "beacon": {"kind": "report", "eta_seconds": 99,
+                   "summary": "after the ladder", "drift": "nominal"},
+        "emitted_at": t1,
+        "age_seconds": NOW_UNIX - t1,
+    }
+
+
+# --- A9 / A11 / A13 / A15 scenarios for beacons-history --------------------
+
+def scenario_subagent_history():
+    """A9: history mode walks subagent transcripts. Layout (per conformance
+    L242-251): scenario dir is the projects-root → subdirs are slugs.
+    Beacon pair lives in `<slug>/<sid>/subagents/agent-*.jsonl`.
+    """
+    begin_ts, end_ts = NOW_UNIX - 1000, NOW_UNIX - 700  # 300s actual; eta=200 → 1.5
+    sub_lines = [
+        assistant_with_text(begin_ts, "msg_sah_001",
+            beacon_text(beacon_json("begin", 200, "subagent A start", drift=None))),
+        assistant_with_text(end_ts, "msg_sah_002",
+            beacon_text(beacon_json("end", 0, "subagent A done", drift=None))),
+    ]
+    files = {
+        "slug/session/subagents/agent-acompact-x.jsonl": sub_lines,
+    }
+    return "subagent_history", files, history_expected(
+        [(200.0, 300.0)], session_count=1)
+
+
+def scenario_even_pair_count():
+    """A11: even number of pairs → median is mean of the two middle ratios.
+    Four pairs with ratios 0.5, 1.0, 2.0, 4.0 → median = (1.0 + 2.0) / 2 = 1.5.
+    """
+    # Pair 1: eta=200, actual=100 → 0.5
+    a0, a1 = NOW_UNIX - 3000, NOW_UNIX - 2900
+    # Pair 2: eta=100, actual=100 → 1.0
+    b0, b1 = NOW_UNIX - 2800, NOW_UNIX - 2700
+    # Pair 3: eta=100, actual=200 → 2.0
+    c0, c1 = NOW_UNIX - 2600, NOW_UNIX - 2400
+    # Pair 4: eta=100, actual=400 → 4.0
+    d0, d1 = NOW_UNIX - 2300, NOW_UNIX - 1900
+    lines = [
+        assistant_with_text(a0, "msg_ev_a0", beacon_text(beacon_json("begin", 200, "p1", drift=None))),
+        assistant_with_text(a1, "msg_ev_a1", beacon_text(beacon_json("end", 0, "p1 done", drift=None))),
+        assistant_with_text(b0, "msg_ev_b0", beacon_text(beacon_json("begin", 100, "p2", drift=None))),
+        assistant_with_text(b1, "msg_ev_b1", beacon_text(beacon_json("end", 0, "p2 done", drift=None))),
+        assistant_with_text(c0, "msg_ev_c0", beacon_text(beacon_json("begin", 100, "p3", drift=None))),
+        assistant_with_text(c1, "msg_ev_c1", beacon_text(beacon_json("end", 0, "p3 done", drift=None))),
+        assistant_with_text(d0, "msg_ev_d0", beacon_text(beacon_json("begin", 100, "p4", drift=None))),
+        assistant_with_text(d1, "msg_ev_d1", beacon_text(beacon_json("end", 0, "p4 done", drift=None))),
+    ]
+    return "even_pair_count", {"slug/session.jsonl": lines}, history_expected(
+        [(200.0, 100.0), (100.0, 100.0), (100.0, 200.0), (100.0, 400.0)],
+        session_count=1)
+
+
+def scenario_all_zero_eta():
+    """A11: every pair has begin_eta == 0 → all ratios filtered out →
+    bias_factor must be null. Two pairs guarantee the all-zero branch fires
+    even if an impl preserves at least one ratio.
+    """
+    a0, a1 = NOW_UNIX - 2000, NOW_UNIX - 1900
+    b0, b1 = NOW_UNIX - 1800, NOW_UNIX - 1700
+    lines = [
+        assistant_with_text(a0, "msg_az_a0", beacon_text(beacon_json("begin", 0, "zero-eta a", drift=None))),
+        assistant_with_text(a1, "msg_az_a1", beacon_text(beacon_json("end", 0, "a done", drift=None))),
+        assistant_with_text(b0, "msg_az_b0", beacon_text(beacon_json("begin", 0, "zero-eta b", drift=None))),
+        assistant_with_text(b1, "msg_az_b1", beacon_text(beacon_json("end", 0, "b done", drift=None))),
+    ]
+    return "all_zero_eta", {"slug/session.jsonl": lines}, history_expected(
+        [(0.0, 100.0), (0.0, 100.0)], session_count=1)
+
+
+def scenario_idle_gap_history():
+    """A15: a real user prompt inside the begin→end span creates an idle gap
+    that must be excluded from bias_factor. A separate `type:"user"` whose
+    content is a tool_result array must NOT count as idle.
+
+    Layout:
+        begin (t0)
+            ... agent work ...
+            tool_use → tool_result(user, list-content) at t_tool_result
+            ... more work ...
+            REAL user prompt at t_user (gap of 100s before this)
+            ... more work ...
+        end (t1)
+
+    Span = t1 - t0 = 1000s. Real-user-gap = (t_user - t_prev_assistant).
+    With prev_assistant at t_user - 100, the idle clip is 100s.
+    bias_factor = (actual - idle) / eta = (1000 - 100) / 500 = 1.8.
+    """
+    t0 = NOW_UNIX - 2000
+    t_mid_1 = NOW_UNIX - 1800
+    # Tool_result user entry — NOT counted as idle. Sits between two assistant turns.
+    t_tool_result = NOW_UNIX - 1700
+    t_mid_2 = NOW_UNIX - 1600
+    # Real user prompt 100s after the previous assistant turn = NOW_UNIX-1500.
+    t_user = NOW_UNIX - 1500
+    t_mid_3 = NOW_UNIX - 1400
+    t1 = NOW_UNIX - 1000
+    lines = [
+        assistant_with_text(t0, "msg_idle_begin",
+            beacon_text(beacon_json("begin", 500, "idle gap test", drift=None))),
+        assistant_with_text(t_mid_1, "msg_idle_m1", "agent working"),
+        user_entry(t_tool_result, "msg_idle_tool", [
+            {"type": "tool_result", "tool_use_id": "x", "content": "ok"}
+        ]),
+        assistant_with_text(t_mid_2, "msg_idle_m2", "agent continuing after tool"),
+        # Real user prompt — gap (t_user - t_mid_2) = 100s should be excluded.
+        user_entry(t_user, "msg_idle_user", "real user follow-up"),
+        assistant_with_text(t_mid_3, "msg_idle_m3", "agent resuming"),
+        assistant_with_text(t1, "msg_idle_end",
+            beacon_text(beacon_json("end", 0, "idle gap done", drift=None))),
+    ]
+    return "idle_gap_history", {"slug/session.jsonl": lines}, history_expected_with_idle(
+        [(500.0, 1000.0, 100.0)], session_count=1)
+
+
+def scenario_dirty_ladder_history():
+    """A8 for history: a dirty-line ladder in a session group that also
+    contains one valid begin/end lifecycle. Walker must skip every bad line
+    without crashing and emit exactly one pair.
+    """
+    t0, t1 = NOW_UNIX - 1200, NOW_UNIX - 900   # eta=300, actual=300 → 1.0
+    valid = [
+        assistant_with_text(t0, "msg_dlh_begin",
+            beacon_text(beacon_json("begin", 300, "dirty history begin", drift=None))),
+        assistant_with_text(t1, "msg_dlh_end",
+            beacon_text(beacon_json("end", 0, "dirty history end", drift=None))),
+    ]
+    return "dirty_ladder_history", {"slug/session.jsonl": valid}, history_expected(
+        [(300.0, 300.0)], session_count=1)
+
+
 LATEST_SCENARIOS = (
     scenario_clean_lifecycle,
     scenario_malformed,
     scenario_missing_fields,
     scenario_optional_drift,
     scenario_multiple_in_turn,
+    # New (Phase 3 batch B):
+    scenario_int_numeric_forms,
+    scenario_matcher_edges,
+    scenario_escape_chars_latest,
+)
+
+# scenario_subagent_latest is multi-file; scenario_dirty_ladder_latest needs
+# raw-line injection. Both are handled out-of-band in main().
+LATEST_SCENARIOS_MULTIFILE = (
+    scenario_subagent_latest,
+)
+LATEST_SCENARIOS_WITH_DIRTY = (
+    scenario_dirty_ladder_latest,
 )
 
 HISTORY_SCENARIOS = (
@@ -291,6 +666,12 @@ HISTORY_SCENARIOS = (
     scenario_orphan_begin,
     scenario_orphan_end,
     scenario_back_to_back,
+    # New (Phase 3 batch B):
+    scenario_subagent_history,
+    scenario_even_pair_count,
+    scenario_all_zero_eta,
+    scenario_idle_gap_history,
+    scenario_dirty_ladder_history,
 )
 
 
@@ -310,11 +691,35 @@ def main() -> None:
         write_jsonl(CORPUS_BEACONS / scenario / f"{sid}.jsonl", lines)
         expected_latest[scenario] = expected
 
-    expected_history = {}
-    for build in HISTORY_SCENARIOS:
+    # Multi-file latest scenarios (e.g., subagent transcript discovery).
+    for build in LATEST_SCENARIOS_MULTIFILE:
         scenario, files, expected = build()
         for rel, lines in files.items():
             write_jsonl(CORPUS_BEACONS / scenario / rel, lines)
+        expected_latest[scenario] = expected
+
+    # Dirty-ladder latest: bracket the valid beacon turn with malformed lines.
+    for build in LATEST_SCENARIOS_WITH_DIRTY:
+        scenario, sid, good_entry, expected = build()
+        entries = dirty_ladder_lines(good_entry)
+        write_jsonl_mixed(CORPUS_BEACONS / scenario / f"{sid}.jsonl", entries)
+        expected_latest[scenario] = expected
+
+    expected_history = {}
+    for build in HISTORY_SCENARIOS:
+        scenario, files, expected = build()
+        # dirty_ladder_history: inject the ladder into the session file.
+        if scenario == "dirty_ladder_history":
+            for rel, lines in files.items():
+                # Take the first lifecycle's begin/end and interleave with
+                # bad lines so the walker has to filter them.
+                good_begin = lines[0]
+                good_end = lines[1]
+                mixed = dirty_ladder_lines(good_begin) + [good_end]
+                write_jsonl_mixed(CORPUS_BEACONS / scenario / rel, mixed)
+        else:
+            for rel, lines in files.items():
+                write_jsonl(CORPUS_BEACONS / scenario / rel, lines)
         expected_history[scenario] = expected
 
     meta = {

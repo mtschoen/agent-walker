@@ -236,6 +236,120 @@ def fixture_08_web_search():
     return slug, {f"{sid}.jsonl": turns}
 
 
+def dirty_ladder_entries(good_msg_id: str = "dirty-good") -> list[dict | str]:
+    """A reusable "skip-ladder" sequence of bad/dirty lines + one good turn.
+
+    Exercises (A8 in COVERAGE-GAPS.md) the shared line filter used by cost,
+    events, beacons, and search scanners. Each implementation must SKIP
+    every bad line without crashing and ONLY count the single good turn at
+    the end. The good turn is anchored at FRESH so its cost lands in both
+    trailing and window buckets.
+
+    Bad-line ladder (each kind appears at least once):
+      1. blank line
+      2. line of only whitespace
+      3. malformed JSON (unclosed object)
+      4. malformed JSON (bareword garbage)
+      5. non-object root (a JSON array)
+      6. non-assistant role ({"type":"user", role:"user"})
+      7. assistant with empty content array
+      8. assistant missing `timestamp` field
+      9. assistant with unparseable timestamp
+     10. assistant with role mismatch (type=assistant but role=user)
+    Then one valid assistant turn that should be counted.
+    """
+    entries: list[dict | str] = [
+        "",                                   # 1: blank
+        "   ",                                # 2: whitespace only
+        '{"type":"assistant","timestamp":',   # 3: unclosed JSON
+        "this is not JSON at all",            # 4: bareword garbage
+        json.dumps([1, 2, 3]),                # 5: non-object root
+        json.dumps({                           # 6: user role -- not assistant
+            "type": "user", "timestamp": iso(FRESH),
+            "message": {"role": "user", "content": "hi"},
+        }),
+        json.dumps({                           # 7: missing timestamp
+            "type": "assistant",
+            "message": {"role": "assistant", "id": "no-ts",
+                        "model": "claude-opus-4-7",
+                        "usage": {"input_tokens": 99}},
+        }),
+        json.dumps({                           # 8: unparseable timestamp
+            "type": "assistant", "timestamp": "definitely-not-iso",
+            "message": {"role": "assistant", "id": "bad-ts",
+                        "model": "claude-opus-4-7",
+                        "usage": {"input_tokens": 99}},
+        }),
+        json.dumps({                           # 9: type=assistant, role=user
+            "type": "assistant", "timestamp": iso(FRESH),
+            "message": {"role": "user", "id": "role-mismatch",
+                        "model": "claude-opus-4-7",
+                        "usage": {"input_tokens": 99}},
+        }),
+        turn("claude-sonnet-4-6", FRESH, msg_id=good_msg_id,
+             input_tokens=1000, output_tokens=500),   # the one good turn
+    ]
+    return entries
+
+
+def fixture_09_dirty_ladder():
+    """Reusable dirty/skip-ladder fixture (A8). Every line except the last
+    is malformed or rejected by the line filter; only the last turn counts.
+    """
+    slug = "09-dirty-ladder"
+    sid = "theta"
+    return slug, {f"{sid}.jsonl": dirty_ladder_entries()}
+
+
+def fixture_10_iso_variants():
+    """ISO 8601 timestamp variants (A14): non-Z offset, fractional seconds,
+    and a malformed timestamp side-by-side. Only the well-formed entries
+    contribute to the totals; the malformed one is skipped per the line
+    filter without crashing.
+    """
+    slug = "10-iso-variants"
+    sid = "iota"
+    # Build ISO strings with non-Z offset and fractional seconds, both
+    # equivalent to FRESH (so an impl that accepts them produces the
+    # expected cost). Using FRESH directly so both land in trailing+window.
+    fresh_utc = datetime.fromtimestamp(FRESH, tz=timezone.utc)
+    # 1) Non-Z numeric offset (+05:30) — local clock = UTC + 5h30m.
+    from datetime import timedelta
+    offset = timedelta(hours=5, minutes=30)
+    local = fresh_utc + offset
+    iso_offset = local.strftime("%Y-%m-%dT%H:%M:%S") + "+05:30"
+    # 2) Fractional seconds with Z (e.g., .123456Z) — same FRESH.
+    iso_frac = fresh_utc.strftime("%Y-%m-%dT%H:%M:%S.123456Z")
+    entries: list[dict | str] = [
+        # Non-Z numeric offset → equivalent FRESH timestamp.
+        json.dumps({
+            "type": "assistant", "timestamp": iso_offset,
+            "message": {"role": "assistant", "id": "iso-offset",
+                        "model": "claude-opus-4-7",
+                        "usage": {"input_tokens": 1000, "output_tokens": 500,
+                                  "cache_read_input_tokens": 0,
+                                  "cache_creation_input_tokens": 0}},
+        }),
+        # Fractional seconds → also FRESH.
+        json.dumps({
+            "type": "assistant", "timestamp": iso_frac,
+            "message": {"role": "assistant", "id": "iso-frac",
+                        "model": "claude-sonnet-4-6",
+                        "usage": {"input_tokens": 500, "output_tokens": 100,
+                                  "cache_read_input_tokens": 0,
+                                  "cache_creation_input_tokens": 0}},
+        }),
+        # Malformed timestamp → skipped.
+        json.dumps({
+            "type": "assistant", "timestamp": "2026-13-99T99:99:99Z",
+            "message": {"role": "assistant", "id": "iso-malformed",
+                        "model": "claude-opus-4-7",
+                        "usage": {"input_tokens": 999999}},
+        }),
+    ]
+    return slug, {f"{sid}.jsonl": entries}
+
+
 FIXTURES = [
     fixture_01_single_parent,
     fixture_02_parent_acompact,
@@ -245,6 +359,8 @@ FIXTURES = [
     fixture_06_period_only,
     fixture_07_unknown_model,
     fixture_08_web_search,
+    fixture_09_dirty_ladder,
+    fixture_10_iso_variants,
 ]
 
 
@@ -255,10 +371,15 @@ def walk_group(files: dict[str, list]) -> tuple[float, float]:
     for entries in files.values():
         for entry in entries:
             if isinstance(entry, str):
+                stripped = entry.strip()
+                if not stripped:
+                    continue  # blank / whitespace-only line
                 try:
-                    entry = json.loads(entry)
+                    entry = json.loads(stripped)
                 except Exception:
-                    continue
+                    continue  # malformed JSON
+            if not isinstance(entry, dict):
+                continue  # non-object root (e.g., JSON array)
             msg = entry.get("message") or {}
             if msg.get("role") != "assistant":
                 continue

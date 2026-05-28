@@ -1,0 +1,1 @@
+{"type": "assistant", "timestamp": "2026-05-10T11:53:20.000Z", "message": {"id": "msg_sub_p001", "role": "assistant", "model": "claude-opus-4-7", "content": [{"type": "text", "text": "no beacon in the parent"}], "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}

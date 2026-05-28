@@ -47,6 +47,57 @@
       },
       "emitted_at": 1778414200.0,
       "age_seconds": 200.0
+    },
+    "int_numeric_forms": {
+      "session_id": "session",
+      "beacon": {
+        "kind": "begin",
+        "eta_seconds": 30,
+        "summary": "int eta",
+        "drift": "nominal",
+        "beats_left": 5
+      },
+      "emitted_at": 1778414200.0,
+      "age_seconds": 200.0
+    },
+    "matcher_edges": {
+      "session_id": "session",
+      "beacon": null,
+      "emitted_at": null,
+      "age_seconds": null
+    },
+    "escape_chars": {
+      "session_id": "session",
+      "beacon": {
+        "kind": "report",
+        "eta_seconds": 42,
+        "summary": "quote\"slash\\back\nnewline\ttab\rret\bbs\u0001ctl",
+        "drift": "nominal"
+      },
+      "emitted_at": 1778414300.0,
+      "age_seconds": 100.0
+    },
+    "subagent_latest": {
+      "session_id": "myagent",
+      "beacon": {
+        "kind": "end",
+        "eta_seconds": 0,
+        "summary": "subagent finished",
+        "drift": "nominal"
+      },
+      "emitted_at": 1778414300.0,
+      "age_seconds": 100.0
+    },
+    "dirty_ladder_latest": {
+      "session_id": "session",
+      "beacon": {
+        "kind": "report",
+        "eta_seconds": 99,
+        "summary": "after the ladder",
+        "drift": "nominal"
+      },
+      "emitted_at": 1778414300.0,
+      "age_seconds": 100.0
     }
   }
 }

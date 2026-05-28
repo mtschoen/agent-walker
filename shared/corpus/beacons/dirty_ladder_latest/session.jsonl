@@ -1,0 +1,10 @@
+
+   
+{"type":"assistant","timestamp":
+this is not JSON at all
+[1, 2, 3]
+{"type": "user", "timestamp": "2026-05-10T11:46:40.000Z", "message": {"role": "user", "content": "hi"}}
+{"type": "assistant", "message": {"role": "assistant", "id": "no-ts", "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}}
+{"type": "assistant", "timestamp": "definitely-not-iso", "message": {"role": "assistant", "id": "bad-ts", "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}}
+{"type": "assistant", "timestamp": "2026-05-10T11:51:40.000Z", "message": {"role": "user", "id": "role-mismatch", "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}}
+{"type": "assistant", "timestamp": "2026-05-10T11:58:20.000Z", "message": {"id": "msg_dl_good", "role": "assistant", "model": "claude-opus-4-7", "content": [{"type": "text", "text": "Working on it.\n\n<progress-beacon>\n{\"kind\": \"report\", \"eta_seconds\": 99, \"summary\": \"after the ladder\", \"drift\": \"nominal\"}\n</progress-beacon>"}], "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}
