@@ -716,3 +716,175 @@ pub fn run(raw: &[String]) {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::SystemTime;
+
+    fn tempdir_path(suffix: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        p.push(format!("rust-search-test-{suffix}-{pid}-{nanos}"));
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn parse_time_arg_relative_units() {
+        let now = 1_000_000.0;
+        // d / h / m / s suffixes.
+        assert!((parse_time_arg("3d", now).unwrap() - (now - 3.0 * 86400.0)).abs() < 1e-9);
+        assert!((parse_time_arg("2h", now).unwrap() - (now - 2.0 * 3600.0)).abs() < 1e-9);
+        assert!((parse_time_arg("30m", now).unwrap() - (now - 30.0 * 60.0)).abs() < 1e-9);
+        assert!((parse_time_arg("10s", now).unwrap() - (now - 10.0)).abs() < 1e-9);
+        // Fractional value.
+        assert!((parse_time_arg("0.5h", now).unwrap() - (now - 1800.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_time_arg_iso8601() {
+        // Absolute RFC3339 path.
+        let v = parse_time_arg("2025-01-15T00:00:00Z", 0.0).unwrap();
+        assert!(v > 1_700_000_000.0 && v < 1_900_000_000.0);
+    }
+
+    #[test]
+    fn parse_time_arg_errors() {
+        assert!(parse_time_arg("", 0.0).is_err());
+        assert!(parse_time_arg("   ", 0.0).is_err());
+        assert!(parse_time_arg("garbage", 0.0).is_err());
+        // 'd' suffix with non-numeric head → falls through to ISO parse → err.
+        assert!(parse_time_arg("xd", 0.0).is_err());
+    }
+
+    #[test]
+    fn nudge_char_boundary_walks_forward() {
+        // "héllo" — 'é' is two bytes, so index 2 isn't a char boundary.
+        let s = "héllo";
+        // Index 2 is mid-é; nudge to next boundary (3).
+        assert_eq!(nudge_char_boundary(s, 2), 3);
+        // 0 and len() are always boundaries.
+        assert_eq!(nudge_char_boundary(s, 0), 0);
+        assert_eq!(nudge_char_boundary(s, s.len()), s.len());
+    }
+
+    #[test]
+    fn nudge_to_whitespace_no_op_at_endpoints() {
+        // Covers line 347-348: cut at 0 or cut at end returns immediately.
+        let text = "hello world";
+        assert_eq!(nudge_to_whitespace(text, 0, -1, 20), 0);
+        assert_eq!(nudge_to_whitespace(text, text.len(), 1, 20), text.len());
+    }
+
+    #[test]
+    fn nudge_to_whitespace_walks_left() {
+        // "hello world", cut at 7 (inside "world") → step left to whitespace
+        // index 5 → return 5 + 1 = 6.
+        let text = "hello world";
+        assert_eq!(nudge_to_whitespace(text, 7, -1, 20), 6);
+    }
+
+    #[test]
+    fn nudge_to_whitespace_walks_right() {
+        let text = "hello world";
+        // Cut at 3 (inside "hello"), step right to whitespace at 5.
+        assert_eq!(nudge_to_whitespace(text, 3, 1, 20), 5);
+    }
+
+    #[test]
+    fn nudge_to_whitespace_no_whitespace_in_range() {
+        // No whitespace within max_nudge → returns original cut.
+        let text = "aaaaaaaaaaaa";
+        assert_eq!(nudge_to_whitespace(text, 5, -1, 20), 5);
+        assert_eq!(nudge_to_whitespace(text, 5, 1, 20), 5);
+    }
+
+    #[test]
+    fn make_snippet_centers_match() {
+        let text = "alpha beta gamma delta epsilon zeta eta theta iota";
+        // Match "gamma" at byte 11..16; snippet_chars=20 → ~10 chars each side.
+        let mstart = text.find("gamma").unwrap();
+        let mend = mstart + "gamma".len();
+        let snippet = make_snippet(text, (mstart, mend), 20);
+        assert!(snippet.contains("gamma"));
+        assert!(snippet.len() <= 40);  // ~snippet_chars + a little nudge slack
+    }
+
+    #[test]
+    fn truncate_short_input_returns_as_is() {
+        // Cover line 605: s.len() <= max returns the string verbatim.
+        assert_eq!(truncate("short", 10), "short");
+        assert_eq!(truncate("", 5), "");
+    }
+
+    #[test]
+    fn truncate_long_input_appends_ellipsis() {
+        // Covers lines 607-611: cut at max + ellipsis.
+        let result = truncate("0123456789abcdef", 5);
+        assert_eq!(result, "01234…");
+    }
+
+    #[test]
+    fn truncate_walks_back_to_char_boundary() {
+        // "héllo" — 'é' is bytes 1..3. max=2 lands mid-é; walk back to 1.
+        let result = truncate("héllo world", 2);
+        assert_eq!(result, "h…");
+    }
+
+    #[test]
+    fn scan_file_open_error_returns_empty() {
+        // Covers lines 212-214: File::open Err → return empty vec.
+        let missing = PathBuf::from("/nonexistent/path/to/file.jsonl");
+        let msgs = scan_file(&missing);
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn scan_file_skips_malformed_lines() {
+        // Covers blank-line + bad-JSON + missing-message + missing-content
+        // + empty-role + unparseable timestamp branches.
+        let dir = tempdir_path("scan-skip");
+        let path = dir.join("session.jsonl");
+        let lines = [
+            "",                                                       // blank
+            "   ",                                                    // whitespace-only
+            "{garbage",                                               // bad JSON
+            "{}",                                                     // no message
+            r#"{"message":{}}"#,                                     // missing role
+            r#"{"message":{"role":""}}"#,                            // empty role
+            r#"{"message":{"role":"user"}}"#,                        // no content
+            r#"{"message":{"role":"user","content":""},"timestamp":"garbage"}"#,  // bad ts
+            r#"{"message":{"role":"user","content":"hi"},"timestamp":"2025-01-01T00:00:00Z"}"#, // good
+        ];
+        fs::write(&path, lines.join("\n")).unwrap();
+        let msgs = scan_file(&path);
+        assert_eq!(msgs.len(), 2);  // the empty-content user and the good user line
+        // First valid message has content "" (line 7); second has "hi".
+        assert_eq!(msgs.last().unwrap().text_default, "hi");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_files_prunes_old_mtimes_with_since() {
+        // Covers lines 289-293: since-filter mtime branches.
+        let root = tempdir_path("discover-prune");
+        let slug = root.join("project-x");
+        fs::create_dir_all(&slug).unwrap();
+        fs::write(slug.join("sid-1.jsonl"), b"").unwrap();
+        // Cutoff far in the future → entry is filtered out.
+        let far_future = SystemTime::now()
+            .duration_since(UNIX_EPOCH).unwrap().as_secs_f64() + 1e9;
+        let files = discover_files(&[root.clone()], Some(far_future), None);
+        assert!(files.is_empty());
+        // Without a cutoff, the file is discovered.
+        let files2 = discover_files(&[root.clone()], None, None);
+        assert_eq!(files2.len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+}

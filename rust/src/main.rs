@@ -319,3 +319,193 @@ impl From<GroupResult> for (f64, f64) {
         (g.trailing, g.window)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_home_env<F, R>(home: Option<&str>, up: Option<&str>, body: F) -> R
+    where F: FnOnce() -> R {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved_home = std::env::var_os("HOME");
+        let saved_up = std::env::var_os("USERPROFILE");
+        match home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match up {
+            Some(v) => std::env::set_var("USERPROFILE", v),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        let r = body();
+        match saved_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match saved_up {
+            Some(v) => std::env::set_var("USERPROFILE", v),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        r
+    }
+
+    fn tempdir_path(suffix: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        p.push(format!("rust-main-test-{suffix}-{pid}-{nanos}"));
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn s(x: &str) -> String { x.to_string() }
+
+    #[test]
+    fn wants_help_no_args() {
+        let raw: Vec<String> = vec![];
+        assert!(wants_help(&raw));
+    }
+
+    #[test]
+    fn wants_help_h_flag() {
+        assert!(wants_help(&[s("-h")]));
+        assert!(wants_help(&[s("--help")]));
+    }
+
+    #[test]
+    fn wants_help_subcommand_then_help() {
+        assert!(wants_help(&[s("search"), s("-h")]));
+        assert!(wants_help(&[s("cost"), s("--help")]));
+    }
+
+    #[test]
+    fn wants_help_no_help_when_not_present() {
+        assert!(!wants_help(&[s("--period"), s("60")]));
+        assert!(!wants_help(&[s("search"), s("foo")]));
+    }
+
+    #[test]
+    fn parse_cost_args_requires_period() {
+        // Period defaults to 0; period==0 → required error.
+        assert!(parse_cost_args(&[]).is_err());
+    }
+
+    #[test]
+    fn parse_cost_args_flag_value_errors() {
+        for flag in ["--period", "--win-start", "--now",
+                     "--projects-root", "--extra-projects-root"] {
+            assert!(
+                parse_cost_args(&[s(flag)]).is_err(),
+                "{} should error when value missing", flag
+            );
+        }
+        assert!(parse_cost_args(&[s("--period"), s("notnum")]).is_err());
+        assert!(parse_cost_args(&[s("--win-start"), s("nope"), s("--period"), s("60")]).is_err());
+        assert!(parse_cost_args(&[s("--unknown")]).is_err());
+    }
+
+    #[test]
+    fn parse_cost_args_accepts_all_flags() {
+        let a = parse_cost_args(&[
+            s("--period"), s("3600"),
+            s("--win-start"), s("100.5"),
+            s("--now"), s("200.0"),
+            s("--projects-root"), s("/tmp/p"),
+            s("--extra-projects-root"), s("/tmp/q"),
+            s("--no-config"),
+        ]).unwrap();
+        assert_eq!(a.period_seconds, 3600);
+        assert_eq!(a.win_start_unix, 100.5);
+        assert_eq!(a.now_unix, Some(200.0));
+        assert_eq!(a.projects_root, Some(PathBuf::from("/tmp/p")));
+        assert_eq!(a.extra_projects_roots, vec![PathBuf::from("/tmp/q")]);
+        assert!(!a.read_config);
+    }
+
+    #[test]
+    fn parse_iso8601_valid_z_and_offset_and_fractional() {
+        assert!(parse_iso8601("2025-01-01T00:00:00Z").unwrap() > 0.0);
+        assert!(parse_iso8601("2025-01-01T00:00:00+05:30").unwrap() > 0.0);
+        assert!(parse_iso8601("2025-01-01T00:00:00.123Z").unwrap() > 0.0);
+        assert!(parse_iso8601("garbage").is_none());
+    }
+
+    #[test]
+    fn current_unix_positive() {
+        // It calls SystemTime::now(); just confirm it's a positive timestamp.
+        assert!(current_unix() > 1_700_000_000.0);
+    }
+
+    #[test]
+    fn default_projects_root_with_home() {
+        with_home_env(Some("/tmp/myhome"), Some("/tmp/profile"), || {
+            let p = default_projects_root();
+            if cfg!(windows) {
+                assert_eq!(p, PathBuf::from("/tmp/profile").join(".claude").join("projects"));
+            } else {
+                assert_eq!(p, PathBuf::from("/tmp/myhome").join(".claude").join("projects"));
+            }
+        });
+    }
+
+    #[test]
+    fn default_projects_root_no_home_fallback() {
+        // Covers main.rs:214 — neither HOME nor USERPROFILE set → relative path.
+        with_home_env(None, None, || {
+            let p = default_projects_root();
+            assert_eq!(p, PathBuf::from(".claude/projects"));
+        });
+    }
+
+    #[test]
+    fn walk_group_open_error_returns_zero() {
+        let r = walk_group(&[PathBuf::from("/no/such/file.jsonl")], 0.0, 0.0);
+        assert_eq!(r.trailing, 0.0);
+        assert_eq!(r.window, 0.0);
+    }
+
+    #[test]
+    fn walk_group_skip_ladder() {
+        // Exercise every skip branch + a valid turn.
+        let dir = tempdir_path("walk-group");
+        let path = dir.join("session.jsonl");
+        let body = concat!(
+            "\n",                  // blank line
+            "{garbage\n",          // malformed JSON
+            "{}\n",                // entry.message=None → continue
+            r#"{"timestamp":"2025-01-01T00:00:00Z","message":{"role":"user"}}"#, "\n", // not assistant
+            r#"{"timestamp":"2025-01-01T00:00:01Z","message":{"role":"assistant","id":"m1","model":"sonnet","usage":{"input_tokens":1000000,"output_tokens":1000000}}}"#, "\n", // valid
+            r#"{"timestamp":"2025-01-01T00:00:02Z","message":{"role":"assistant","id":"m1","model":"sonnet"}}"#, "\n", // dup id
+            r#"{"message":{"role":"assistant","id":"m2","model":"sonnet"}}"#, "\n",  // no timestamp
+            r#"{"timestamp":"garbage","message":{"role":"assistant","id":"m3","model":"sonnet"}}"#, "\n", // bad ts
+            r#"{"timestamp":"1970-01-01T00:00:00Z","message":{"role":"assistant","id":"m4","model":"sonnet","usage":{"input_tokens":1000000}}}"#, "\n", // before earliest
+        );
+        fs::write(&path, body).unwrap();
+        // period_cutoff far in the past, win_start_unix at 2025
+        let win_start = parse_iso8601("2025-01-01T00:00:00.5Z").unwrap();
+        let r = walk_group(&[path], 0.0, win_start);
+        // earliest = min(period_cutoff=0, win_start) = 0, so 1970 entry passes
+        // the earliest filter, BUT we set win_start to mid-2025, so:
+        // trailing accrues whenever ts >= period_cutoff=0 (both 2025 + 1970 if usage),
+        // window accrues only for ts >= win_start = mid 2025.
+        // Only the 2025-01-01T00:00:01 turn has usage and id "m1" (unique).
+        // 1970 turn has usage but no id collision; its ts < win_start → only trailing.
+        assert!(r.trailing > 0.0);
+        assert!(r.window > 0.0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn group_result_from_into_tuple() {
+        let g = GroupResult { trailing: 1.0, window: 2.0 };
+        let t: (f64, f64) = g.into();
+        assert_eq!(t, (1.0, 2.0));
+    }
+}

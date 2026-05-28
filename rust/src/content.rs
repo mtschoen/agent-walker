@@ -85,3 +85,91 @@ pub fn user_content_is_tool_result(content: Option<&Value>) -> bool {
         block.get("type").and_then(|v| v.as_str()) == Some("tool_result")
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn extract_text_returns_empty_for_non_string_non_array() {
+        // Covers line 21: content is e.g. a number/object/null → empty string.
+        assert_eq!(extract_text(&json!(42), false), "");
+        assert_eq!(extract_text(&json!(null), false), "");
+        assert_eq!(extract_text(&json!({"k":"v"}), false), "");
+    }
+
+    #[test]
+    fn extract_text_tool_result_text_array() {
+        // Covers lines 41-49: tool_result.content is an array of text blocks.
+        let content = json!([
+            {"type": "tool_result", "content": [
+                {"type": "text", "text": "inside-text"},
+                {"type": "image"},  // non-text block — skipped
+                {"type": "text", "text": "second-text"},
+            ]}
+        ]);
+        let text = extract_text(&content, true);
+        assert!(text.contains("inside-text"));
+        assert!(text.contains("second-text"));
+    }
+
+    #[test]
+    fn extract_text_tool_result_text_array_missing_text_field() {
+        // Cover the inner text-extract that finds text:None.
+        let content = json!([
+            {"type": "tool_result", "content": [
+                {"type": "text"},  // no "text" key → silent skip
+            ]}
+        ]);
+        assert_eq!(extract_text(&content, true), "");
+    }
+
+    #[test]
+    fn extract_text_tool_result_string_content() {
+        let content = json!([
+            {"type": "tool_result", "content": "bare-string-result"}
+        ]);
+        assert_eq!(extract_text(&content, true), "bare-string-result");
+    }
+
+    #[test]
+    fn is_only_tool_blocks_empty_array_is_false() {
+        // Covers line 68: empty array branch.
+        let empty = json!([]);
+        assert!(!is_only_tool_blocks(&empty));
+    }
+
+    #[test]
+    fn is_only_tool_blocks_non_array_is_false() {
+        assert!(!is_only_tool_blocks(&json!("bare")));
+        assert!(!is_only_tool_blocks(&json!(null)));
+    }
+
+    #[test]
+    fn is_only_tool_blocks_true_for_pure_tool() {
+        let content = json!([{"type": "tool_use", "input": {}}, {"type": "tool_result"}]);
+        assert!(is_only_tool_blocks(&content));
+    }
+
+    #[test]
+    fn is_only_tool_blocks_false_when_text_present() {
+        let content = json!([{"type": "tool_use"}, {"type": "text", "text": "x"}]);
+        assert!(!is_only_tool_blocks(&content));
+    }
+
+    #[test]
+    fn user_content_is_tool_result_none_or_non_array_false() {
+        assert!(!user_content_is_tool_result(None));
+        let bare = json!("just text");
+        assert!(!user_content_is_tool_result(Some(&bare)));
+    }
+
+    #[test]
+    fn user_content_is_tool_result_detects_tool_result_block() {
+        let c = json!([{"type": "tool_result"}]);
+        assert!(user_content_is_tool_result(Some(&c)));
+        let c2 = json!([{"type": "text", "text": "hi"}]);
+        assert!(!user_content_is_tool_result(Some(&c2)));
+    }
+}
