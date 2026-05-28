@@ -12,6 +12,7 @@ zig/.zig-cache/
 cpp/build-cov/
 go/walker-cov
 go/covdata/
+go/covdata-unit/
 go/go-cov.txt
 # Instrumented binaries write *.profraw to CWD when run without LLVM_PROFILE_FILE
 *.profraw
