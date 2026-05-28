@@ -222,6 +222,14 @@ pub(crate) fn current_unix() -> f64 {
         .unwrap_or(0.0)
 }
 
+enum Subcommand {
+    Cost,
+    BeaconsLatest,
+    BeaconsHistory,
+    Search,
+    Events,
+}
+
 fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if wants_help(&raw) {
@@ -229,29 +237,28 @@ fn main() {
         std::process::exit(0);
     }
     let first = raw.first().map(|s| s.as_str());
-    let (subcommand, rest): (&str, &[String]) = match first {
-        Some("cost") => ("cost", &raw[1..]),
-        Some("beacons-latest") => ("beacons-latest", &raw[1..]),
-        Some("beacons-history") => ("beacons-history", &raw[1..]),
-        Some("search") => ("search", &raw[1..]),
-        Some("events") => ("events", &raw[1..]),
+    let (subcommand, rest): (Subcommand, &[String]) = match first {
+        Some("cost") => (Subcommand::Cost, &raw[1..]),
+        Some("beacons-latest") => (Subcommand::BeaconsLatest, &raw[1..]),
+        Some("beacons-history") => (Subcommand::BeaconsHistory, &raw[1..]),
+        Some("search") => (Subcommand::Search, &raw[1..]),
+        Some("events") => (Subcommand::Events, &raw[1..]),
         // Bare flag invocation = cost mode (back-compat).
-        Some(s) if s.starts_with('-') => ("cost", &raw[..]),
+        Some(s) if s.starts_with('-') => (Subcommand::Cost, &raw[..]),
         Some(s) => {
             eprintln!("walker: unknown subcommand: {}", s);
             usage_pointer();
             std::process::exit(2);
         }
-        None => ("cost", &raw[..]),
+        None => (Subcommand::Cost, &raw[..]),
     };
 
     match subcommand {
-        "cost" => run_cost(rest),
-        "beacons-latest" => beacons::run_latest(rest),
-        "beacons-history" => beacons::run_history(rest),
-        "search" => search::run(rest),
-        "events" => std::process::exit(events::run(rest)),
-        _ => unreachable!(),
+        Subcommand::Cost => run_cost(rest),
+        Subcommand::BeaconsLatest => beacons::run_latest(rest),
+        Subcommand::BeaconsHistory => beacons::run_history(rest),
+        Subcommand::Search => search::run(rest),
+        Subcommand::Events => std::process::exit(events::run(rest)),
     }
 }
 
