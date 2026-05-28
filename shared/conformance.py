@@ -620,6 +620,149 @@ def check_events(lang: str, binary: Path) -> bool:
     return all_ok
 
 
+def check_empty_root(lang: str, binary: Path, expected: dict) -> bool:
+    """A17: every mode pointed at a nonexistent --projects-root must exit 0
+    with empty/zero output (no crash, no stderr noise that consumers
+    misinterpret as a fault). Covers cost / events / beacons-latest /
+    beacons-history / search.
+
+    The harness already exercises the *existing-but-empty* root case (the
+    `04-empty` cost fixture), but never the *nonexistent* path. The
+    discovery layer must skip a non-existent root silently per SPEC.md
+    §Roots: "Non-existent extras are skipped silently with a stderr
+    diagnostic. ... walker must keep going."
+    """
+    meta = expected["_meta"]
+    all_ok = True
+
+    with tempfile.TemporaryDirectory(prefix="walker-empty-root-") as tmp:
+        # A path that DOES NOT EXIST under tmp.
+        missing = Path(tmp) / "does-not-exist"
+        common_args = [
+            "--projects-root", str(missing),
+            "--no-config",
+            "--now", repr(meta["now_unix"]),
+        ]
+
+        # 1. cost mode (bare flags) — JSON with zero totals, exit 0.
+        cmd = [str(binary),
+               "--period", str(meta["period_seconds"]),
+               "--win-start", repr(meta["win_start_unix"]),
+               *common_args]
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                encoding="utf-8", timeout=10)
+        cost_ok = result.returncode == 0
+        if cost_ok:
+            try:
+                line = result.stdout.strip().splitlines()[-1]
+                payload = json.loads(line)
+                cost_ok = (
+                    abs(payload.get("trailing_usd", 1) - 0.0) < TOLERANCE
+                    and abs(payload.get("window_usd", 1) - 0.0) < TOLERANCE
+                )
+            except Exception:
+                cost_ok = False
+        print(f"  [{lang:>4s}] {'empty-root: cost':38s} "
+              f"{' OK ' if cost_ok else 'FAIL'}")
+        if not cost_ok:
+            print(f"        exit={result.returncode} stdout={result.stdout!r}")
+            all_ok = False
+
+        # 2. events — exit 0, no NDJSON records (empty stdout).
+        cmd = [str(binary), "events",
+               "--period", str(meta["period_seconds"]),
+               "--win-start", repr(meta["win_start_unix"]),
+               *common_args]
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                encoding="utf-8", timeout=10)
+        # events allows empty stdout per SPEC §events ("Exit 0 even when
+        # the output stream is empty.").
+        events_ok = result.returncode == 0 and all(
+            not line.strip() for line in result.stdout.splitlines()
+        )
+        print(f"  [{lang:>4s}] {'empty-root: events':38s} "
+              f"{' OK ' if events_ok else 'FAIL'}")
+        if not events_ok:
+            print(f"        exit={result.returncode} stdout={result.stdout!r}")
+            all_ok = False
+
+        # 3. beacons-latest — exit 0, beacon = null.
+        cmd = [str(binary), "beacons-latest",
+               "--session-id", "no-such-session",
+               *common_args]
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                encoding="utf-8", timeout=10)
+        bl_ok = result.returncode == 0
+        if bl_ok:
+            try:
+                line = result.stdout.strip().splitlines()[-1]
+                payload = json.loads(line)
+                bl_ok = payload.get("beacon") is None
+            except Exception:
+                bl_ok = False
+        print(f"  [{lang:>4s}] {'empty-root: beacons-latest':38s} "
+              f"{' OK ' if bl_ok else 'FAIL'}")
+        if not bl_ok:
+            print(f"        exit={result.returncode} stdout={result.stdout!r}")
+            all_ok = False
+
+        # 4. beacons-history — exit 0, n_pairs = 0, bias_factor = null.
+        cmd = [str(binary), "beacons-history",
+               "--period", str(meta["period_seconds"]),
+               "--win-start", repr(meta["win_start_unix"]),
+               *common_args]
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                encoding="utf-8", timeout=10)
+        bh_ok = result.returncode == 0
+        if bh_ok:
+            try:
+                line = result.stdout.strip().splitlines()[-1]
+                payload = json.loads(line)
+                bh_ok = (
+                    payload.get("n_pairs") == 0
+                    and payload.get("bias_factor") is None
+                )
+            except Exception:
+                bh_ok = False
+        print(f"  [{lang:>4s}] {'empty-root: beacons-history':38s} "
+              f"{' OK ' if bh_ok else 'FAIL'}")
+        if not bh_ok:
+            print(f"        exit={result.returncode} stdout={result.stdout!r}")
+            all_ok = False
+
+        # 5. search — exit 0, zero hits in jsonl output.
+        if lang in IMPLS_WITH_SEARCH:
+            cmd = [str(binary), "search", "pattern",
+                   "--format", "jsonl",
+                   *common_args]
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    encoding="utf-8", timeout=10)
+            search_ok = result.returncode == 0
+            hits_count = 0
+            summary_ok = False
+            if search_ok:
+                try:
+                    for line in result.stdout.splitlines():
+                        if not line.strip():
+                            continue
+                        obj = json.loads(line)
+                        kind = obj.get("type")
+                        if kind == "hit":
+                            hits_count += 1
+                        elif kind == "summary":
+                            summary_ok = obj.get("hits", -1) == 0
+                except Exception:
+                    search_ok = False
+            search_ok = search_ok and hits_count == 0 and summary_ok
+            print(f"  [{lang:>4s}] {'empty-root: search':38s} "
+                  f"{' OK ' if search_ok else 'FAIL'}")
+            if not search_ok:
+                print(f"        exit={result.returncode} stdout={result.stdout!r}")
+                all_ok = False
+
+    return all_ok
+
+
 def check_help(lang: str, binary: Path) -> bool:
     """Parity guard for the friendly help / default output.
 
@@ -803,6 +946,8 @@ def main():
         if not check_events(lang, binary):
             overall_ok = False
         if not check_help(lang, binary):
+            overall_ok = False
+        if not check_empty_root(lang, binary, expected):
             overall_ok = False
         print()
 
