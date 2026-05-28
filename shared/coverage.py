@@ -141,6 +141,73 @@ def _llvm_lines_from_export(export_json: str) -> tuple[int, int, list[tuple[str,
     return totals["covered"], totals["count"], files
 
 
+def _rust_test_module_starts() -> dict[str, int]:
+    """Map of source file path -> first line of its `#[cfg(test)] mod tests {`
+    block, or sys.maxsize when the file has no inline tests. Used to exclude
+    test-module lines from the Rust coverage denominator, since cargo test's
+    instrumentation otherwise counts test fns alongside production code.
+    """
+    starts: dict[str, int] = {}
+    for src in (RUST_DIR / "src").rglob("*.rs"):
+        first = sys.maxsize
+        with src.open("r", encoding="utf-8") as fh:
+            for lineno, line in enumerate(fh, start=1):
+                stripped = line.strip()
+                if stripped.startswith("#[cfg(test)]"):
+                    first = lineno
+                    break
+        starts[str(src)] = first
+    return starts
+
+
+def _llvm_lines_excluding_tests(export_json: str, test_starts: dict[str, int]) -> tuple[int, int, list[tuple[str, int, int]]]:
+    """Like _llvm_lines_from_export, but excludes line ranges at or beyond
+    each file's #[cfg(test)] marker. Walks the full per-function/region detail
+    rather than the file summary, so test-module instrumentation is removed
+    from both numerator and denominator.
+    """
+    data = json.loads(export_json)
+    block = data["data"][0]
+    # Per file, build {line_no -> covered_bool}. A line is covered if any region
+    # touching it has count > 0. We iterate functions (which contain regions).
+    per_file_lines: dict[str, dict[int, bool]] = {}
+    for fun in block.get("functions", []):
+        filenames = fun.get("filenames", [])
+        if not filenames:
+            continue
+        filename = filenames[0]
+        lines = per_file_lines.setdefault(filename, {})
+        for region in fun.get("regions", []):
+            # llvm-cov region tuple: [LineStart, ColStart, LineEnd, ColEnd,
+            # ExecutionCount, FileID, ExpandedFileID, Kind]
+            if len(region) < 5:
+                continue
+            line_start, _, line_end, _, count = region[0], region[1], region[2], region[3], region[4]
+            covered = count > 0
+            for ln in range(line_start, line_end + 1):
+                # OR semantics — if any region covers a line, mark covered.
+                lines[ln] = lines.get(ln, False) or covered
+    total = 0
+    covered_count = 0
+    files: list[tuple[str, int, int]] = []
+    for filename, lines in per_file_lines.items():
+        cutoff = test_starts.get(filename, sys.maxsize)
+        file_total = 0
+        file_covered = 0
+        for ln, c in lines.items():
+            if ln >= cutoff:
+                continue
+            file_total += 1
+            if c:
+                file_covered += 1
+        if file_total > 0:
+            total += file_total
+            covered_count += file_covered
+            files.append((Path(filename).name, file_covered, file_total))
+    files.sort()
+    return covered_count, total, files
+
+
 # --------------------------------------------------------------------------- #
 # Rust — cargo-llvm-cov external-test workflow
 # --------------------------------------------------------------------------- #
@@ -168,16 +235,25 @@ def cov_rust() -> Result | None:
         return None
     if run([_CARGO, "llvm-cov", "--version"], check=False).returncode != 0:
         return Result("rust", "lines", 0, 0, note="cargo-llvm-cov not installed (cargo install cargo-llvm-cov)")
-    print("[coverage] rust: build instrumented + run conformance …")
+    print("[coverage] rust: build instrumented + run conformance + cargo test …")
     env = _rust_env()
     run([_CARGO, "llvm-cov", "clean", "--workspace"], cwd=RUST_DIR, env=env)
     run([_CARGO, "build", "--release"], cwd=RUST_DIR, env=env)
     ok, passed, failed = run_conformance("rust", env)
+    # Also exercise #[cfg(test)] modules. `cargo test --release` produces
+    # profraw files under the same LLVM_PROFILE_FILE pattern as the build,
+    # so the unit-test runs merge into the same coverage report.
+    run([_CARGO, "test", "--release", "--no-fail-fast"], cwd=RUST_DIR, env=env, check=False)
+    # Use the full export (with function/region detail) so we can filter out
+    # inline #[cfg(test)] mod tests blocks from the denominator. Otherwise the
+    # cargo-test binary's instrumentation inflates both covered and total with
+    # test-only code, distorting the metric.
     export_json = run(
-        [_CARGO, "llvm-cov", "report", "--release", "--json", "--summary-only"],
+        [_CARGO, "llvm-cov", "report", "--release", "--json"],
         cwd=RUST_DIR, env=env,
     ).stdout
-    covered, total, files = _llvm_lines_from_export(export_json)
+    test_starts = _rust_test_module_starts()
+    covered, total, files = _llvm_lines_excluding_tests(export_json, test_starts)
     return Result("rust", "lines", covered, total, files, ok, passed, failed)
 
 
@@ -227,7 +303,7 @@ def cov_cpp() -> Result | None:
 def cov_go() -> Result | None:
     if not _have("go") or not (GO_DIR / "go.mod").exists():
         return None
-    print("[coverage] go: build -cover + run conformance …")
+    print("[coverage] go: build -cover + run conformance + go test -cover …")
     binary = GO_DIR / "walker-cov"
     run(["go", "build", "-cover", "-o", str(binary), "."], cwd=GO_DIR)
     covdir = GO_DIR / "covdata"
@@ -236,8 +312,21 @@ def cov_go() -> Result | None:
     covdir.mkdir()
     env = dict(os.environ, GOCOVERDIR=str(covdir), WALKER_BIN_GO=str(binary))
     ok, passed, failed = run_conformance("go", env)
+    # Also run native unit tests, writing their coverage into a sibling dir
+    # in covdata (binary) format so we can merge with the integration data.
+    unitdir = GO_DIR / "covdata-unit"
+    if unitdir.exists():
+        shutil.rmtree(unitdir)
+    unitdir.mkdir()
+    run(
+        ["go", "test", "-count=1", "-cover", "./...",
+         "-args", f"-test.gocoverdir={unitdir}"],
+        cwd=GO_DIR, env=env, check=False,
+    )
+    # Merge integration + unit coverage by passing both dirs to textfmt.
     txt = GO_DIR / "go-cov.txt"
-    run(["go", "tool", "covdata", "textfmt", f"-i={covdir}", f"-o={txt}"], cwd=GO_DIR)
+    merged_input = f"{covdir},{unitdir}" if any(unitdir.iterdir()) else str(covdir)
+    run(["go", "tool", "covdata", "textfmt", f"-i={merged_input}", f"-o={txt}"], cwd=GO_DIR)
     covered, total, per_file = _go_counts(txt)
     files = sorted((Path(f).name, c, t) for f, (c, t) in per_file.items())
     return Result("go", "statements", covered, total, files, ok, passed, failed)

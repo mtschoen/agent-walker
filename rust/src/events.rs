@@ -280,3 +280,136 @@ pub(crate) fn run(raw: &[String]) -> i32 {
 
     0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn tempdir_path(suffix: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        p.push(format!("rust-events-test-{suffix}-{pid}-{nanos}"));
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn s(x: &str) -> String { x.to_string() }
+
+    #[test]
+    fn parse_events_args_requires_period() {
+        // Missing --period entirely.
+        assert!(parse_events_args(&[]).is_err());
+        // --period 0 is the unset sentinel → error.
+        assert!(parse_events_args(&[s("--period"), s("0")]).is_err());
+    }
+
+    #[test]
+    fn parse_events_args_period_needs_value() {
+        assert!(parse_events_args(&[s("--period")]).is_err());
+    }
+
+    #[test]
+    fn parse_events_args_period_non_numeric() {
+        assert!(parse_events_args(&[s("--period"), s("notnum")]).is_err());
+    }
+
+    #[test]
+    fn parse_events_args_flag_value_errors() {
+        for flag in ["--win-start", "--now", "--projects-root", "--extra-projects-root"] {
+            assert!(
+                parse_events_args(&[s("--period"), s("60"), s(flag)]).is_err(),
+                "{} should error with no value", flag
+            );
+        }
+    }
+
+    #[test]
+    fn parse_events_args_unknown_flag_errors() {
+        assert!(parse_events_args(&[s("--period"), s("60"), s("--what")]).is_err());
+    }
+
+    #[test]
+    fn parse_events_args_win_start_default_now_minus_period() {
+        // Omit --win-start → defaults to now - period.
+        let r = parse_events_args(&[
+            s("--period"), s("100"), s("--now"), s("1000.0"),
+        ]).unwrap();
+        assert_eq!(r.period_seconds, 100);
+        assert_eq!(r.now_unix, 1000.0);
+        assert_eq!(r.win_start_unix, 900.0);
+    }
+
+    #[test]
+    fn parse_events_args_no_config_disables_config() {
+        let r = parse_events_args(&[
+            s("--period"), s("60"), s("--now"), s("0"), s("--no-config"),
+        ]).unwrap();
+        assert!(!r.read_config);
+    }
+
+    #[test]
+    fn parse_events_args_accepts_extras() {
+        let r = parse_events_args(&[
+            s("--period"), s("60"), s("--now"), s("0"),
+            s("--projects-root"), s("/tmp/p"),
+            s("--extra-projects-root"), s("/tmp/q"),
+            s("--win-start"), s("50.0"),
+        ]).unwrap();
+        assert_eq!(r.projects_root, PathBuf::from("/tmp/p"));
+        assert_eq!(r.extra_projects_roots, vec![PathBuf::from("/tmp/q")]);
+        assert_eq!(r.win_start_unix, 50.0);
+    }
+
+    #[test]
+    fn walk_group_events_missing_file_yields_no_records() {
+        let recs = walk_group_events(
+            &[PathBuf::from("/no/such/file.jsonl")],
+            "slug", "sid", 0.0,
+        );
+        assert!(recs.is_empty());
+    }
+
+    #[test]
+    fn walk_group_events_filters_and_collects() {
+        let dir = tempdir_path("walk");
+        let path = dir.join("session.jsonl");
+        let body = concat!(
+            // blank
+            "\n",
+            // malformed
+            "{bogus\n",
+            // no message
+            "{}\n",
+            // not assistant — filtered
+            r#"{"timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"hi"}}"#,
+            "\n",
+            // valid assistant turn
+            r#"{"timestamp":"2025-01-01T00:00:01Z","message":{"role":"assistant","id":"m1","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#,
+            "\n",
+            // duplicate id — dedup'd out
+            r#"{"timestamp":"2025-01-01T00:00:02Z","message":{"role":"assistant","id":"m1","model":"claude-3-5-sonnet","usage":{"input_tokens":1}}}"#,
+            "\n",
+            // missing timestamp — skipped
+            r#"{"message":{"role":"assistant","id":"m2","model":"sonnet"}}"#,
+            "\n",
+            // unparseable timestamp — skipped
+            r#"{"timestamp":"garbage","message":{"role":"assistant","id":"m3","model":"sonnet"}}"#,
+            "\n",
+            // before cutoff — skipped
+            r#"{"timestamp":"1970-01-01T00:00:00Z","message":{"role":"assistant","id":"m4","model":"sonnet"}}"#,
+            "\n",
+        );
+        fs::write(&path, body).unwrap();
+        let recs = walk_group_events(&[path], "slug-x", "sid-y", 100.0);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].slug, "slug-x");
+        assert_eq!(recs[0].session_id, "sid-y");
+        assert!(recs[0].usd > 0.0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

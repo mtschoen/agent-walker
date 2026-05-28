@@ -576,3 +576,238 @@ pub fn run_history(args: &[String]) {
     });
     println!("{}", out);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn tempdir_path(suffix: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        p.push(format!("rust-beacons-test-{suffix}-{pid}-{nanos}"));
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn s(x: &str) -> String { x.to_string() }
+
+    #[test]
+    fn bias_factor_empty_pairs_returns_none() {
+        assert!(bias_factor(&[]).is_none());
+    }
+
+    #[test]
+    fn bias_factor_all_nonpositive_eta_returns_none() {
+        // All etas ≤ 0 → ratios is empty → returns None.
+        let pairs = vec![(0.0, 5.0), (-1.0, 3.0)];
+        assert!(bias_factor(&pairs).is_none());
+    }
+
+    #[test]
+    fn bias_factor_odd_count_returns_middle() {
+        let pairs = vec![(10.0, 5.0), (10.0, 10.0), (10.0, 20.0)];
+        // ratios = [0.5, 1.0, 2.0] sorted → middle = 1.0
+        assert_eq!(bias_factor(&pairs), Some(1.0));
+    }
+
+    #[test]
+    fn bias_factor_even_count_averages_middle_two() {
+        let pairs = vec![(10.0, 5.0), (10.0, 10.0), (10.0, 20.0), (10.0, 40.0)];
+        // ratios sorted = [0.5, 1.0, 2.0, 4.0] → (1.0 + 2.0)/2 = 1.5
+        assert_eq!(bias_factor(&pairs), Some(1.5));
+    }
+
+    #[test]
+    fn compute_idle_in_window_too_few_events() {
+        // <2 events → 0 idle.
+        assert_eq!(compute_idle_in_window(&[], 0.0, 100.0), 0.0);
+        assert_eq!(compute_idle_in_window(&[(10.0, true)], 0.0, 100.0), 0.0);
+    }
+
+    #[test]
+    fn compute_idle_in_window_skips_non_user_gaps() {
+        // Only gaps preceding a user-flagged event count.
+        let events = vec![(10.0, false), (20.0, false), (30.0, false)];
+        assert_eq!(compute_idle_in_window(&events, 0.0, 100.0), 0.0);
+    }
+
+    #[test]
+    fn compute_idle_in_window_clips_to_window() {
+        // Gap from 10..50 (40 seconds), clipped to window [20..40] = 20 seconds.
+        let events = vec![(10.0, false), (50.0, true)];
+        let idle = compute_idle_in_window(&events, 20.0, 40.0);
+        assert!((idle - 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn compute_idle_in_window_zero_when_outside_window() {
+        // gap_hi <= gap_lo → idle stays zero.
+        let events = vec![(10.0, false), (50.0, true)];
+        let idle = compute_idle_in_window(&events, 100.0, 200.0);
+        assert_eq!(idle, 0.0);
+    }
+
+    #[test]
+    fn parse_latest_args_missing_session_id() {
+        assert!(parse_latest_args(&[]).is_err());
+    }
+
+    #[test]
+    fn parse_latest_args_unknown_flag() {
+        assert!(parse_latest_args(&[s("--bogus")]).is_err());
+    }
+
+    #[test]
+    fn parse_latest_args_extra_root_needs_value() {
+        // Flag with no following value → error path.
+        let r = parse_latest_args(&[s("--session-id"), s("x"), s("--extra-projects-root")]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn parse_latest_args_now_needs_numeric_value() {
+        let r = parse_latest_args(&[s("--session-id"), s("x"), s("--now"), s("notanumber")]);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn parse_latest_args_accepts_all_flags() {
+        let r = parse_latest_args(&[
+            s("--session-id"), s("abc"),
+            s("--projects-root"), s("/tmp/p"),
+            s("--extra-projects-root"), s("/tmp/q"),
+            s("--no-config"),
+            s("--now"), s("1.5"),
+        ]).unwrap();
+        assert_eq!(r.session_id, "abc");
+        assert_eq!(r.projects_root, Some(PathBuf::from("/tmp/p")));
+        assert_eq!(r.extra_projects_roots, vec![PathBuf::from("/tmp/q")]);
+        assert!(!r.read_config);
+        assert_eq!(r.now_unix, Some(1.5));
+    }
+
+    #[test]
+    fn parse_history_args_missing_period_errors() {
+        assert!(parse_history_args(&[]).is_err());
+    }
+
+    #[test]
+    fn parse_history_args_period_needs_value_and_parses() {
+        assert!(parse_history_args(&[s("--period")]).is_err());
+        assert!(parse_history_args(&[s("--period"), s("nope")]).is_err());
+        let r = parse_history_args(&[s("--period"), s("60")]).unwrap();
+        assert_eq!(r.period_seconds, 60);
+    }
+
+    #[test]
+    fn parse_history_args_all_flag_value_errors() {
+        for flag in ["--win-start", "--projects-root", "--extra-projects-root", "--now"] {
+            assert!(
+                parse_history_args(&[s("--period"), s("60"), s(flag)]).is_err(),
+                "{} should error when value missing", flag
+            );
+        }
+        assert!(parse_history_args(&[s("--period"), s("60"), s("--bogus")]).is_err());
+    }
+
+    #[test]
+    fn parse_history_args_accepts_all_flags() {
+        let r = parse_history_args(&[
+            s("--period"), s("3600"),
+            s("--win-start"), s("0"),
+            s("--projects-root"), s("/tmp/p"),
+            s("--extra-projects-root"), s("/tmp/q"),
+            s("--no-config"),
+            s("--now"), s("100.0"),
+        ]).unwrap();
+        assert_eq!(r.period_seconds, 3600);
+        assert_eq!(r.win_start_unix, 0.0);
+        assert_eq!(r.now_unix, Some(100.0));
+        assert!(!r.read_config);
+    }
+
+    #[test]
+    fn find_latest_in_path_returns_none_on_missing_file() {
+        let re = beacon_re();
+        let missing = PathBuf::from("/nonexistent/x.jsonl");
+        assert!(find_latest_in_path(&missing, &re).is_none());
+    }
+
+    #[test]
+    fn find_latest_in_path_picks_highest_ts_beacon() {
+        let dir = tempdir_path("latest");
+        let path = dir.join("session.jsonl");
+        let line_a = r#"{"timestamp":"2025-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"<progress-beacon>{\"kind\":\"report\",\"eta_seconds\":1,\"summary\":\"a\"}</progress-beacon>"}]}}"#.to_string();
+        let line_b = r#"{"timestamp":"2025-01-02T00:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"<progress-beacon>{\"kind\":\"report\",\"eta_seconds\":2,\"summary\":\"b\"}</progress-beacon>"}]}}"#.to_string();
+        // Also include a non-assistant + a blank + a malformed JSON to exercise skip ladder.
+        let lines = format!(
+            "\n   \n{{junk\n{{\"message\":{{\"role\":\"user\"}}}}\n{line_a}\n{line_b}\n"
+        );
+        fs::write(&path, lines).unwrap();
+        let re = beacon_re();
+        let (b, ts) = find_latest_in_path(&path, &re).unwrap();
+        assert_eq!(b.summary, "b");
+        assert!(ts > 0.0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collect_session_events_open_error_returns_empty() {
+        let re = beacon_re();
+        let se = collect_session_events_in_path(&PathBuf::from("/no/such.jsonl"), &re);
+        assert!(se.beacons.is_empty() && se.events.is_empty());
+    }
+
+    #[test]
+    fn collect_session_events_separates_user_and_assistant() {
+        let dir = tempdir_path("collect");
+        let path = dir.join("session.jsonl");
+        let body = concat!(
+            // real user prompt
+            r#"{"type":"user","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+            "\n",
+            // tool_result user — should NOT count as a real user prompt
+            r#"{"type":"user","timestamp":"2025-01-01T00:00:01Z","message":{"role":"user","content":[{"type":"tool_result"}]}}"#,
+            "\n",
+            // assistant with embedded beacon
+            r#"{"timestamp":"2025-01-01T00:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"<progress-beacon>{\"kind\":\"begin\",\"eta_seconds\":10,\"summary\":\"x\"}</progress-beacon>"}]}}"#,
+            "\n",
+        );
+        fs::write(&path, body).unwrap();
+        let re = beacon_re();
+        let se = collect_session_events_in_path(&path, &re);
+        assert_eq!(se.beacons.len(), 1);
+        // Three events: real user (true), tool_result user (false), assistant (false).
+        assert_eq!(se.events.len(), 3);
+        // Sorted ascending by timestamp.
+        assert!(se.events[0].0 <= se.events[1].0);
+        assert!(se.events[1].0 <= se.events[2].0);
+        // The real-user flag is set on the first event.
+        assert!(se.events[0].1, "first event should be real user prompt");
+        // Tool-result user must NOT be flagged as real user.
+        assert!(!se.events[1].1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_history_groups_parents_and_subagents() {
+        let root = tempdir_path("hist-disc");
+        let slug = root.join("slug");
+        fs::create_dir_all(&slug).unwrap();
+        fs::write(slug.join("sid-1.jsonl"), b"").unwrap();
+        let subagents = slug.join("sid-2").join("subagents");
+        fs::create_dir_all(&subagents).unwrap();
+        fs::write(subagents.join("agent-x.jsonl"), b"").unwrap();
+        let groups = discover_history_groups(std::slice::from_ref(&root));
+        let k1 = ("slug".to_string(), "sid-1".to_string());
+        let k2 = ("slug".to_string(), "sid-2".to_string());
+        assert!(groups.contains_key(&k1));
+        assert!(groups.contains_key(&k2));
+        let _ = fs::remove_dir_all(&root);
+    }
+}
