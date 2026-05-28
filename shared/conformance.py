@@ -682,11 +682,15 @@ def check_help(lang: str, binary: Path) -> bool:
 
 
 def run_walker_env(
-    lang: str, binary: Path, meta: dict, env: dict, projects_root: Path | None = None
-) -> dict:
+    lang: str, binary: Path, meta: dict, env: dict, projects_root: Path | None = None,
+    return_stderr: bool = False,
+) -> dict | tuple[dict, str]:
     """Run cost mode WITHOUT --no-config (so walker-roots.json is read) under a
     custom environment (to control home-dir resolution). With projects_root
-    omitted, the binary falls back to its default <home>/.claude/projects."""
+    omitted, the binary falls back to its default <home>/.claude/projects.
+
+    Returns the parsed JSON dict. With return_stderr=True returns
+    (dict, stderr_text) so callers can assert on diagnostic emission."""
     cmd = [
         str(binary),
         "--period", str(meta["period_seconds"]),
@@ -703,7 +707,10 @@ def run_walker_env(
             f"{binary.name} exited {result.returncode}\nstderr:\n{result.stderr}"
         )
     line = result.stdout.strip().splitlines()[-1]
-    return json.loads(line)
+    parsed = json.loads(line)
+    if return_stderr:
+        return parsed, result.stderr
+    return parsed
 
 
 def check_config_resolution(lang: str, binary: Path, expected: dict) -> bool:
@@ -768,6 +775,98 @@ def check_config_resolution(lang: str, binary: Path, expected: dict) -> bool:
     return ok
 
 
+# Malformed walker-roots.json variants. Each tuple is
+#   (label, body, expect_diagnostic)
+# where `body` is the file contents and `expect_diagnostic` is True when the
+# binary MUST emit a stderr diagnostic (parse error or wrong-shape root).
+# Variants that produce silent no-extras (missing key, empty array, valid
+# unrelated-key object) have expect_diagnostic=False.
+#
+# Per SPEC.md::Roots, every variant must:
+#   1. NOT crash (the binary keeps going with no extras),
+#   2. yield totals matching the default-root-only scan (i.e. no extras pulled
+#      in from the malformed file).
+# The "nonexistent-extra" variant has a syntactically valid file but its one
+# extra path does not exist; SPEC says the binary emits a stderr "extra root
+# not a directory, skipping" line and continues.
+MALFORMED_CONFIG_VARIANTS: list[tuple[str, str, bool]] = [
+    ("empty",              "",                                     False),
+    ("malformed-json",     "{not valid json",                      True),
+    ("non-object-array",   "[]",                                   True),
+    ("non-object-scalar",  '"hello"',                              True),
+    ("missing-key",        "{}",                                   False),
+    ("unrelated-key",      '{"unrelated": []}',                    False),
+    ("empty-extra-array",  '{"extra_roots": []}',                  False),
+    ("nonexistent-extra",  '{"extra_roots": ["/does/not/exist"]}', True),
+]
+
+
+def check_config_malformed(lang: str, binary: Path, expected: dict) -> bool:
+    """Exercise every malformed walker-roots.json variant.
+
+    For each variant: lay out a fake home with one populated fixture under
+    ~/.claude/projects/<fixture>/, drop the malformed body at
+    ~/.claude/walker-roots.json, run cost mode WITHOUT --no-config under
+    controlled HOME, and assert:
+      (a) exit 0 (graceful, no crash);
+      (b) totals match the single-fixture target (NO extras pulled in);
+      (c) for variants where SPEC requires a diagnostic, stderr is non-empty.
+
+    Picks the priciest fixture so a 0-cost masquerade can't pass."""
+    meta = expected["_meta"]
+    names = list(expected["fixtures"].keys())
+    if not names:
+        print(f"  [{lang:>4s}] {'config-malformed':20s} SKIP  no fixtures")
+        return True
+    fixture = max(names, key=lambda n: expected["fixtures"][n]["trailing_usd"])
+    target = {
+        "trailing_usd": expected["fixtures"][fixture]["trailing_usd"],
+        "window_usd": expected["fixtures"][fixture]["window_usd"],
+    }
+    overall = True
+    for variant_label, body, expect_diagnostic in MALFORMED_CONFIG_VARIANTS:
+        label = f"config-malformed:{variant_label}"
+        with tempfile.TemporaryDirectory(prefix="walker-cfg-mal-home-") as home, \
+             tempfile.TemporaryDirectory(prefix="walker-cfg-mal-bogus-") as bogus:
+            home_p = Path(home)
+            shutil.copytree(CORPUS / fixture, home_p / ".claude" / "projects" / fixture)
+            (home_p / ".claude" / "walker-roots.json").write_text(body, encoding="utf-8")
+            env = dict(os.environ)
+            if sys.platform == "win32":
+                env["USERPROFILE"], env["HOME"] = str(home_p), str(bogus)
+            else:
+                env["HOME"], env["USERPROFILE"] = str(home_p), str(bogus)
+            try:
+                got, stderr_text = run_walker_env(
+                    lang, binary, meta, env, return_stderr=True
+                )
+            except Exception as e:
+                print(f"  [{lang:>4s}] {label:38s} FAIL  {e}")
+                overall = False
+                continue
+        ok_totals, dt, dw = within_tolerance(got, target)
+        if expect_diagnostic:
+            ok_stderr = bool(stderr_text.strip())
+        else:
+            # Silent path: stderr SHOULD be empty (but a benign warning isn't a
+            # failure — only an exit-nonzero or wrong totals would be). Don't
+            # assert stderr is empty; just record it for the operator.
+            ok_stderr = True
+        ok = ok_totals and ok_stderr
+        badge = " OK " if ok else "FAIL"
+        diag_hint = ""
+        if expect_diagnostic and not ok_stderr:
+            diag_hint = "  (expected stderr diagnostic, got none)"
+        print(
+            f"  [{lang:>4s}] {label:38s} {badge}  "
+            f"trailing=${got.get('trailing_usd', 0):.6f} (d=${dt:+.6f})  "
+            f"window=${got.get('window_usd', 0):.6f} (d=${dw:+.6f}){diag_hint}"
+        )
+        if not ok:
+            overall = False
+    return overall
+
+
 def main():
     if not EXPECTED.is_file():
         print(f"missing {EXPECTED} -- run shared/generate_corpus.py first")
@@ -795,6 +894,8 @@ def main():
         if not check_multi_root(lang, binary):
             overall_ok = False
         if not check_config_resolution(lang, binary, expected):
+            overall_ok = False
+        if not check_config_malformed(lang, binary, expected):
             overall_ok = False
         if not check_search(lang, binary):
             overall_ok = False
