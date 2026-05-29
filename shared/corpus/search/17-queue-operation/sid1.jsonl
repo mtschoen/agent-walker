@@ -1,0 +1,8 @@
+{"type": "assistant", "timestamp": "2026-05-10T10:36:40.000Z", "message": {"id": "msg_17_a1", "role": "assistant", "model": "claude-opus-4-7", "content": [{"type": "text", "text": "assistant mentions needle in reply"}], "usage": {"input_tokens": 50, "output_tokens": 25, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-05-10T10:53:20.000Z", "content": "please also check the needle while you work"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-05-10T11:10:00.000Z", "content": "<task-notification>background needle task done</task-notification>"}
+{"type": "queue-operation", "operation": "remove", "timestamp": "2026-05-10T11:26:40.000Z"}
+{"type": "queue-operation", "operation": "dequeue", "timestamp": "2026-05-10T11:43:20.000Z"}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-05-10T11:45:00.000Z", "content": ""}
+{"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-05-10T11:46:40.000Z", "content": 42}
+{"type": "queue-operation", "operation": "popAll", "content": "queued needle with no timestamp"}

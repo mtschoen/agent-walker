@@ -98,6 +98,25 @@ func searchExtractText(content json.RawMessage, include_tool_blocks bool) string
 	return strings.Join(parts, "\n")
 }
 
+// searchExtractQueueOpText extracts text from a type:"queue-operation" entry.
+// Queue-ops have no message object — the text lives in the entry's root-level
+// `content` bare string. Returns ("", false) when missing or empty (e.g.
+// remove/dequeue ops), so only content-bearing enqueue/popAll surface under
+// --include-queue-ops. Mirrors content.rs::extract_queue_op_text.
+func searchExtractQueueOpText(content json.RawMessage) (string, bool) {
+	if len(content) == 0 {
+		return "", false
+	}
+	var s string
+	if err := sonic.Unmarshal(content, &s); err != nil {
+		return "", false
+	}
+	if s == "" {
+		return "", false
+	}
+	return s, true
+}
+
 // searchIsOnlyToolBlocks returns true when content is a JSON array of only tool_use/tool_result blocks.
 func searchIsOnlyToolBlocks(content json.RawMessage) bool {
 	if firstNonSpaceByte(content) != '[' {
@@ -134,7 +153,7 @@ type searchMsg struct {
 	IsOnlyToolBlocks bool
 }
 
-func searchScanFile(path string) []searchMsg {
+func searchScanFile(path string, includeQueueOps bool) []searchMsg {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil
@@ -154,6 +173,45 @@ func searchScanFile(path string) []searchMsg {
 		var root map[string]json.RawMessage
 		if err := sonic.Unmarshal([]byte(line), &root); err != nil {
 			continue
+		}
+		// Queue-operation entries have no message object: the text lives in a
+		// root-level `content` string. Only indexed when --include-queue-ops is
+		// set; content-bearing enqueue/popAll surface, empty remove/dequeue are
+		// dropped by searchExtractQueueOpText. They count as role:user. Mirrors search.rs.
+		if typeRaw, ok := root["type"]; ok {
+			var typeStr string
+			if json.Unmarshal(typeRaw, &typeStr); typeStr == "queue-operation" {
+				if !includeQueueOps {
+					continue
+				}
+				qtext, ok := searchExtractQueueOpText(root["content"])
+				if !ok {
+					continue
+				}
+				var qtsStr string
+				if raw, ok := root["timestamp"]; ok {
+					json.Unmarshal(raw, &qtsStr)
+				}
+				var qts float64
+				qhasTs := false
+				if qtsStr != "" {
+					if t, ok := parseISO8601(qtsStr); ok {
+						qts = t
+						qhasTs = true
+					}
+				}
+				out = append(out, searchMsg{
+					LineNumber:       uint32(idx),
+					Timestamp:        qts,
+					HasTimestamp:     qhasTs,
+					TimestampStr:     qtsStr,
+					Role:             "user",
+					TextDefault:      qtext,
+					TextWithTools:    qtext,
+					IsOnlyToolBlocks: false,
+				})
+				continue
+			}
 		}
 		msgRaw, ok := root["message"]
 		if !ok {
@@ -389,6 +447,7 @@ type searchArgs struct {
 	Limit               uint32
 	CountOnly           bool
 	IncludeToolBlocks   bool
+	IncludeQueueOps     bool
 	Format              string
 	SnippetChars        uint32
 	ProjectsRoot        string
@@ -469,6 +528,8 @@ func parseSearchArgs(raw []string) (searchArgs, error) {
 			args.CountOnly = true
 		case "--include-tool-blocks":
 			args.IncludeToolBlocks = true
+		case "--include-queue-ops":
+			args.IncludeQueueOps = true
 		case "--format":
 			if i+1 >= len(raw) {
 				return args, fmt.Errorf("--format needs a value")
@@ -589,7 +650,7 @@ func isSearchNumeric(s string) bool {
 // === File processing ===
 
 func searchProcessFile(f searchFileInfo, args searchArgs, re *regexp.Regexp) []searchHit {
-	msgs := searchScanFile(f.Path)
+	msgs := searchScanFile(f.Path, args.IncludeQueueOps)
 	var hits []searchHit
 
 	for idx, m := range msgs {

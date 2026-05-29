@@ -177,6 +177,27 @@ def assistant_text_no_timestamp(msg_id: str, text: str) -> dict:
     }
 
 
+def queue_operation(unix_ts, operation, content=None) -> dict:
+    """A `queue-operation` entry (input queued while the agent was busy).
+
+    No `message` object — the text lives in a root-level `content` field, and
+    the timestamp is root-level. `enqueue`/`popAll` carry content; `remove`/
+    `dequeue` carry none. With `--include-queue-ops`, content-bearing entries
+    index as `role: user`; without it, queue-ops are ignored entirely.
+
+    `unix_ts=None` omits the timestamp (exercises the empty-timestamp arm).
+    `content=None` omits the field entirely (the remove/dequeue shape); a
+    non-str `content` (e.g. an int) exercises go's non-string-content skip arm
+    (rust/cpp/zig fold that into the missing-field arm).
+    """
+    entry: dict = {"type": "queue-operation", "operation": operation}
+    if unix_ts is not None:
+        entry["timestamp"] = iso(unix_ts)
+    if content is not None:
+        entry["content"] = content
+    return entry
+
+
 def write_jsonl(path: Path, lines: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
@@ -1362,6 +1383,136 @@ def multi_root_scenario_01_two_roots():
     return scenario, "primary", ["extra"], files, combos
 
 
+def scenario_17_queue_operation():
+    """Queued-while-busy input via `type: queue-operation` entries.
+
+    Default search ignores queue-ops entirely (regression guard).
+    --include-queue-ops indexes the content-bearing enqueues as role:user,
+    reading the root-level `content` field; remove/dequeue carry no content and
+    are skipped naturally. No task-notification filtering: the <task-notification>
+    enqueue is included too. --role assistant excludes queue-ops even with the
+    flag on (they count as role:user).
+
+    Coverage-bearing edge entries — every queue-op skip/edge arm is exercised
+    so the new code carries no uncovered lines under the coverage gate:
+      * remove/dequeue        -> missing-`content` skip arm
+      * empty-string content  -> the `content == ""` skip arm
+      * non-string content    -> go's `Unmarshal err` skip arm (rust/cpp/zig
+                                 fold this into the missing-field arm)
+      * content but NO timestamp -> the empty-timestamp arm; surfaces as a hit
+                                 with timestamp "" that sorts last, per
+                                 scenario 13's no-ts precedent.
+    """
+    scenario = "17-queue-operation"
+    t1, t2, t3, t4, t5, t6, t7 = (
+        NOW_UNIX - 5000,
+        NOW_UNIX - 4000,
+        NOW_UNIX - 3000,
+        NOW_UNIX - 2000,
+        NOW_UNIX - 1000,
+        NOW_UNIX - 900,
+        NOW_UNIX - 800,
+    )
+    a1 = "assistant mentions needle in reply"
+    enqueue_plain = "please also check the needle while you work"
+    enqueue_notif = "<task-notification>background needle task done</task-notification>"
+    enqueue_no_ts = "queued needle with no timestamp"
+    files = {
+        "sid1.jsonl": [
+            assistant_text(t1, "msg_17_a1", a1),
+            queue_operation(t2, "enqueue", enqueue_plain),
+            queue_operation(t3, "enqueue", enqueue_notif),
+            queue_operation(t4, "remove"),                    # no content -> skip
+            queue_operation(t5, "dequeue"),                   # no content -> skip
+            queue_operation(t6, "enqueue", ""),               # empty content -> skip
+            queue_operation(t7, "enqueue", 42),               # non-string content -> skip
+            queue_operation(None, "popAll", enqueue_no_ts),   # no timestamp -> hit, ts ""
+        ],
+    }
+    oa1 = find_offset(a1, "needle")
+    op = find_offset(enqueue_plain, "needle")
+    on = find_offset(enqueue_notif, "needle")
+    ots = find_offset(enqueue_no_ts, "needle")
+
+    # --- default combo: queue-ops invisible, only the assistant message scans.
+    hit_a1_default = hit(
+        session_id="sid1", cwd_slug=scenario, line_number=1,
+        timestamp=iso(t1), role="assistant", snippet=a1,
+        match_offsets=[[oa1[0], oa1[1]]],
+        context_before=[],
+        context_after=[],
+    )
+
+    # --- include-queue-ops combo: the scanned (ScanMessage) list is, in FILE
+    # order, only the content-bearing entries:
+    #   [assistant(line1), enqueue_plain(line2), enqueue_notif(line3),
+    #    popAll-no-ts(line8)]
+    # remove/dequeue (no content), the empty-string enqueue, and the non-string
+    # enqueue produce NO ScanMessage. Context turns are positional over THIS
+    # list (default context = 1 neighbour each side). Newest-first by timestamp;
+    # the no-ts entry has timestamp "" and sorts last (empty < any RFC3339).
+    hit_notif = hit(
+        session_id="sid1", cwd_slug=scenario, line_number=3,
+        timestamp=iso(t3), role="user", snippet=enqueue_notif,
+        match_offsets=[[on[0], on[1]]],
+        context_before=[ctx("user", enqueue_plain, iso(t2))],
+        context_after=[ctx("user", enqueue_no_ts, "")],
+    )
+    hit_plain = hit(
+        session_id="sid1", cwd_slug=scenario, line_number=2,
+        timestamp=iso(t2), role="user", snippet=enqueue_plain,
+        match_offsets=[[op[0], op[1]]],
+        context_before=[ctx("assistant", a1, iso(t1))],
+        context_after=[ctx("user", enqueue_notif, iso(t3))],
+    )
+    hit_a1_with_q = hit(
+        session_id="sid1", cwd_slug=scenario, line_number=1,
+        timestamp=iso(t1), role="assistant", snippet=a1,
+        match_offsets=[[oa1[0], oa1[1]]],
+        context_before=[],
+        context_after=[ctx("user", enqueue_plain, iso(t2))],
+    )
+    hit_no_ts = hit(
+        session_id="sid1", cwd_slug=scenario, line_number=8,
+        timestamp="", role="user", snippet=enqueue_no_ts,
+        match_offsets=[[ots[0], ots[1]]],
+        context_before=[ctx("user", enqueue_notif, iso(t3))],
+        context_after=[],
+    )
+
+    expected = {
+        "default": {
+            "description": "No flag: queue-ops invisible, only the assistant message hits.",
+            "pattern": "needle",
+            "flags": [],
+            "hits": [hit_a1_default],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+        "include-queue-ops": {
+            "description": "--include-queue-ops: the content-bearing enqueues "
+                           "index as role:user (incl. the task-notification, no "
+                           "filtering); remove/dequeue/empty/non-string skipped. "
+                           "The no-timestamp popAll surfaces with ts \"\" and "
+                           "sorts last. Newest first.",
+            "pattern": "needle",
+            "flags": ["--include-queue-ops"],
+            "hits": [hit_notif, hit_plain, hit_a1_with_q, hit_no_ts],
+            "summary": summary(hits=4, sessions_matched=1),
+        },
+        "include-queue-ops-role-assistant": {
+            "description": "--include-queue-ops --role assistant: queue-ops are "
+                           "role:user, so only the assistant message emits a hit "
+                           "(its positional context still spans the enqueue, per "
+                           "the role-filter precedent).",
+            "pattern": "needle",
+            "flags": ["--include-queue-ops", "--role", "assistant"],
+            "hits": [hit_a1_with_q],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+    }
+    return scenario, files, expected
+
+
 SCENARIOS = [
     scenario_01_basic,
     scenario_02_multi_match_per_session,
@@ -1379,6 +1530,7 @@ SCENARIOS = [
     scenario_14_snippet_whitespace_nudge,
     *REGEX_CLASS_SCENARIOS,
     scenario_16_same_timestamp,
+    scenario_17_queue_operation,
 ]
 
 MULTI_ROOT_SCENARIOS = [

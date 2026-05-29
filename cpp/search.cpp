@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <regex>
 #include <set>
 #include <string>
@@ -85,6 +86,18 @@ static std::string extractText(const simdjson::dom::element& content, bool inclu
     return out;
 }
 
+// Extract text from a `type: "queue-operation"` entry. Queue-ops have no
+// `message` object — the text lives in the entry's root-level `content` string
+// (a bare string). Returns std::nullopt when the field is missing or empty
+// (e.g. remove/dequeue ops), so only content-bearing entries (enqueue/popAll)
+// surface under --include-queue-ops. Mirrors content.rs::extract_queue_op_text.
+static std::optional<std::string> extractQueueOpText(const simdjson::dom::element& doc) {
+    std::string_view sv;
+    if (doc["content"].get_string().get(sv) != simdjson::SUCCESS) return std::nullopt;
+    if (sv.empty()) return std::nullopt;
+    return std::string(sv);
+}
+
 static bool isOnlyToolBlocks(const simdjson::dom::element& content) {
     simdjson::dom::array arr;
     if (content.get_array().get(arr) != simdjson::SUCCESS) return false;
@@ -117,7 +130,8 @@ struct ScanMessage {
 // When the caller asks for the default (no tool blocks), context turns
 // also use text_default — so text_with_tools is never read and we skip
 // the extra content-array traversal it would cost.
-static std::vector<ScanMessage> scanFile(const fs::path& path, bool extract_with_tools) {
+static std::vector<ScanMessage> scanFile(const fs::path& path, bool extract_with_tools,
+                                         bool include_queue_ops) {
     std::vector<ScanMessage> out;
 
     // Memory-map (via padded_string::load) instead of std::ifstream::getline,
@@ -149,6 +163,32 @@ static std::vector<ScanMessage> scanFile(const fs::path& path, bool extract_with
             buffer.size() - line_off + simdjson::SIMDJSON_PADDING);
         simdjson::dom::element doc;
         if (parser.parse(view).get(doc) != simdjson::SUCCESS) continue;
+        // Queue-operation entries have no `message` object: the text lives in a
+        // root-level `content` string. Only indexed when --include-queue-ops is
+        // set; content-bearing enqueue/popAll surface, empty remove/dequeue are
+        // dropped by extractQueueOpText. They count as role:user. Mirrors search.rs.
+        std::string_view doc_type;
+        if (doc["type"].get_string().get(doc_type) == simdjson::SUCCESS &&
+            doc_type == "queue-operation") {
+            if (!include_queue_ops) continue;
+            auto qtext = extractQueueOpText(doc);
+            if (!qtext) continue;
+            std::string_view qts;
+            if (doc["timestamp"].get_string().get(qts) != simdjson::SUCCESS) qts = "";
+            ScanMessage qm;
+            qm.line_number = idx;
+            qm.role = "user";
+            qm.text_default = *qtext;
+            qm.text_with_tools = *qtext;
+            qm.is_only_tool_blocks = false;
+            if (!qts.empty()) {
+                qm.timestamp_str = std::string(qts);
+                auto ts_opt = parse_iso8601(qm.timestamp_str);
+                if (ts_opt) { qm.timestamp = *ts_opt; qm.has_timestamp = true; }
+            }
+            out.push_back(std::move(qm));
+            continue;
+        }
         simdjson::dom::object obj;
         if (doc["message"].get_object().get(obj) != simdjson::SUCCESS) continue;
         std::string_view role;
@@ -335,6 +375,7 @@ struct Args {
     uint32_t limit = 50;
     bool count_only = false;
     bool include_tool_blocks = false;
+    bool include_queue_ops = false;
     std::string format = "pretty";
     uint32_t snippet_chars = 240;
     fs::path projects_root;
@@ -400,6 +441,7 @@ static Args parseArgs(const std::vector<std::string>& raw) {
         }
         else if (s == "--count-only") args.count_only = true;
         else if (s == "--include-tool-blocks") args.include_tool_blocks = true;
+        else if (s == "--include-queue-ops") args.include_queue_ops = true;
         else if (s == "--format") {
             if (++i >= raw.size()) throw std::runtime_error("--format needs a value");
             args.format = raw[i];
@@ -506,7 +548,7 @@ static std::vector<Hit> processFile(
     const Args& args,
     const Matcher& matcher)
 {
-    auto messages = scanFile(f.path, args.include_tool_blocks);
+    auto messages = scanFile(f.path, args.include_tool_blocks, args.include_queue_ops);
     std::vector<Hit> hits;
     for (size_t idx = 0; idx < messages.size(); ++idx) {
         auto& m = messages[idx];

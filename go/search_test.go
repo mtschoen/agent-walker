@@ -75,7 +75,7 @@ func TestSearchIsOnlyToolBlocks(t *testing.T) {
 }
 
 func TestSearchScanFileOpenError(t *testing.T) {
-	if got := searchScanFile("/no/such/file.jsonl"); got != nil {
+	if got := searchScanFile("/no/such/file.jsonl", false); got != nil {
 		t.Errorf("missing file should return nil, got %v", got)
 	}
 }
@@ -95,7 +95,7 @@ func TestSearchScanFileSkipLadder(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	msgs := searchScanFile(path)
+	msgs := searchScanFile(path, false)
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 surviving messages, got %d (%+v)", len(msgs), msgs)
 	}

@@ -73,6 +73,20 @@ pub fn is_only_tool_blocks(content: &Value) -> bool {
     })
 }
 
+/// Extract text from a `type: "queue-operation"` entry. Queue-ops have no
+/// `message` object — the text lives in the entry's **root-level `content`
+/// field** (a bare string). Returns `None` when the field is missing or empty
+/// (e.g. `remove`/`dequeue` operations), so only content-bearing entries
+/// (`enqueue`/`popAll`) surface under `--include-queue-ops`.
+pub fn extract_queue_op_text(entry: &Value) -> Option<String> {
+    let text = entry.get("content").and_then(|v| v.as_str())?;
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
 /// True when a `type: "user"` entry's content contains any tool_result block.
 /// Used by beacons-history to distinguish a tool_result entry (agent-active)
 /// from a real user prompt (user-idle gap).

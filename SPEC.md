@@ -431,6 +431,7 @@ pattern is an error.
 | `--limit <N>` | 50 | Soft cap; overflow sets `truncated` and emits a stderr narrowing hint. |
 | `--count-only` | false | Emit only the summary record — a cheap pre-flight to size a query. |
 | `--include-tool-blocks` | false | Also search inside `tool_use` / `tool_result` blocks. |
+| `--include-queue-ops` | false | Also index content-bearing `queue-operation` entries as `role: user`. |
 | `--format <pretty\|jsonl>` | pretty | `jsonl` is agent-consumable (one record per line). |
 | `--snippet-chars <N>` | 240 | Max snippet preview chars per hit. |
 
@@ -442,6 +443,17 @@ user-prompt format) and sometimes an array of content blocks; parse it untyped
 and concatenate the `{"type":"text"}` blocks — strict typed deserialization
 silently drops ~10% of older user prompts. Search reaches `role: user` and
 `role: assistant` messages only.
+
+**Queue operations.** When you type into the prompt while the agent is busy,
+Claude Code queues the input as a `type: "queue-operation"` entry with no
+`message` object — invisible to search by default. With `--include-queue-ops`,
+such an entry is indexed as `role: user`, reading the **root-level `content`
+field** (not `message.content`) and the root `timestamp`; an entry with empty
+or absent `content` is skipped, so only the content-bearing `enqueue` and
+`popAll` operations surface (`remove`/`dequeue` carry none). There is no
+task-notification filtering and no dedup — the flag is the only gate. Queue-ops
+count as `role: user` (so `--role assistant` excludes them even with the flag
+on) and the time-window filter applies.
 
 Output (`--format jsonl`): one hit record per line, a summary record last.
 

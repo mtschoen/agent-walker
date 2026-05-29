@@ -31,6 +31,7 @@ const SearchArgs = struct {
     limit: u32,
     count_only: bool,
     include_tool_blocks: bool,
+    include_queue_ops: bool,
     format: Format,
     snippet_chars: u32,
     projects_root: []const u8,
@@ -52,6 +53,7 @@ fn parseArgs(alloc: Allocator, raw: [][]const u8) !SearchArgs {
     var limit: u32 = 50;
     var count_only = false;
     var include_tool_blocks = false;
+    var include_queue_ops = false;
     var format: Format = .pretty;
     var snippet_chars: u32 = 240;
     var projects_root: ?[]const u8 = null;
@@ -95,6 +97,8 @@ fn parseArgs(alloc: Allocator, raw: [][]const u8) !SearchArgs {
             count_only = true;
         } else if (std.mem.eql(u8, arg, "--include-tool-blocks")) {
             include_tool_blocks = true;
+        } else if (std.mem.eql(u8, arg, "--include-queue-ops")) {
+            include_queue_ops = true;
         } else if (std.mem.eql(u8, arg, "--format")) {
             const v = main.grab(raw, &i, "--format");
             if (std.mem.eql(u8, v, "pretty")) format = .pretty else if (std.mem.eql(u8, v, "jsonl")) format = .jsonl else {
@@ -171,6 +175,7 @@ fn parseArgs(alloc: Allocator, raw: [][]const u8) !SearchArgs {
         .limit = limit,
         .count_only = count_only,
         .include_tool_blocks = include_tool_blocks,
+        .include_queue_ops = include_queue_ops,
         .format = format,
         .snippet_chars = snippet_chars,
         .projects_root = projects_root orelse try main.defaultRoot(alloc),
@@ -697,7 +702,7 @@ const ScanMessage = struct {
     is_only_tool_blocks: bool,
 };
 
-fn scanFile(alloc: Allocator, path: []const u8) ![]ScanMessage {
+fn scanFile(alloc: Allocator, path: []const u8, include_queue_ops: bool) ![]ScanMessage {
     const data = main.readEntireFile(alloc, path) catch return alloc.alloc(ScanMessage, 0);
     // Don't free `data`: slices into it (timestamp_str, role) live on in the
     // returned ScanMessages until the arena reclaims them. With an arena
@@ -714,7 +719,7 @@ fn scanFile(alloc: Allocator, path: []const u8) ![]ScanMessage {
         const line = std.mem.trim(u8, raw, " \t\r\n");
         if (line.len == 0) continue;
 
-        if (try parseScanMessage(alloc, line, idx)) |m| {
+        if (try parseScanMessage(alloc, line, idx, include_queue_ops)) |m| {
             try out.append(alloc, m);
         }
     }
@@ -726,7 +731,7 @@ fn scanFile(alloc: Allocator, path: []const u8) ![]ScanMessage {
 /// the entry is missing the structural fields a hit requires (role,
 /// content). Key order is not assumed -- both role and content are
 /// collected eagerly inside the message walk.
-fn parseScanMessage(alloc: Allocator, line: []const u8, idx: u32) !?ScanMessage {
+fn parseScanMessage(alloc: Allocator, line: []const u8, idx: u32, include_queue_ops: bool) !?ScanMessage {
     var scanner = std.json.Scanner.initCompleteInput(alloc, line);
     defer scanner.deinit();
 
@@ -735,6 +740,11 @@ fn parseScanMessage(alloc: Allocator, line: []const u8, idx: u32) !?ScanMessage 
     var ts_str: []const u8 = "";
     var ts: ?f64 = null;
     var role: ?[]const u8 = null;
+    // Root-level fields used by queue-operation entries (no `message` object):
+    // `type == "queue-operation"` plus a bare-string `content`. Captured during
+    // the same key walk; key order is not assumed. Mirrors search.rs.
+    var entry_type: ?[]const u8 = null;
+    var root_content: ?[]const u8 = null;
     var have_content = false;
     var content_was_array = false;
     var total_blocks: usize = 0;
@@ -754,6 +764,12 @@ fn parseScanMessage(alloc: Allocator, line: []const u8, idx: u32) !?ScanMessage 
                     ts = main.parseTs(s) catch null;
                 }
             }
+        } else if (std.mem.eql(u8, key, "type")) {
+            entry_type = try main.parseStringValue(&scanner, alloc);
+        } else if (std.mem.eql(u8, key, "content")) {
+            // Root-level content (queue-ops). Stored owned the same way role/
+            // ts_str are; null when not a bare string (skipped by parseStringValue).
+            root_content = try main.parseStringValue(&scanner, alloc);
         } else if (std.mem.eql(u8, key, "message")) {
             if (!(try main.enterObject(&scanner))) continue;
             while (true) {
@@ -779,6 +795,27 @@ fn parseScanMessage(alloc: Allocator, line: []const u8, idx: u32) !?ScanMessage 
             }
         } else {
             try scanner.skipValue();
+        }
+    }
+
+    // Queue-operation entries have no `message`/`role`: the text lives in the
+    // root-level `content` string. Only surfaced when --include-queue-ops is set;
+    // content-bearing enqueue/popAll appear, empty remove/dequeue are dropped.
+    // They count as role:user. Mirrors search.rs's scan_file branch.
+    if (entry_type) |et| {
+        if (std.mem.eql(u8, et, "queue-operation")) {
+            if (!include_queue_ops) return null;
+            const qtext = root_content orelse return null;
+            if (qtext.len == 0) return null;
+            return ScanMessage{
+                .line_number = idx,
+                .timestamp = ts,
+                .timestamp_str = ts_str,
+                .role = "user",
+                .text_default = qtext,
+                .text_with_tools = qtext,
+                .is_only_tool_blocks = false,
+            };
         }
     }
 
@@ -1327,7 +1364,7 @@ fn processFile(
     pattern: *const Pattern,
     out: *std.ArrayList(Hit),
 ) !void {
-    const msgs = try scanFile(alloc, file.path);
+    const msgs = try scanFile(alloc, file.path, args.include_queue_ops);
     for (msgs, 0..) |m, idx| {
         if (!roleMatches(args.role, m.role)) continue;
         if (!args.include_tool_blocks and m.is_only_tool_blocks) continue;

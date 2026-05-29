@@ -12,7 +12,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, UNIX_EPOCH};
 
-use crate::content::{extract_text, is_only_tool_blocks};
+use crate::content::{extract_queue_op_text, extract_text, is_only_tool_blocks};
 use crate::{current_unix, default_projects_root, parse_iso8601, walker_roots};
 
 // === Flag types ===
@@ -42,6 +42,7 @@ struct SearchArgs {
     limit: u32,
     count_only: bool,
     include_tool_blocks: bool,
+    include_queue_ops: bool,
     format: Format,
     snippet_chars: u32,
     projects_root: PathBuf,
@@ -64,6 +65,7 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
     let mut limit: u32 = 50;
     let mut count_only = false;
     let mut include_tool_blocks = false;
+    let mut include_queue_ops = false;
     let mut format = Format::Pretty;
     let mut snippet_chars: u32 = 240;
     let mut projects_root: Option<PathBuf> = None;
@@ -101,6 +103,7 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
             }
             "--count-only" => count_only = true,
             "--include-tool-blocks" => include_tool_blocks = true,
+            "--include-queue-ops" => include_queue_ops = true,
             "--format" => {
                 let v = iter.next().ok_or("--format needs a value")?;
                 format = match v.as_str() {
@@ -162,7 +165,8 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
 
     Ok(SearchArgs {
         pattern, regex, case_sensitive, role, since, until, cwd,
-        context, limit, count_only, include_tool_blocks, format, snippet_chars,
+        context, limit, count_only, include_tool_blocks, include_queue_ops,
+        format, snippet_chars,
         projects_root: projects_root.unwrap_or_else(default_projects_root),
         extra_projects_roots,
         read_config,
@@ -207,7 +211,7 @@ struct ScanMessage {
     is_only_tool_blocks: bool,
 }
 
-fn scan_file(path: &Path) -> Vec<ScanMessage> {
+fn scan_file(path: &Path, include_queue_ops: bool) -> Vec<ScanMessage> {
     let mut out: Vec<ScanMessage> = Vec::new();
     let file = match File::open(path) {
         Ok(f) => f,
@@ -225,6 +229,36 @@ fn scan_file(path: &Path) -> Vec<ScanMessage> {
             Ok(e) => e,
             Err(_) => continue,
         };
+        // Queue-operation entries have no `message` object: the text lives in a
+        // root-level `content` string. Only indexed when --include-queue-ops is
+        // set; content-bearing enqueue/popAll surface, empty remove/dequeue are
+        // dropped by extract_queue_op_text. They count as role:user.
+        if entry.get("type").and_then(|v| v.as_str()) == Some("queue-operation") {
+            if !include_queue_ops {
+                continue;
+            }
+            let text = match extract_queue_op_text(&entry) {
+                Some(t) => t,
+                None => continue,
+            };
+            let timestamp_str = entry.get("timestamp")
+                .and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let timestamp = if timestamp_str.is_empty() {
+                None
+            } else {
+                parse_iso8601(&timestamp_str)
+            };
+            out.push(ScanMessage {
+                line_number: (idx + 1) as u32,
+                timestamp,
+                timestamp_str,
+                role: "user".to_string(),
+                text_default: text.clone(),
+                text_with_tools: text,
+                is_only_tool_blocks: false,
+            });
+            continue;
+        }
         let message = match entry.get("message") {
             Some(m) => m,
             None => continue,
@@ -444,7 +478,7 @@ fn process_file(
     args: &SearchArgs,
     re: &Regex,
 ) -> Vec<Hit> {
-    let messages = scan_file(&file.path);
+    let messages = scan_file(&file.path, args.include_queue_ops);
     let mut hits: Vec<Hit> = Vec::new();
     for (idx, m) in messages.iter().enumerate() {
         if !role_matches(args.role, &m.role) {
@@ -841,7 +875,7 @@ mod tests {
     fn scan_file_open_error_returns_empty() {
         // Covers lines 212-214: File::open Err → return empty vec.
         let missing = PathBuf::from("/nonexistent/path/to/file.jsonl");
-        let msgs = scan_file(&missing);
+        let msgs = scan_file(&missing, false);
         assert!(msgs.is_empty());
     }
 
@@ -863,7 +897,7 @@ mod tests {
             r#"{"message":{"role":"user","content":"hi"},"timestamp":"2025-01-01T00:00:00Z"}"#, // good
         ];
         fs::write(&path, lines.join("\n")).unwrap();
-        let msgs = scan_file(&path);
+        let msgs = scan_file(&path, false);
         assert_eq!(msgs.len(), 2);  // the empty-content user and the good user line
         // First valid message has content "" (line 7); second has "hi".
         assert_eq!(msgs.last().unwrap().text_default, "hi");
