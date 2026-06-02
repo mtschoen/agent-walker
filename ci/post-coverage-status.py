@@ -40,6 +40,11 @@ def _ssl_context() -> ssl.SSLContext:
       - GITEA_TLS_INSECURE=1              : disable verification entirely
         (loud warning; only set this if you've already accepted the
         token-leak risk on a fully-trusted network)
+
+    On the local-ci Linux runner the mounted mkcert CA is exposed via
+    CURL_CA_BUNDLE / NODE_EXTRA_CA_CERTS (#33); those are honored as
+    fallbacks after GITEA_CA_BUNDLE, so the poster verifies in CI with no
+    extra config and never needs GITEA_TLS_INSECURE there.
     """
     if os.environ.get("GITEA_TLS_INSECURE") == "1":
         print("post-coverage-status: WARNING — TLS verification disabled "
@@ -49,7 +54,12 @@ def _ssl_context() -> ssl.SSLContext:
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
         return context
-    cafile = os.environ.get("GITEA_CA_BUNDLE") or None
+    cafile = (
+        os.environ.get("GITEA_CA_BUNDLE")
+        or os.environ.get("CURL_CA_BUNDLE")
+        or os.environ.get("NODE_EXTRA_CA_CERTS")
+        or None
+    )
     return ssl.create_default_context(cafile=cafile)
 
 
