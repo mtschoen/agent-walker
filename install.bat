@@ -1,6 +1,39 @@
 @echo off
-REM Build the C++ walker and install as claude-walker.exe at %USERPROFILE%\.local\bin.
+REM Build the C++ walker and install as claude-walker.exe at %USERPROFILE%\.local\bin,
+REM then register the search MCP server.
+REM
+REM Usage: install.bat [--project [DIR]]
+REM   (no flag)        register the MCP server at `user` scope (global, every project)
+REM   --project        register at `local` scope for the directory you invoke from
+REM   --project DIR    register at `local` scope for DIR
 setlocal enabledelayedexpansion
+
+REM Capture the invocation directory BEFORE pushd so --project can default to
+REM "the project the user ran the installer from".
+set "INVOCATION_DIR=%CD%"
+set "SCRIPT_DIR=%~dp0"
+set "MCP_SCOPE=user"
+set "PROJECT_DIR="
+
+:parse_args
+if "%~1"=="" goto args_done
+if /I "%~1"=="--project" (
+    set "MCP_SCOPE=local"
+    set "NEXT=%~2"
+    if defined NEXT if not "!NEXT:~0,2!"=="--" (
+        set "PROJECT_DIR=%~2"
+        shift
+    )
+    shift
+    goto parse_args
+)
+echo install.bat: unknown argument: %~1
+echo Usage: install.bat [--project [DIR]]
+endlocal
+exit /b 2
+:args_done
+if /I "%MCP_SCOPE%"=="local" if not defined PROJECT_DIR set "PROJECT_DIR=%INVOCATION_DIR%"
+
 pushd "%~dp0"
 
 cmake -S cpp -B cpp\build -DCMAKE_BUILD_TYPE=Release || goto :error
@@ -35,9 +68,53 @@ REM what fresh processes -- the recency-nudge hook, the status line -- will see.
 powershell -NoProfile -Command "$d=('%INSTALL_DIR%').TrimEnd([char]92); $raw=(@([Environment]::GetEnvironmentVariable('Path','User'),[Environment]::GetEnvironmentVariable('Path','Machine')) -join ';'); if ((($raw -split ';' | ForEach-Object { $_.Trim().TrimEnd([char]92) }) -icontains $d)) { exit 0 } else { exit 1 }"
 if errorlevel 1 call :path_note
 
+call :register_mcp
+
 popd
 endlocal
 exit /b 0
+
+:register_mcp
+REM Additive: a registration failure warns but does not fail the binary install.
+where claude >nul 2>&1
+if errorlevel 1 (
+    echo.
+    echo Note: 'claude' CLI not on PATH; skipped MCP server registration.
+    echo Register later with:
+    echo   claude mcp add claude-walker -s user -- python "%SCRIPT_DIR%mcp\server.py"
+    goto :eof
+)
+REM Warn (don't fail) if the MCP SDK isn't importable by the interpreter the
+REM server will launch under -- registration still lands; the server just won't
+REM start until `pip install mcp` runs.
+python -c "import mcp.server.fastmcp" >nul 2>&1
+if errorlevel 1 (
+    echo.
+    echo Note: the 'mcp' SDK isn't importable by 'python'. The server is registered
+    echo but won't start until you run: python -m pip install mcp
+)
+set "SERVER_PATH=%SCRIPT_DIR%mcp\server.py"
+if /I "%MCP_SCOPE%"=="local" (
+    pushd "%PROJECT_DIR%"
+    claude mcp remove claude-walker -s local >nul 2>&1
+    claude mcp add claude-walker -s local -- python "%SERVER_PATH%"
+    set "MCP_RC=!errorlevel!"
+    popd
+    if not "!MCP_RC!"=="0" (
+        echo warning: MCP registration ^(local scope^) failed for %PROJECT_DIR%
+    ) else (
+        echo registered claude-walker MCP server ^(local scope^) for %PROJECT_DIR%
+    )
+) else (
+    claude mcp remove claude-walker -s user >nul 2>&1
+    claude mcp add claude-walker -s user -- python "%SERVER_PATH%"
+    if errorlevel 1 (
+        echo warning: MCP registration ^(user scope^) failed
+    ) else (
+        echo registered claude-walker MCP server ^(user/global scope^)
+    )
+)
+goto :eof
 
 :path_note
 REM Do NOT suggest `setx PATH "%PATH%;..."` here. At a cmd prompt %PATH% is the

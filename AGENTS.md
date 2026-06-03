@@ -212,6 +212,23 @@ C++ impl and copies the binary as `claude-walker(.exe)` to
 The script smoke-tests the bare-flag cost-mode invocation before
 exiting and warns if `~/.local/bin` isn't on PATH.
 
+It also registers the `search` MCP server (`mcp/server.py`) via
+`claude mcp add`:
+
+- **no flag** -> `user` scope (global; lands in `~/.claude.json`'s
+  top-level `mcpServers`, available in every project).
+- **`--project [DIR]`** -> `local` scope for `DIR` (or the directory you
+  invoked the installer from if `DIR` is omitted). `local` over `project`
+  scope is deliberate: the registration points at an absolute
+  machine-specific `server.py` path that has no business in a committed
+  `.mcp.json`.
+
+Registration is additive: a failure (or a missing `claude` CLI) warns
+but does not fail the binary install. The installer also warns if the
+`mcp` SDK isn't importable by `python` (register succeeds, but the
+server won't start until `python -m pip install mcp`). Re-running is
+idempotent: the prior registration in that scope is removed first.
+
 ## Remotes
 
 `origin` → GitHub (`git@github.com:mtschoen/claude-walker.git`);
