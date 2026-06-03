@@ -95,7 +95,7 @@ ReleaseFast). Bold = fastest in that mode:
 | events           | 410     | 439   | 448   | **398**  | n/a    |
 | beacons-history  | **119** | 193   | 237   | 166      | n/a    |
 | beacons-latest   | **38**  | 46    | 63    | 39       | n/a    |
-| search           | 133     | 144   | 276   | **108**  | n/a    |
+| search           | 133     | 144   | 213   | **108**  | n/a    |
 
 (Rust includes `panic = "abort"`; C++ cost includes the discovery fix; C++
 beacons include the walker buffer/parser reuse; Go + Rust got a dedicated pass
@@ -105,10 +105,10 @@ slightly with the RNG-stream change from adding the dense session, but the
 relative ordering held.)
 
 The Go + Rust pass closed most of Go's gap: every Go mode dropped 20-60%
-(cost 361->247 now ties Rust, beacons-latest 171->63, search 366->276,
+(cost 361->247 now ties Rust, beacons-latest 171->63, search 366->213,
 beacons-history 305->237), and Rust beacons-latest fell 126->46 (glob removed).
 Go is no longer the across-the-board slowest - it leads Rust on cost and trails
-only on the parse/regex-bound search.
+only on parse-bound search (now JSON-parse-bound, not regex-bound - see below).
 
 **The board is still split: C++ wins cost + both beacon modes, Zig wins events
 + search (and effectively ties C++ on beacons-latest, 39 vs 40).** C++
@@ -278,6 +278,29 @@ Go was the across-the-board slowest impl and Rust trailed on `beacons-latest`;
 neither had been touched since the events pass. This pass closed both gaps with
 three independent changes - no algorithm changes, output byte-identical,
 conformance 216/216 green.
+
+### Go `search`: literal pre-filter (276 -> 213 ms walker 251->187)
+
+A CPU profile (the new opt-in `WALKER_CPUPROFILE` hook on `runSearch`, mirroring
+C++'s `WALKER_PROFILE`) of the post-single-parse binary pinned the dominant cost
+at **~50% in Go's `regexp` backtracking engine** (`backtrack`/`tryBacktrack`
+cum + `unicode.SimpleFold` for the default `(?i)` case-folding), run at every
+position of every message's text - even though the bench pattern is a literal
+(`ZEBRAFINCH`) that almost never occurs. JSON parse (sonic) was ~22%, GC ~14%.
+
+Fix: `searchMatcher` wraps the compiled regex with an **allocation-free
+pre-filter** for plain ASCII literal patterns (`go/search.go`). Before running
+the regex it scans the text once: a pure-ASCII text with no case-folded
+occurrence of the literal cannot match (over ASCII text the default `(?i)`
+reduces to ASCII case-folding), so the regex is skipped on the common no-match
+case. Any text containing a non-ASCII byte falls back to the regex, so full
+Unicode case-folding semantics are preserved **exactly** - a `TestSearchMatcher
+FastPathParity` unit test locks this with the U+212A KELVIN SIGN (which
+`(?i)k` fold-matches): the matcher must defer to the regex and agree with it.
+After the pre-filter, regex dropped to ~13% of CPU and `search` is now
+**JSON-parse-bound** (sonic `decode_` + cgocall ~40%) - the remaining gap to
+C++/Zig is the two sonic passes per line (root + content), a harder lever than
+the regex was.
 
 ### Go `search`: one content parse instead of three (366 -> 276 ms walker 345->251)
 
