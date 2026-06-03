@@ -262,6 +262,45 @@ fn appendJsonString(buf: *std.ArrayList(u8), alloc: Allocator, s: []const u8) !v
     try buf.append(alloc, '"');
 }
 
+// ─── Parallel walk infrastructure ────────────────────────────────────────────
+
+// One unit of work: a discovered (slug, session_id) group and its file paths.
+const GroupWork = struct {
+    slug: []const u8,
+    session_id: []const u8,
+    paths: []const []const u8,
+};
+
+// Lock-free group queue: workers fetchAdd a cursor and take the indexed group.
+// Mirrors the cost-mode Queue in main.zig.
+const EventsQueue = struct {
+    items: []const GroupWork,
+    cur: std.atomic.Value(usize),
+    fn init(items: []const GroupWork) EventsQueue {
+        return .{ .items = items, .cur = .init(0) };
+    }
+    fn pop(self: *EventsQueue) ?GroupWork {
+        const i = self.cur.fetchAdd(1, .seq_cst);
+        return if (i < self.items.len) self.items[i] else null;
+    }
+};
+
+// Per-worker state: a private arena (so threads never share an allocator) and
+// the records it collected. The arena outlives the merge+emit below (its
+// deinit is deferred in run after emit), so EventRecord.model — allocated here
+// — stays valid; session_id/slug are borrowed from the run-level discover keys.
+const WorkerSlot = struct {
+    arena: std.heap.ArenaAllocator,
+    records: std.ArrayList(EventRecord) = .empty,
+};
+
+fn worker(queue: *EventsQueue, slot: *WorkerSlot, cutoff: f64) void {
+    const alloc = slot.arena.allocator();
+    while (queue.pop()) |gw| {
+        walkGroupEvents(alloc, gw.paths, gw.slug, gw.session_id, cutoff, &slot.records);
+    }
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 pub fn run(gpa: Allocator, argv: [][]const u8) !void {
@@ -285,29 +324,67 @@ pub fn run(gpa: Allocator, argv: [][]const u8) !void {
     // discover applies the mtime prune using the same cutoff.
     var grp_map = try main.discover(alloc, roots, cutoff);
 
-    var records: std.ArrayList(EventRecord) = .empty;
+    // Flatten the discover map into a work list. Keys are "{slug}\x00{sid}"
+    // (see main.addFile); split to recover slug and session_id.
+    var work: std.ArrayList(GroupWork) = .empty;
     var it = grp_map.iterator();
     while (it.next()) |kv| {
-        // Keys are "{slug}\x00{sid}" (see main.addFile). Split to recover the
-        // slug and session_id for the output records.
         const key = kv.key_ptr.*;
         const sep = std.mem.indexOfScalar(u8, key, 0) orelse continue;
-        const slug = key[0..sep];
-        const session_id = key[sep + 1 ..];
-        walkGroupEvents(alloc, kv.value_ptr.*.items, slug, session_id, cutoff, &records);
+        try work.append(alloc, .{
+            .slug = key[0..sep],
+            .session_id = key[sep + 1 ..],
+            .paths = kv.value_ptr.*.items,
+        });
+    }
+
+    var records: std.ArrayList(EventRecord) = .empty;
+
+    // Parallel walk, capped at 8 workers (matching cost mode). Events was
+    // previously a serial loop here, which left it ~9x slower than the other
+    // impls on a full fleet — the walk, not the emit, was the bottleneck.
+    const ncpu = std.Thread.getCpuCount() catch 4;
+    var nw: usize = @min(@as(usize, 8), ncpu);
+    if (nw > work.items.len) nw = work.items.len;
+
+    // The worker arenas own the EventRecord.model strings, so they must outlive
+    // the emit below. Declare the cleanup at function scope (not inside the
+    // parallel block) — a block-scoped defer would free them before emit reads
+    // rec.model, a use-after-free.
+    var slots: []WorkerSlot = &.{};
+    defer for (slots) |*s| s.arena.deinit();
+
+    if (nw <= 1) {
+        // Single group (or empty): skip the thread machinery entirely.
+        for (work.items) |gw| {
+            walkGroupEvents(alloc, gw.paths, gw.slug, gw.session_id, cutoff, &records);
+        }
+    } else {
+        var queue = EventsQueue.init(work.items);
+        slots = try alloc.alloc(WorkerSlot, nw);
+        for (slots) |*s| s.* = .{ .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator) };
+
+        var threads: std.ArrayList(std.Thread) = .empty;
+        for (slots) |*s| try threads.append(alloc, try std.Thread.spawn(.{}, worker, .{ &queue, s, cutoff }));
+        for (threads.items) |t| t.join();
+
+        for (slots) |*s| try records.appendSlice(alloc, s.records.items);
     }
 
     // Sort for deterministic output: (ts, session_id, model).
     std.mem.sort(EventRecord, records.items, {}, recordLessThan);
 
     // Emit NDJSON — one line per record, field order fixed per SPEC:
-    // ts, usd, model, session_id, slug.
+    // ts, usd, model, session_id, slug. Numbers format into a reused stack
+    // buffer (no per-field heap alloc) and the whole payload is written once.
     var buf: std.ArrayList(u8) = .empty;
+    try buf.ensureTotalCapacity(alloc, records.items.len * 128);
+    var num_buf: [64]u8 = undefined;
     for (records.items) |rec| {
         try buf.appendSlice(alloc, "{\"ts\":");
-        try buf.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{d}", .{rec.ts}));
+        try buf.appendSlice(alloc, std.fmt.bufPrint(&num_buf, "{d}", .{rec.ts}) catch unreachable);
         try buf.appendSlice(alloc, ",\"usd\":");
-        try buf.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{d}", .{rec.usd}));
+        try buf.appendSlice(alloc, std.fmt.bufPrint(&num_buf, "{d}", .{rec.usd}) catch unreachable);
         try buf.appendSlice(alloc, ",\"model\":");
         try appendJsonString(&buf, alloc, rec.model);
         try buf.appendSlice(alloc, ",\"session_id\":");

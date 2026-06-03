@@ -2,7 +2,15 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+    // Default to ReleaseFast: walker is a perf-comparison tool benched against
+    // Release C++/Rust/Go binaries, so a bare `zig build` must produce an
+    // optimized binary (a Debug build is 3-9x slower and made Zig look like the
+    // slowest impl when it is actually the fastest). We read -Doptimize directly
+    // rather than via standardOptimizeOption, whose preferred_optimize_mode only
+    // takes effect behind an explicit -Drelease flag and still defaults a bare
+    // build to Debug. Override with `-Doptimize=Debug` (shared/coverage.py does
+    // this for kcov line mapping).
+    const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Optimization mode (default: ReleaseFast)") orelse .ReleaseFast;
 
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
