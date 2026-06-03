@@ -103,7 +103,13 @@ std::vector<BeaconMatch> find_beacon_envelopes(std::string_view text) {
 // nullopt (silently skip, per spec). `drift` is optional (presence tracked
 // via b.has_drift so beacons-latest can omit it when the source lacked it).
 std::optional<Beacon> parse_beacon_body(std::string_view body) {
-    sj::ondemand::parser parser;
+    // Reuse one parser per worker thread instead of constructing a fresh
+    // simdjson parser (and its internal buffers) for every beacon body. The
+    // dense stress session carries thousands of beacons, so per-call
+    // construction was pure overhead. thread_local keeps each beacons-history
+    // worker isolated (a simdjson parser is not shareable across threads);
+    // beacons-latest is single-threaded and simply reuses the one instance.
+    thread_local sj::ondemand::parser parser;
     sj::padded_string padded(body);
     sj::ondemand::document doc;
     if (parser.iterate(padded).get(doc) != sj::SUCCESS) return std::nullopt;
@@ -169,6 +175,13 @@ void walk_assistant_entries(const fs::path& path, Callback&& cb) {
     if (sj::padded_string::load(path.string()).get(data) != sj::SUCCESS) return;
     sj::ondemand::parser parser;
 
+    // Reused across lines: clearing keeps the heap capacity, so a transcript
+    // with thousands of entries (e.g. the dense beacon stress session) does
+    // not malloc/free a fresh string per line. `clear()` preserves capacity.
+    std::string ts_str;
+    std::string combined_text;
+    std::string text_value;  // per text-block scratch; reused across blocks
+
     std::string_view buffer(data);
     size_t pos = 0;
     while (pos < buffer.size()) {
@@ -196,11 +209,11 @@ void walk_assistant_entries(const fs::path& path, Callback&& cb) {
         sj::ondemand::object root;
         if (doc.get_object().get(root) != sj::SUCCESS) continue;
 
-        std::string ts_str;
+        ts_str.clear();
+        combined_text.clear();
         bool has_ts = false;
         bool is_assistant = false;
         bool has_content = false;
-        std::string combined_text;
 
         for (auto root_field : root) {
             std::string_view key;
@@ -238,7 +251,6 @@ void walk_assistant_entries(const fs::path& path, Callback&& cb) {
                             if (block_val.get_object().get(block) != sj::SUCCESS) continue;
 
                             bool is_text = false;
-                            std::string text_value;
                             bool has_text = false;
                             for (auto block_field : block) {
                                 std::string_view bk;
@@ -303,6 +315,15 @@ void walk_entries_for_history(const fs::path& path, AssistantCb&& assistant_cb, 
     if (sj::padded_string::load(path.string()).get(data) != sj::SUCCESS) return;
     sj::ondemand::parser parser;
 
+    // Reused across lines (see walk_assistant_entries) — clearing keeps the
+    // heap capacity so a long transcript does not malloc a fresh string per
+    // entry. The history walker fires for every file in the corpus, so this
+    // is the hotter of the two walkers.
+    std::string ts_str;
+    std::string entry_type;
+    std::string combined_text;
+    std::string text_value;  // per text-block scratch; reused across blocks
+
     std::string_view buffer(data);
     size_t pos = 0;
     while (pos < buffer.size()) {
@@ -329,14 +350,14 @@ void walk_entries_for_history(const fs::path& path, AssistantCb&& assistant_cb, 
         sj::ondemand::object root;
         if (doc.get_object().get(root) != sj::SUCCESS) continue;
 
-        std::string ts_str;
+        ts_str.clear();
+        entry_type.clear();
+        combined_text.clear();
         bool has_ts = false;
-        std::string entry_type;       // top-level "type" field
         bool is_assistant_role = false;
         bool has_content = false;
         bool content_was_array = false;
         bool content_was_tool_result = false;
-        std::string combined_text;
 
         for (auto root_field : root) {
             std::string_view key;
@@ -384,7 +405,6 @@ void walk_entries_for_history(const fs::path& path, AssistantCb&& assistant_cb, 
 
                                 bool is_text_block = false;
                                 bool is_tool_result_block = false;
-                                std::string text_value;
                                 bool has_text = false;
                                 for (auto block_field : block) {
                                     std::string_view bk;

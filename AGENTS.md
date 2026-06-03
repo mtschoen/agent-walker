@@ -141,8 +141,15 @@ only). The corpus is deterministic (seeded), ~150 MB by default
 (`--target-mb`), and **never committed** (gitignored).
 
 `generate_perf_corpus.py` writes a `manifest.json` (seed, pinned now/window,
-file counts, a sample beacon session-id, the search pattern) that `bench.py`
-reads so every mode does real work against a self-describing fixture.
+file counts, the pinned beacon session-id, the search pattern) that `bench.py`
+reads so every mode does real work against a self-describing fixture. It also
+pins a dedicated **dense beacon session** (`--beacon-session-mb`, default 6) as
+the `beacons-latest` sample so that mode parses a real multi-MB transcript
+instead of timing pure directory traversal; the session sits before the
+`beacons-history` window so it adds parse volume without skewing `bias_factor`.
+`--beacon-rate` (default 0.18) tunes how many ordinary sessions also carry a
+lifecycle. See `PERF-RESULTS.md` for the rationale and the beacon-walker
+optimization it enabled.
 
 For C++ profiling, `WALKER_PROFILE=1` makes `events` print per-phase
 wall-clock (discover / walk+merge / sort / emit) to stderr; off otherwise.

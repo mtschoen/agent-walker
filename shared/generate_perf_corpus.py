@@ -233,6 +233,116 @@ def emit_session(
     return lines
 
 
+def emit_dense_beacon_session(
+    rng: random.Random, start: float, target_bytes: int, id_prefix: str
+) -> tuple[list[dict], int]:
+    """One large transcript packed with many begin/report*/end lifecycles.
+
+    Pinned as the beacons-latest sample so that mode parses a substantial
+    file (a long-running "current session") instead of a tiny one. Without
+    this, beacons-latest reads a single ~7 KB transcript and the timing is
+    dominated by directory traversal + process startup, masking any parse
+    optimization. Each lifecycle is interleaved with normal turns (prose,
+    tool, real user prompts) so the file also exercises beacons-history's
+    idle-gap detection and adds realistic parse volume.
+
+    Returns (lines, lifecycle_count). Generation stops once the serialized
+    size crosses target_bytes (estimated as it builds, so the result is
+    deterministic for a fixed seed).
+
+    Time advances in small (1-8 s) steps so the whole session fits in a few
+    hours of wall-clock. The caller pins `start` BEFORE the beacons-history
+    window, so this session contributes parse volume to history without
+    feeding its bias_factor (its begin->end gaps are seconds, not the
+    realistic minutes-to-hours of the ordinary sessions; letting them count
+    would crush the median). beacons-latest has no window filter, so it still
+    parses the whole file -- which is the point.
+    """
+    lines: list[dict] = []
+    ts = start
+    approx = 0
+    turn = 0
+    lifecycles = 0
+
+    def push(line: dict) -> None:
+        nonlocal approx
+        lines.append(line)
+        approx += len(json.dumps(line)) + 1  # +1 for the trailing newline
+
+    while approx < target_bytes:
+        # --- one begin -> report* -> end lifecycle ---
+        eta = rng.randint(300, 1800)
+        ts += rng.randint(1, 5)
+        push(
+            assistant_line(
+                rng,
+                ts,
+                f"{id_prefix}-m{turn:05d}",
+                text=beacon_block("begin", eta, paragraph(rng, 3, 8, needle=False), drift=None),
+            )
+        )
+        turn += 1
+        for _ in range(rng.randint(1, 3)):
+            ts += rng.randint(1, 5)
+            eta = max(0, eta - rng.randint(60, 400))
+            push(
+                assistant_line(
+                    rng,
+                    ts,
+                    f"{id_prefix}-m{turn:05d}",
+                    text=beacon_block(
+                        "report",
+                        eta,
+                        paragraph(rng, 3, 8, needle=False),
+                        drift=rng.choice([None, "nominal", "minor", "major"]),
+                    ),
+                )
+            )
+            turn += 1
+        ts += rng.randint(15, 300)
+        push(
+            assistant_line(
+                rng,
+                ts,
+                f"{id_prefix}-m{turn:05d}",
+                text=beacon_block("end", 0, paragraph(rng, 3, 8, needle=False), drift="nominal"),
+            )
+        )
+        turn += 1
+        lifecycles += 1
+
+        # --- filler turns between lifecycles (parse volume + real-user idle gaps) ---
+        for _ in range(rng.randint(2, 6)):
+            ts += rng.randint(1, 8)
+            roll = rng.random()
+            if roll < 0.40:
+                push(
+                    assistant_line(
+                        rng,
+                        ts,
+                        f"{id_prefix}-m{turn:05d}",
+                        text=paragraph(rng, 20, 120, needle=rng.random() < SEARCH_HIT_RATE),
+                    )
+                )
+            elif roll < 0.55:
+                push(
+                    assistant_line(
+                        rng,
+                        ts,
+                        f"{id_prefix}-m{turn:05d}",
+                        text=paragraph(rng, 4, 20, needle=rng.random() < SEARCH_HIT_RATE),
+                        tool_use=True,
+                    )
+                )
+            elif roll < 0.80:
+                push(user_line(rng, ts, tool_result=False))
+            else:
+                push(user_line(rng, ts, tool_result=True))
+            turn += 1
+
+    return lines, lifecycles
+
+
 def write_jsonl(path: Path, lines: list[dict]) -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
     blob = "".join(json.dumps(line) + "\n" for line in lines)
@@ -241,11 +351,37 @@ def write_jsonl(path: Path, lines: list[dict]) -> int:
     return len(encoded)
 
 
-def generate(out_dir: Path, target_bytes: int, seed: int) -> dict:
+def generate(
+    out_dir: Path,
+    target_bytes: int,
+    seed: int,
+    *,
+    beacon_rate: float = 0.18,
+    beacon_session_bytes: int = 6 * 1024 * 1024,
+) -> dict:
     rng = random.Random(seed)
     parent_count = subagent_count = total_bytes = 0
     beacon_session_ids: list[str] = []
     slug_idx = 0
+
+    # The dense beacon stress session. Generated first (so the pinned id is
+    # stable regardless of where the main fill loop stops) and counted toward
+    # the byte budget so the corpus total stays ~target_mb. It lives in its
+    # own slug as a parent transcript; beacons-latest pins it via the manifest.
+    dense_sid = "sid-beacon-stress"
+    # Start a few days BEFORE the history window (win_start = NOW - SPAN - 1d)
+    # so this session's compressed-clock lifecycles add parse volume to
+    # beacons-history without polluting its bias_factor. beacons-latest
+    # ignores the window and parses the whole file regardless.
+    dense_start = NOW_UNIX - (SPAN_SECONDS + 86400) - 3 * 86400
+    dense_lines, dense_lifecycles = emit_dense_beacon_session(
+        rng, dense_start, beacon_session_bytes, dense_sid
+    )
+    dense_bytes = write_jsonl(
+        out_dir / "perf-beacon-stress" / f"{dense_sid}.jsonl", dense_lines
+    )
+    total_bytes += dense_bytes
+    parent_count += 1
 
     while total_bytes < target_bytes:
         slug = f"perf-project-{slug_idx:03d}"
@@ -257,7 +393,7 @@ def generate(out_dir: Path, target_bytes: int, seed: int) -> dict:
             # Heavy-tailed turn count -> varied file sizes (a few huge, many small).
             turns = max(5, int(rng.lognormvariate(4.2, 0.9)))
             start = NOW_UNIX - rng.uniform(86400, SPAN_SECONDS)
-            with_beacons = rng.random() < 0.18
+            with_beacons = rng.random() < beacon_rate
             lines = emit_session(rng, start, turns, sid, with_beacons=with_beacons)
             total_bytes += write_jsonl(out_dir / slug / f"{sid}.jsonl", lines)
             parent_count += 1
@@ -279,8 +415,8 @@ def generate(out_dir: Path, target_bytes: int, seed: int) -> dict:
                 subagent_count += 1
         slug_idx += 1
 
-    # Pick the last-generated beacon session as the deterministic sample.
-    beacon_sid = beacon_session_ids[-1] if beacon_session_ids else ""
+    # Pin the dense beacon stress session as the beacons-latest sample so
+    # that mode parses a substantial file rather than a ~7 KB transcript.
     manifest = {
         "seed": seed,
         "now_unix": NOW_UNIX,
@@ -290,12 +426,17 @@ def generate(out_dir: Path, target_bytes: int, seed: int) -> dict:
         # Window spans the whole corpus too, so the cost window pass and the
         # beacons-history pairing both do full work (begin/end pairs land in-window).
         "win_start_unix": NOW_UNIX - (SPAN_SECONDS + 86400),
-        "slug_count": slug_idx,
+        "slug_count": slug_idx + 1,  # +1 for the perf-beacon-stress slug
         "parent_count": parent_count,
         "subagent_count": subagent_count,
         "file_count": parent_count + subagent_count,
         "total_bytes": total_bytes,
-        "beacon_session_id": beacon_sid,
+        "beacon_rate": beacon_rate,
+        "beacon_session_id": dense_sid,
+        "beacon_session_bytes": dense_bytes,
+        "beacon_session_lifecycles": dense_lifecycles,
+        # Count of ordinary sessions that also carry a beacon lifecycle (the
+        # dense stress session is separate and always present).
         "beacon_session_count": len(beacon_session_ids),
         "search_pattern": SEARCH_PATTERN,
     }
@@ -314,6 +455,22 @@ def main() -> None:
         help="Approximate corpus size in MB (default: 150)",
     )
     parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument(
+        "--beacon-rate",
+        type=float,
+        default=0.18,
+        help="Fraction of ordinary sessions carrying a beacon lifecycle "
+        "(default: 0.18). Raise to make beacons-history do more "
+        "beacon-specific work; affects cost/events/search distribution too.",
+    )
+    parser.add_argument(
+        "--beacon-session-mb",
+        type=float,
+        default=6.0,
+        help="Size of the dense beacon stress session pinned for "
+        "beacons-latest (default: 6). This is the lever that keeps "
+        "beacons-latest from being startup/traversal-bound.",
+    )
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument(
         "--force",
@@ -341,7 +498,13 @@ def main() -> None:
         f"Generating ~{args.target_mb:.0f} MB perf corpus (seed={args.seed}) "
         f"to {out_dir} ..."
     )
-    manifest = generate(out_dir, target_bytes, args.seed)
+    manifest = generate(
+        out_dir,
+        target_bytes,
+        args.seed,
+        beacon_rate=args.beacon_rate,
+        beacon_session_bytes=int(args.beacon_session_mb * 1024 * 1024),
+    )
     print(
         f"Done: {manifest['file_count']} files "
         f"({manifest['parent_count']} parents + {manifest['subagent_count']} "
@@ -349,8 +512,11 @@ def main() -> None:
         f"{manifest['total_bytes'] / 1024 / 1024:.1f} MB."
     )
     print(
-        f"Beacon sample session-id: {manifest['beacon_session_id']!r} "
-        f"({manifest['beacon_session_count']} beacon sessions); "
+        f"Dense beacon session: {manifest['beacon_session_id']!r} "
+        f"({manifest['beacon_session_bytes'] / 1024 / 1024:.1f} MB, "
+        f"{manifest['beacon_session_lifecycles']} lifecycles); "
+        f"{manifest['beacon_session_count']} ordinary beacon sessions "
+        f"(rate {manifest['beacon_rate']}); "
         f"search pattern: {manifest['search_pattern']!r}"
     )
 

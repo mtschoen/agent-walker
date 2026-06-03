@@ -38,11 +38,26 @@ seeded token (search). A `manifest.json` pins the seed, window, file counts,
 a sample beacon session-id, and the search pattern so the bench is
 self-describing. The corpus is **never committed** (`.gitignore`).
 
+**Dense beacon session (added 2026-06-03).** The generator also emits one
+large beacon-packed transcript (`perf-beacon-stress/sid-beacon-stress.jsonl`,
+~6 MB / ~1500 begin->report*->end lifecycles, `--beacon-session-mb`) and pins
+it as the `beacons-latest` sample. Without it, `beacons-latest` read a single
+~7 KB transcript and timed almost pure directory traversal + process startup,
+masking any parse work. The dense session sits on a compressed clock placed
+*before* the `beacons-history` window, so it adds parse volume to history
+without polluting its `bias_factor` (its seconds-apart begin/end gaps would
+otherwise crush the median). `--beacon-rate` (default 0.18) tunes how many
+*ordinary* sessions also carry a lifecycle.
+
 ### Environment
 
 - Host: chonkers (Windows 11, 32 logical cores). Native impls cap their
   worker pool at `min(8, cores)`, so this is an 8-way-parallel measurement.
-- Corpus: 3153 files (2653 parents + 500 subagents), 150 MB, seed 1234.
+- Corpus: 3050 files (2536 parents + 514 subagents), 150 MB, seed 1234,
+  including the ~6 MB dense beacon stress session (1476 lifecycles). (The
+  pre-2026-06-03 corpus was 3153 files without the dense session; adding it
+  shifts the RNG stream, so absolute counts and the `bias_factor` differ from
+  older runs even at the same seed.)
 - C++/Rust/Go built Release; **Zig must be built `-Doptimize=ReleaseFast`**
   (now the default for a bare `zig build` - see below). All pass
   `shared/conformance.py`.
@@ -70,24 +85,28 @@ but that is the Debug-build artifact, not a real characteristic of the impl.
 
 ## After optimization
 
-Current full-run state (medians of 5 interleaved runs), with **all four impls
-built optimized** (Zig now ReleaseFast). Bold = fastest in that mode:
+Current full-run state (medians of 5 interleaved runs on the **dense-beacon
+corpus**, 2026-06-03), with **all four impls built optimized** (Zig
+ReleaseFast). Bold = fastest in that mode:
 
 | mode             | cpp     | rust  | go    | zig      | python |
 | ---------------- | ------- | ----- | ----- | -------- | ------ |
-| cost             | **134** | 263   | 318   | 160      | 967    |
-| events           | 404     | 424   | 441   | **386**  | n/a    |
-| beacons-history  | **140** | 212   | 324   | 169      | n/a    |
-| beacons-latest   | 33      | 112   | 169   | **25**   | n/a    |
-| search           | 153     | 168   | 406   | **118**  | n/a    |
+| cost             | **144** | 276   | 361   | 171      | 1062   |
+| events           | 395     | 445   | 442   | **381**  | n/a    |
+| beacons-history  | **114** | 211   | 305   | 167      | n/a    |
+| beacons-latest   | 40      | 126   | 171   | **39**   | n/a    |
+| search           | 134     | 158   | 366   | **114**  | n/a    |
 
-(Rust includes `panic = "abort"`; C++ cost includes the discovery fix - both
-below.)
+(Rust includes `panic = "abort"`; C++ cost includes the discovery fix; C++
+beacons include the walker buffer/parser reuse - all below. Numbers are on the
+dense-beacon corpus; the pre-2026-06-03 table lives in git history. Absolute
+ms shifted slightly with the RNG-stream change from adding the dense session,
+but the relative ordering held.)
 
-**The board is now split: C++ wins cost + beacons-history, Zig wins events +
-beacons-latest + search.** C++ reclaimed cost (the status-line-critical mode)
-193->134 via the discovery fix below. Getting here took three independent
-threads:
+**The board is still split: C++ wins cost + both beacon modes, Zig wins events
++ search (and effectively ties C++ on beacons-latest, 39 vs 40).** C++
+reclaimed cost (the status-line-critical mode) 193->134 via the discovery fix
+below. The headline threads:
 
 - **The Zig build was Debug** (the big one). Defaulting `zig build` to
   ReleaseFast took Zig cost 521->160, events 1291->386, search 443->118,
@@ -213,6 +232,39 @@ Wall-clock is a wash on this corpus (events stays parse-dominated at ~470-490
 ms), but allocation/GC pressure drops; kept as the faithful analog of the
 C++/Rust "one buffer, no per-record alloc" change.
 
+## Beacon walker optimization (C++, 2026-06-03)
+
+Once the dense beacon session made `beacons-latest` exercise real parse work
+(rather than timing directory traversal), the two beacon walkers in
+`cpp/beacons.cpp` got a profile-obvious pass:
+
+1. **Per-line buffer reuse.** `walk_assistant_entries` and
+   `walk_entries_for_history` declared `combined_text` / `ts_str` /
+   `entry_type` / the per-block `text_value` *inside* the line loop, so each
+   of the corpus's ~225k assistant entries malloc'd and freed fresh strings.
+   Hoisted them above the loop and `clear()` per line - capacity is retained,
+   the allocator churn is gone.
+2. **Per-beacon parser reuse.** `parse_beacon_body` constructed a fresh
+   `simdjson::ondemand::parser` (and its internal buffers) for *every* beacon
+   body - thousands of them in the dense session. Now a `thread_local` parser
+   is reused; `thread_local` keeps each `beacons-history` worker isolated (a
+   simdjson parser is not shareable across threads) while `beacons-latest`
+   (single-threaded) just reuses the one.
+
+Measured same-corpus (C++ only, dense-beacon corpus, walker-reported ms):
+
+- **beacons-history: 137 -> 112 ms walker (~18% faster).** This walker fires
+  for every file in the corpus, so the saved per-line/per-beacon allocations
+  compound. C++ extends its lead to 2.7x over Go.
+- **beacons-latest: ~38 -> ~33 ms walker (within noise).** This mode is
+  traversal-bound: ~28 ms is `std::filesystem::directory_iterator` stat-ing
+  every slug + every session subdir for the target session-id, and only ~10 ms
+  is the 6 MB parse the optimization touches. The next lever here is the
+  directory walk, not the parser (see Findings #3 and #5).
+
+Conformance stays green (608/608) - both changes are pure allocation hygiene,
+no output change.
+
 ## Compile-flag exploration
 
 After the Zig Debug fix, swept the other three for "are we leaving optimizer
@@ -237,11 +289,13 @@ large structural win was the Zig Debug-build fix.
    parallelizing it). Zig events is now ~392 ms - the *fastest* impl. The
    "slower JSON parser" hypothesis was wrong: ReleaseFast `std.json.Scanner`
    beats simdjson/sonic on this corpus.
-2. **Zig `beacons-history` bias divergence.** On this corpus Zig reports
-   `bias_factor` 14.94 while Rust/C++/Go all agree on 14.26 (3-vs-1, so Zig is
-   the outlier). Conformance passes (608/608) because the beacon fixtures don't
-   cover this case - a **conformance gap plus a likely real Zig bug**. Worth a
-   dedicated fixture that reproduces it.
+2. **Zig `beacons-history` bias divergence.** Reproduces on the dense-beacon
+   corpus: Zig reports `bias_factor` 12.2442 while Rust/C++/Go all agree on
+   11.8921 (3-vs-1, so Zig is the outlier). (The pre-2026-06-03 corpus showed
+   14.94 vs 14.26 - the absolute values are corpus-instance-dependent; the
+   3-vs-1 split is the durable signal.) Conformance passes (608/608) because
+   the beacon fixtures don't cover this case - a **conformance gap plus a
+   likely real Zig bug**. Worth a dedicated fixture that reproduces it.
    - Lead: this is the begin/end **pairing** algorithm (single in-flight
      `pending_begin`, orphan-on-re-begin, pair on first `end` after a begin) that
      the now-shipped beacon-pairing-fix reworked. Rust/C++/Go agree, so the
@@ -250,10 +304,20 @@ large structural win was the Zig Debug-build fix.
      back-to-back begin/end, orphaned begin/end). Diff Zig's pairing against the
      other three on a session with several lifecycles. A fixture that reproduces
      the split (3 impls vs Zig) is the TDD entry point.
-3. **Rust `beacons-latest` is ~3.4x slower than C++/Zig** (97 ms vs ~27 ms) on
-   a tiny single-session task. Rust uses the `glob` crate for the targeted
+3. **Rust `beacons-latest` is ~3.5x slower than C++/Zig** (126 ms vs ~40 ms).
+   The dense-beacon corpus amplified this: on the old tiny-session corpus the
+   gap was ~70 ms (97 vs 27); now that the pinned session is a real 6 MB file,
+   Rust's per-file cost shows too. Rust uses the `glob` crate for the targeted
    lookup; replacing it with direct `read_dir` traversal (as C++ does) would
-   likely close the gap. Low absolute cost, so deferred.
+   likely close the gap. Now a more compelling fix than when deferred.
+5. **C++ `beacons-latest` is traversal-bound (~28 of ~33 ms walker).** With the
+   dense session in place, the remaining cost is
+   `std::filesystem::directory_iterator` stat-ing every slug dir + every
+   session subdir to locate the target session-id's files (most stats miss).
+   The buffer/parser reuse above doesn't touch it. The lever is a raw-syscall
+   directory walk (`FindFirstFileEx` on Windows / `getdents` on Linux), the
+   same approach flagged for `search` - worth doing once and sharing across
+   both modes. Low absolute cost, so still deferred.
 4. **Formatter-hook footgun.** The repo has no `.clang-format` or `rustfmt.toml`,
    but the local PostToolUse hook runs `clang-format -i` / `cargo fmt` with
    default styles on every C++/Rust edit. Those defaults do not match the
