@@ -261,6 +261,54 @@ fn parse_latest_args(args: &[String]) -> Result<LatestArgs, String> {
     })
 }
 
+/// Locate the transcript(s) for a single session id by walking the directory
+/// tree directly, rather than compiling and matching two `glob` patterns.
+/// Mirrors the glob semantics it replaces:
+///   parent:   <root>/*/<session_id>.jsonl
+///   subagent: <root>/*/*/subagents/agent-<session_id>.jsonl
+/// For the parent form this probes one file per slug dir (a single stat)
+/// instead of listing every slug dir's contents the way `glob` does, which is
+/// the bulk of the win on a large fleet. Result order is irrelevant: the
+/// caller reduces over the matches with `max_by` on timestamp.
+fn discover_latest_paths(roots: &[PathBuf], session_id: &str) -> Vec<PathBuf> {
+    let parent_name = format!("{session_id}.jsonl");
+    let sub_name = format!("agent-{session_id}.jsonl");
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        let slug_entries = match std::fs::read_dir(root) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for slug in slug_entries.flatten() {
+            if !slug.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let slug_path = slug.path();
+            // Parent transcript: <root>/<slug>/<session_id>.jsonl
+            let parent = slug_path.join(&parent_name);
+            if parent.is_file() {
+                paths.push(parent);
+            }
+            // Subagent transcripts live one level deeper, under each session
+            // directory's `subagents/` folder.
+            let session_entries = match std::fs::read_dir(&slug_path) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for session in session_entries.flatten() {
+                if !session.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let sub = session.path().join("subagents").join(&sub_name);
+                if sub.is_file() {
+                    paths.push(sub);
+                }
+            }
+        }
+    }
+    paths
+}
+
 pub fn run_latest(args: &[String]) {
     let started = Instant::now();
     let parsed = match parse_latest_args(args) {
@@ -280,20 +328,7 @@ pub fn run_latest(args: &[String]) {
 
     // Try parent transcript first, then any subagent transcript, across
     // every resolved root.
-    let mut paths: Vec<PathBuf> = Vec::new();
-    for root in &roots {
-        let parent_pattern = format!("{}/*/{}.jsonl", root.display(), parsed.session_id);
-        let sub_pattern = format!(
-            "{}/*/*/subagents/agent-{}.jsonl",
-            root.display(),
-            parsed.session_id
-        );
-        for pattern in [&parent_pattern, &sub_pattern] {
-            if let Ok(entries) = glob::glob(pattern) {
-                paths.extend(entries.flatten());
-            }
-        }
-    }
+    let paths = discover_latest_paths(&roots, &parsed.session_id);
 
     let re = beacon_re();
     let result = paths

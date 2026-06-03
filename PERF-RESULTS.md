@@ -91,17 +91,24 @@ ReleaseFast). Bold = fastest in that mode:
 
 | mode             | cpp     | rust  | go    | zig      | python |
 | ---------------- | ------- | ----- | ----- | -------- | ------ |
-| cost             | **144** | 276   | 361   | 171      | 1062   |
-| events           | 395     | 445   | 442   | **381**  | n/a    |
-| beacons-history  | **114** | 211   | 305   | 167      | n/a    |
-| beacons-latest   | 40      | 126   | 171   | **39**   | n/a    |
-| search           | 134     | 158   | 366   | **114**  | n/a    |
+| cost             | **127** | 252   | 247   | 161      | 1035   |
+| events           | 410     | 439   | 448   | **398**  | n/a    |
+| beacons-history  | **119** | 193   | 237   | 166      | n/a    |
+| beacons-latest   | **38**  | 46    | 63    | 39       | n/a    |
+| search           | 133     | 144   | 276   | **108**  | n/a    |
 
 (Rust includes `panic = "abort"`; C++ cost includes the discovery fix; C++
-beacons include the walker buffer/parser reuse - all below. Numbers are on the
-dense-beacon corpus; the pre-2026-06-03 table lives in git history. Absolute
-ms shifted slightly with the RNG-stream change from adding the dense session,
-but the relative ordering held.)
+beacons include the walker buffer/parser reuse; Go + Rust got a dedicated pass
+2026-06-03 - see "Go + Rust pass" below. Numbers are on the dense-beacon
+corpus; the pre-2026-06-03 table lives in git history. Absolute ms shifted
+slightly with the RNG-stream change from adding the dense session, but the
+relative ordering held.)
+
+The Go + Rust pass closed most of Go's gap: every Go mode dropped 20-60%
+(cost 361->247 now ties Rust, beacons-latest 171->63, search 366->276,
+beacons-history 305->237), and Rust beacons-latest fell 126->46 (glob removed).
+Go is no longer the across-the-board slowest - it leads Rust on cost and trails
+only on the parse/regex-bound search.
 
 **The board is still split: C++ wins cost + both beacon modes, Zig wins events
 + search (and effectively ties C++ on beacons-latest, 39 vs 40).** C++
@@ -265,6 +272,57 @@ Measured same-corpus (C++ only, dense-beacon corpus, walker-reported ms):
 Conformance stays green (608/608) - both changes are pure allocation hygiene,
 no output change.
 
+## Go + Rust pass (2026-06-03)
+
+Go was the across-the-board slowest impl and Rust trailed on `beacons-latest`;
+neither had been touched since the events pass. This pass closed both gaps with
+three independent changes - no algorithm changes, output byte-identical,
+conformance 216/216 green.
+
+### Go `search`: one content parse instead of three (366 -> 276 ms walker 345->251)
+
+`searchScanFile` parsed each line's root into a `map[string]json.RawMessage`
+and then **re-parsed the `content` RawMessage three separate times** - once for
+the default text, once for the tool-inclusive text, and once for the
+only-tool-blocks check (`searchExtractText` x2 + `searchIsOnlyToolBlocks`). Rust
+(the lean reference) parses the line once into a `serde_json::Value` and does
+three cheap DOM walks, so Go was doing ~4 full JSON parses per line where Rust
+did 1.
+
+Fixes, all in `go/search.go`:
+1. **Unified `searchExtractAll`** computes default text, tool-inclusive text,
+   and only-tool-blocks from a **single** parse of the content array. The
+   tool-inclusive text is only built when `--include-tool-blocks` is set (the
+   uncommon case), so the default path is one parse, not three. The two old
+   helpers were deleted and their unit tests repointed at `searchExtractAll`.
+2. **Typed root struct** (`type`/`message`/`timestamp`/`content` as fields)
+   replaces the `map` plus the per-field re-parses of `type` and `timestamp`.
+
+### Go: `scanner.Bytes()` instead of `scanner.Text()` + `[]byte(line)` (cost, beacons)
+
+Every Go walk did `strings.TrimSpace(scanner.Text())` (allocates a string) then
+`sonic.Unmarshal([]byte(line), ...)` (copies it back to bytes) - two
+allocations per line purely for the buffer dance. Switched to
+`bytes.TrimSpace(scanner.Bytes())`, which aliases the scanner's buffer with no
+allocation and feeds `sonic.Unmarshal` directly. Safe because the only
+`RawMessage` fields (`message`/`content`) are consumed within the same loop
+iteration, before the next `Scan()` reuses the buffer. Applied in
+`main.go` (cost: 361->247), `beacons.go` (history: 305->237; latest scan path),
+and the search rewrite above.
+
+### Go + Rust `beacons-latest`: direct `read_dir` instead of glob (Go 171->63, Rust 126->46)
+
+Both impls located a single session's transcripts by compiling two glob
+patterns (`<root>/*/<sid>.jsonl` and `<root>/*/*/subagents/agent-<sid>.jsonl`).
+Glob lists every slug dir's full contents (and, for the subagent pattern,
+re-lists root and every slug a second time, then lists each `subagents/` dir).
+Replaced with a `discover_latest_paths` / `discoverLatestPaths` helper that
+walks the tree directly and **probes the parent file with a single stat per
+slug dir** instead of listing it. Result order is irrelevant - the caller keeps
+the highest-timestamp beacon. This was Rust's documented Finding #3 and the same
+lever applied to Go. `beacons-history`'s glob discovery was left alone (it
+genuinely needs every file, so there is nothing to prune).
+
 ## Compile-flag exploration
 
 After the Zig Debug fix, swept the other three for "are we leaving optimizer
@@ -304,12 +362,11 @@ large structural win was the Zig Debug-build fix.
      back-to-back begin/end, orphaned begin/end). Diff Zig's pairing against the
      other three on a session with several lifecycles. A fixture that reproduces
      the split (3 impls vs Zig) is the TDD entry point.
-3. **Rust `beacons-latest` is ~3.5x slower than C++/Zig** (126 ms vs ~40 ms).
-   The dense-beacon corpus amplified this: on the old tiny-session corpus the
-   gap was ~70 ms (97 vs 27); now that the pinned session is a real 6 MB file,
-   Rust's per-file cost shows too. Rust uses the `glob` crate for the targeted
-   lookup; replacing it with direct `read_dir` traversal (as C++ does) would
-   likely close the gap. Now a more compelling fix than when deferred.
+3. ~~**Rust `beacons-latest` is ~3.5x slower than C++/Zig** (126 ms vs ~40 ms).~~
+   **Resolved 2026-06-03** (Go + Rust pass above). Swapped the `glob` crate for
+   a direct `read_dir` walk that probes the parent file with one stat per slug
+   dir: Rust 126->46 ms, Go 171->63 ms. Both now within ~1.2-1.6x of C++/Zig
+   (the residual is the directory-traversal floor flagged in Finding #5).
 5. **C++ `beacons-latest` is traversal-bound (~28 of ~33 ms walker).** With the
    dense session in place, the remaining cost is
    `std::filesystem::directory_iterator` stat-ing every slug dir + every

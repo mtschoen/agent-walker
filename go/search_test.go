@@ -12,17 +12,17 @@ import (
 )
 
 func TestSearchExtractTextBareString(t *testing.T) {
-	if got := searchExtractText(json.RawMessage(`"plain-text"`), false); got != "plain-text" {
+	if got, _, _ := searchExtractAll(json.RawMessage(`"plain-text"`), false); got != "plain-text" {
 		t.Errorf("bare string = %q; want plain-text", got)
 	}
 	// Bare unmarshalable bytes → empty string.
-	if got := searchExtractText(json.RawMessage(`123`), false); got != "" {
+	if got, _, _ := searchExtractAll(json.RawMessage(`123`), false); got != "" {
 		t.Errorf("non-string bare = %q; want \"\"", got)
 	}
 }
 
 func TestSearchExtractTextMalformedArray(t *testing.T) {
-	if got := searchExtractText(json.RawMessage(`[broken`), false); got != "" {
+	if got, _, _ := searchExtractAll(json.RawMessage(`[broken`), false); got != "" {
 		t.Errorf("malformed array = %q; want \"\"", got)
 	}
 }
@@ -35,11 +35,11 @@ func TestSearchExtractTextToolBlocksToggle(t *testing.T) {
 		{"type":"tool_result","content":[{"type":"text","text":"r2"},{"type":"image"}]}
 	]`)
 	// Without include_tool_blocks → only "plain"
-	if got := searchExtractText(content, false); got != "plain" {
+	if got, _, _ := searchExtractAll(content, false); got != "plain" {
 		t.Errorf("default text = %q; want plain", got)
 	}
 	// With include_tool_blocks → all blocks contribute.
-	withTools := searchExtractText(content, true)
+	_, withTools, _ := searchExtractAll(content, true)
 	for _, want := range []string{"plain", "r1", "r2"} {
 		if !contains(withTools, want) {
 			t.Errorf("with tools %q missing %q", withTools, want)
@@ -57,25 +57,29 @@ func contains(s, sub string) bool {
 }
 
 func TestSearchIsOnlyToolBlocks(t *testing.T) {
-	if searchIsOnlyToolBlocks(json.RawMessage(`"bare"`)) {
+	onlyTool := func(content json.RawMessage) bool {
+		_, _, only := searchExtractAll(content, false)
+		return only
+	}
+	if onlyTool(json.RawMessage(`"bare"`)) {
 		t.Error("bare string content should be false")
 	}
-	if searchIsOnlyToolBlocks(json.RawMessage(`[malformed`)) {
+	if onlyTool(json.RawMessage(`[malformed`)) {
 		t.Error("malformed content should be false")
 	}
-	if searchIsOnlyToolBlocks(json.RawMessage(`[]`)) {
+	if onlyTool(json.RawMessage(`[]`)) {
 		t.Error("empty array should be false")
 	}
-	if !searchIsOnlyToolBlocks(json.RawMessage(`[{"type":"tool_use"},{"type":"tool_result"}]`)) {
+	if !onlyTool(json.RawMessage(`[{"type":"tool_use"},{"type":"tool_result"}]`)) {
 		t.Error("pure tool-block array should be true")
 	}
-	if searchIsOnlyToolBlocks(json.RawMessage(`[{"type":"text"},{"type":"tool_use"}]`)) {
+	if onlyTool(json.RawMessage(`[{"type":"text"},{"type":"tool_use"}]`)) {
 		t.Error("mixed with text should be false")
 	}
 }
 
 func TestSearchScanFileOpenError(t *testing.T) {
-	if got := searchScanFile("/no/such/file.jsonl", false); got != nil {
+	if got := searchScanFile("/no/such/file.jsonl", false, false); got != nil {
 		t.Errorf("missing file should return nil, got %v", got)
 	}
 }
@@ -95,7 +99,7 @@ func TestSearchScanFileSkipLadder(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	msgs := searchScanFile(path, false)
+	msgs := searchScanFile(path, false, false)
 	if len(msgs) != 2 {
 		t.Fatalf("expected 2 surviving messages, got %d (%+v)", len(msgs), msgs)
 	}
@@ -206,9 +210,9 @@ func TestSearchMakeSnippetCentersAndClips(t *testing.T) {
 func TestParseSearchTimeArgRelative(t *testing.T) {
 	now := 1_000_000.0
 	cases := []struct {
-		in     string
-		want   float64
-		ok     bool
+		in   string
+		want float64
+		ok   bool
 	}{
 		{"3d", now - 3*86400, true},
 		{"2h", now - 2*3600, true},

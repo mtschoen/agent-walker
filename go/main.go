@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"math"
 	"os"
@@ -308,13 +309,16 @@ func walkGroup(paths []string, periodCutoff, winStart float64) groupResult {
 		scanner.Buffer(buf, 4*1024*1024)
 
 		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" {
+			// scanner.Bytes() aliases the scanner buffer (no allocation); the
+			// parse consumes it before the next Scan(), so aliasing is safe.
+			// Avoids the Text()+[]byte() double copy per line.
+			line := bytes.TrimSpace(scanner.Bytes())
+			if len(line) == 0 {
 				continue
 			}
 
 			var e entry
-			if err := sonic.Unmarshal([]byte(line), &e); err != nil {
+			if err := sonic.Unmarshal(line, &e); err != nil {
 				continue
 			}
 

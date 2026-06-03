@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -154,12 +155,14 @@ func findLatestInPath(path string) (*beaconWithTimestamp, bool) {
 
 	var latest *beaconWithTimestamp
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+		// scanner.Bytes() aliases the buffer; entry.Message.Content (the only
+		// RawMessage) is consumed before the next Scan(), so aliasing is safe.
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
 			continue
 		}
 		var entry beaconEntry
-		if err := sonic.Unmarshal([]byte(line), &entry); err != nil {
+		if err := sonic.Unmarshal(line, &entry); err != nil {
 			continue
 		}
 		if entry.Message == nil || entry.Message.Role != "assistant" {
@@ -224,12 +227,14 @@ func collectSessionEventsInPath(path string) sessionEvents {
 	scanner.Buffer(buf, 4*1024*1024)
 
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+		// scanner.Bytes() aliases the buffer; entry.Message.Content (the only
+		// RawMessage) is consumed before the next Scan(), so aliasing is safe.
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
 			continue
 		}
 		var entry beaconEntry
-		if err := sonic.Unmarshal([]byte(line), &entry); err != nil {
+		if err := sonic.Unmarshal(line, &entry); err != nil {
 			continue
 		}
 		if entry.Timestamp == "" {
@@ -354,6 +359,56 @@ func parseLatestArguments(args []string) (latestArguments, error) {
 	return parsed, nil
 }
 
+// discoverLatestPaths locates the transcript(s) for a single session id by
+// walking the directory tree directly instead of compiling two filepath.Glob
+// patterns. Mirrors the glob semantics it replaces:
+//
+//	parent:   <root>/*/<session_id>.jsonl
+//	subagent: <root>/*/*/subagents/agent-<session_id>.jsonl
+//
+// The parent form is probed with a single os.Stat per slug dir rather than
+// listing each slug dir's contents the way filepath.Glob does, which is the
+// bulk of the win on a large fleet. Result order is irrelevant: the caller
+// keeps the highest-timestamp beacon.
+func discoverLatestPaths(roots []string, sessionID string) []string {
+	parentName := sessionID + ".jsonl"
+	subName := "agent-" + sessionID + ".jsonl"
+	var paths []string
+	for _, root := range roots {
+		slugEntries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, slugEntry := range slugEntries {
+			if !slugEntry.IsDir() {
+				continue
+			}
+			slugPath := filepath.Join(root, slugEntry.Name())
+			// Parent transcript: <root>/<slug>/<session_id>.jsonl
+			parent := filepath.Join(slugPath, parentName)
+			if info, err := os.Stat(parent); err == nil && !info.IsDir() {
+				paths = append(paths, parent)
+			}
+			// Subagent transcripts live one level deeper, under each session
+			// directory's subagents/ folder.
+			sessionEntries, err := os.ReadDir(slugPath)
+			if err != nil {
+				continue
+			}
+			for _, sessionEntry := range sessionEntries {
+				if !sessionEntry.IsDir() {
+					continue
+				}
+				sub := filepath.Join(slugPath, sessionEntry.Name(), "subagents", subName)
+				if info, err := os.Stat(sub); err == nil && !info.IsDir() {
+					paths = append(paths, sub)
+				}
+			}
+		}
+	}
+	return paths
+}
+
 func runBeaconsLatest(args []string) {
 	started := time.Now()
 	parsed, err := parseLatestArguments(args)
@@ -371,17 +426,7 @@ func runBeaconsLatest(args []string) {
 	}
 
 	roots := ResolveRoots(primary, parsed.extraProjectsRoots, parsed.readConfig)
-	var paths []string
-	for _, root := range roots {
-		parentPattern := filepath.Join(root, "*", parsed.sessionID+".jsonl")
-		subPattern := filepath.Join(root, "*", "*", "subagents", "agent-"+parsed.sessionID+".jsonl")
-		for _, pattern := range []string{parentPattern, subPattern} {
-			matches, err := filepath.Glob(pattern)
-			if err == nil {
-				paths = append(paths, matches...)
-			}
-		}
-	}
+	paths := discoverLatestPaths(roots, parsed.sessionID)
 
 	var best *beaconWithTimestamp
 	for _, path := range paths {

@@ -26,6 +26,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -41,16 +42,22 @@ import (
 	"github.com/bytedance/sonic"
 )
 
-// searchExtractText concatenates text blocks from an array-shaped content.
-// With include_tool_blocks, also pulls tool_use.input and tool_result.content.
-func searchExtractText(content json.RawMessage, include_tool_blocks bool) string {
+// searchExtractAll parses array/string content ONCE and returns the default
+// text (text blocks only), the tool-inclusive text (computed only when
+// includeToolBlocks is set), and whether the array is composed solely of
+// tool_use/tool_result blocks. Replaces three separate full parses of the
+// same content bytes (default text + with-tools text + only-tool-blocks
+// check). Mirrors content.rs's extract_text/is_only_tool_blocks run over a
+// single parsed Value.
+func searchExtractAll(content json.RawMessage, includeToolBlocks bool) (textDefault, textWithTools string, isOnlyToolBlocks bool) {
 	if firstNonSpaceByte(content) != '[' {
-		// Bare string content
+		// Bare string content (legacy user-prompt form): default == with-tools,
+		// never only-tool-blocks.
 		var s string
 		if err := sonic.Unmarshal(content, &s); err == nil {
-			return s
+			return s, s, false
 		}
-		return ""
+		return "", "", false
 	}
 	type block struct {
 		Type    string          `json:"type"`
@@ -60,42 +67,52 @@ func searchExtractText(content json.RawMessage, include_tool_blocks bool) string
 	}
 	var blocks []block
 	if err := sonic.Unmarshal(content, &blocks); err != nil {
-		return ""
+		return "", "", false
 	}
-	var parts []string
+	if len(blocks) == 0 {
+		return "", "", false
+	}
+	isOnlyToolBlocks = true
+	var defParts, toolParts []string
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
-			parts = append(parts, b.Text)
+			isOnlyToolBlocks = false
+			defParts = append(defParts, b.Text)
+			if includeToolBlocks {
+				toolParts = append(toolParts, b.Text)
+			}
 		case "tool_use":
-			if include_tool_blocks && len(b.Input) > 0 {
-				parts = append(parts, string(b.Input))
+			if includeToolBlocks && len(b.Input) > 0 {
+				toolParts = append(toolParts, string(b.Input))
 			}
 		case "tool_result":
-			if include_tool_blocks && len(b.Content) > 0 {
+			if includeToolBlocks && len(b.Content) > 0 {
 				if firstNonSpaceByte(b.Content) != '[' {
 					var s string
 					if err := sonic.Unmarshal(b.Content, &s); err == nil {
-						parts = append(parts, s)
+						toolParts = append(toolParts, s)
 					}
 				} else {
-					type innerBlock struct {
-						Type string `json:"type"`
-						Text string `json:"text"`
-					}
-					var inner []innerBlock
+					var inner []contentBlock
 					if err := sonic.Unmarshal(b.Content, &inner); err == nil {
 						for _, ib := range inner {
 							if ib.Type == "text" {
-								parts = append(parts, ib.Text)
+								toolParts = append(toolParts, ib.Text)
 							}
 						}
 					}
 				}
 			}
+		default:
+			isOnlyToolBlocks = false
 		}
 	}
-	return strings.Join(parts, "\n")
+	textDefault = strings.Join(defParts, "\n")
+	if includeToolBlocks {
+		textWithTools = strings.Join(toolParts, "\n")
+	}
+	return textDefault, textWithTools, isOnlyToolBlocks
 }
 
 // searchExtractQueueOpText extracts text from a type:"queue-operation" entry.
@@ -117,29 +134,6 @@ func searchExtractQueueOpText(content json.RawMessage) (string, bool) {
 	return s, true
 }
 
-// searchIsOnlyToolBlocks returns true when content is a JSON array of only tool_use/tool_result blocks.
-func searchIsOnlyToolBlocks(content json.RawMessage) bool {
-	if firstNonSpaceByte(content) != '[' {
-		return false
-	}
-	type simpleBlock struct {
-		Type string `json:"type"`
-	}
-	var blocks []simpleBlock
-	if err := sonic.Unmarshal(content, &blocks); err != nil {
-		return false
-	}
-	if len(blocks) == 0 {
-		return false
-	}
-	for _, b := range blocks {
-		if b.Type != "tool_use" && b.Type != "tool_result" {
-			return false
-		}
-	}
-	return true
-}
-
 // === Scan ===
 
 type searchMsg struct {
@@ -153,7 +147,7 @@ type searchMsg struct {
 	IsOnlyToolBlocks bool
 }
 
-func searchScanFile(path string, includeQueueOps bool) []searchMsg {
+func searchScanFile(path string, includeQueueOps, includeToolBlocks bool) []searchMsg {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil
@@ -166,94 +160,90 @@ func searchScanFile(path string, includeQueueOps bool) []searchMsg {
 	idx := 0
 	for scanner.Scan() {
 		idx++
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+		// scanner.Bytes() aliases the scanner's buffer (no allocation); every
+		// RawMessage we slice from it is consumed before the next Scan(), so the
+		// aliasing is safe. Avoids the Text()+[]byte() double copy per line.
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
 			continue
 		}
-		var root map[string]json.RawMessage
-		if err := sonic.Unmarshal([]byte(line), &root); err != nil {
+		// One typed root parse instead of a map + per-field re-parses of
+		// type/timestamp. Message/Content stay raw and are decoded lazily.
+		var root struct {
+			Type      string          `json:"type"`
+			Message   json.RawMessage `json:"message"`
+			Timestamp string          `json:"timestamp"`
+			Content   json.RawMessage `json:"content"`
+		}
+		if err := sonic.Unmarshal(line, &root); err != nil {
 			continue
 		}
 		// Queue-operation entries have no message object: the text lives in a
 		// root-level `content` string. Only indexed when --include-queue-ops is
 		// set; content-bearing enqueue/popAll surface, empty remove/dequeue are
 		// dropped by searchExtractQueueOpText. They count as role:user. Mirrors search.rs.
-		if typeRaw, ok := root["type"]; ok {
-			var typeStr string
-			if json.Unmarshal(typeRaw, &typeStr); typeStr == "queue-operation" {
-				if !includeQueueOps {
-					continue
-				}
-				qtext, ok := searchExtractQueueOpText(root["content"])
-				if !ok {
-					continue
-				}
-				var qtsStr string
-				if raw, ok := root["timestamp"]; ok {
-					json.Unmarshal(raw, &qtsStr)
-				}
-				var qts float64
-				qhasTs := false
-				if qtsStr != "" {
-					if t, ok := parseISO8601(qtsStr); ok {
-						qts = t
-						qhasTs = true
-					}
-				}
-				out = append(out, searchMsg{
-					LineNumber:       uint32(idx),
-					Timestamp:        qts,
-					HasTimestamp:     qhasTs,
-					TimestampStr:     qtsStr,
-					Role:             "user",
-					TextDefault:      qtext,
-					TextWithTools:    qtext,
-					IsOnlyToolBlocks: false,
-				})
+		if root.Type == "queue-operation" {
+			if !includeQueueOps {
 				continue
 			}
+			qtext, ok := searchExtractQueueOpText(root.Content)
+			if !ok {
+				continue
+			}
+			var qts float64
+			qhasTs := false
+			if root.Timestamp != "" {
+				if t, ok := parseISO8601(root.Timestamp); ok {
+					qts = t
+					qhasTs = true
+				}
+			}
+			out = append(out, searchMsg{
+				LineNumber:       uint32(idx),
+				Timestamp:        qts,
+				HasTimestamp:     qhasTs,
+				TimestampStr:     root.Timestamp,
+				Role:             "user",
+				TextDefault:      qtext,
+				TextWithTools:    qtext,
+				IsOnlyToolBlocks: false,
+			})
+			continue
 		}
-		msgRaw, ok := root["message"]
-		if !ok {
+		if len(root.Message) == 0 {
 			continue
 		}
 		var msg struct {
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
 		}
-		if err := sonic.Unmarshal(msgRaw, &msg); err != nil || msg.Role == "" {
+		if err := sonic.Unmarshal(root.Message, &msg); err != nil || msg.Role == "" {
 			continue
 		}
-		// Include ALL roles (user, assistant, etc.) — context needs all messages
-		// processFile will filter by role as needed
-		var tsStr string
-		if raw, ok := root["timestamp"]; ok {
-			json.Unmarshal(raw, &tsStr)
+		// Include ALL roles (user, assistant, etc.) — context needs all messages;
+		// processFile filters by role as needed.
+		if len(msg.Content) == 0 {
+			continue
 		}
 		var ts float64
 		hasTs := false
-		if tsStr != "" {
-			t, ok := parseISO8601(tsStr)
-			if ok {
+		if root.Timestamp != "" {
+			if t, ok := parseISO8601(root.Timestamp); ok {
 				ts = t
 				hasTs = true
 			}
 		}
-		content := msg.Content
-		if content == nil {
-			continue
-		}
-		sm := searchMsg{
+		textDefault, textWithTools, isOnly := searchExtractAll(msg.Content, includeToolBlocks)
+		out = append(out, searchMsg{
 			LineNumber:       uint32(idx),
 			Timestamp:        ts,
 			HasTimestamp:     hasTs,
-			TimestampStr:     tsStr,
+			TimestampStr:     root.Timestamp,
 			Role:             msg.Role,
-			TextDefault:      searchExtractText(content, false),
-			TextWithTools:    searchExtractText(content, true),
-			IsOnlyToolBlocks: searchIsOnlyToolBlocks(content),
-		}
-		out = append(out, sm)
+			TextDefault:      textDefault,
+			TextWithTools:    textWithTools,
+			IsOnlyToolBlocks: isOnly,
+		})
 	}
 	return out
 }
@@ -418,42 +408,42 @@ func searchBuildCtx(msgs []searchMsg, hitIdx int, ctxN uint32) ([]searchCtx, []s
 // === Hit ===
 
 type searchHit struct {
-	Timestamp      float64       `json:"-"`
-	TimestampStr   string        `json:"timestamp"`
-	SessionID      string        `json:"session_id"`
-	CwdSlug        string        `json:"cwd_slug"`
-	HostRoot       string        `json:"host_root"`
-	FilePath       string        `json:"file_path"`
-	LineNumber     uint32        `json:"line_number"`
-	Role           string        `json:"role"`
-	Snippet        string        `json:"snippet"`
-	MatchOffsets   [][2]uint32   `json:"match_offsets"`
-	ContextBefore  []searchCtx   `json:"context_before"`
-	ContextAfter   []searchCtx   `json:"context_after"`
+	Timestamp     float64     `json:"-"`
+	TimestampStr  string      `json:"timestamp"`
+	SessionID     string      `json:"session_id"`
+	CwdSlug       string      `json:"cwd_slug"`
+	HostRoot      string      `json:"host_root"`
+	FilePath      string      `json:"file_path"`
+	LineNumber    uint32      `json:"line_number"`
+	Role          string      `json:"role"`
+	Snippet       string      `json:"snippet"`
+	MatchOffsets  [][2]uint32 `json:"match_offsets"`
+	ContextBefore []searchCtx `json:"context_before"`
+	ContextAfter  []searchCtx `json:"context_after"`
 }
 
 // === Args ===
 
 type searchArgs struct {
-	Pattern             string
-	Regex               bool
-	CaseSensitive       bool
-	Role                string
-	Since               *float64
-	Until               *float64
-	Cwd                 string
-	AnyCwd              bool
-	Context             uint32
-	Limit               uint32
-	CountOnly           bool
-	IncludeToolBlocks   bool
-	IncludeQueueOps     bool
-	Format              string
-	SnippetChars        uint32
-	ProjectsRoot        string
-	ExtraProjectsRoots  []string
-	ReadConfig          bool
-	Now                 float64
+	Pattern            string
+	Regex              bool
+	CaseSensitive      bool
+	Role               string
+	Since              *float64
+	Until              *float64
+	Cwd                string
+	AnyCwd             bool
+	Context            uint32
+	Limit              uint32
+	CountOnly          bool
+	IncludeToolBlocks  bool
+	IncludeQueueOps    bool
+	Format             string
+	SnippetChars       uint32
+	ProjectsRoot       string
+	ExtraProjectsRoots []string
+	ReadConfig         bool
+	Now                float64
 }
 
 func parseSearchArgs(raw []string) (searchArgs, error) {
@@ -650,7 +640,7 @@ func isSearchNumeric(s string) bool {
 // === File processing ===
 
 func searchProcessFile(f searchFileInfo, args searchArgs, re *regexp.Regexp) []searchHit {
-	msgs := searchScanFile(f.Path, args.IncludeQueueOps)
+	msgs := searchScanFile(f.Path, args.IncludeQueueOps, args.IncludeToolBlocks)
 	var hits []searchHit
 
 	for idx, m := range msgs {
@@ -701,18 +691,18 @@ func searchProcessFile(f searchFileInfo, args searchArgs, re *regexp.Regexp) []s
 		}
 
 		h := searchHit{
-			Timestamp:      m.Timestamp,
-			TimestampStr:   m.TimestampStr,
-			SessionID:      f.SessionID,
-			CwdSlug:        f.Slug,
-			HostRoot:       f.HostRoot,
-			FilePath:       f.Path,
-			LineNumber:     m.LineNumber,
-			Role:           m.Role,
-			Snippet:        snippet,
-			MatchOffsets:   offsets,
-			ContextBefore:  ctxBefore,
-			ContextAfter:   ctxAfter,
+			Timestamp:     m.Timestamp,
+			TimestampStr:  m.TimestampStr,
+			SessionID:     f.SessionID,
+			CwdSlug:       f.Slug,
+			HostRoot:      f.HostRoot,
+			FilePath:      f.Path,
+			LineNumber:    m.LineNumber,
+			Role:          m.Role,
+			Snippet:       snippet,
+			MatchOffsets:  offsets,
+			ContextBefore: ctxBefore,
+			ContextAfter:  ctxAfter,
 		}
 		hits = append(hits, h)
 	}
@@ -726,18 +716,18 @@ func searchRoleMatches(filter, role string) bool {
 // === Output ===
 
 type searchHitJSON struct {
-	Type          string        `json:"type"`
-	SessionID     string        `json:"session_id"`
-	CwdSlug       string        `json:"cwd_slug"`
-	HostRoot      string        `json:"host_root"`
-	FilePath      string        `json:"file_path"`
-	LineNumber    uint32        `json:"line_number"`
-	Timestamp     string        `json:"timestamp"`
-	Role          string        `json:"role"`
-	Snippet       string        `json:"snippet"`
-	MatchOffsets  [][2]uint32   `json:"match_offsets"`
-	ContextBefore []searchCtx   `json:"context_before"`
-	ContextAfter  []searchCtx   `json:"context_after"`
+	Type          string      `json:"type"`
+	SessionID     string      `json:"session_id"`
+	CwdSlug       string      `json:"cwd_slug"`
+	HostRoot      string      `json:"host_root"`
+	FilePath      string      `json:"file_path"`
+	LineNumber    uint32      `json:"line_number"`
+	Timestamp     string      `json:"timestamp"`
+	Role          string      `json:"role"`
+	Snippet       string      `json:"snippet"`
+	MatchOffsets  [][2]uint32 `json:"match_offsets"`
+	ContextBefore []searchCtx `json:"context_before"`
+	ContextAfter  []searchCtx `json:"context_after"`
 }
 
 type searchSummaryJSON struct {
