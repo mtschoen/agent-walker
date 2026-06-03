@@ -23,10 +23,17 @@ add_executable(walker main.cpp beacons.cpp events.cpp search.cpp)
 target_link_libraries(walker PRIVATE simdjson::simdjson)
 
 if(MSVC)
+    # /GL + /LTCG = whole-program optimization (MSVC's LTO). Already enabled.
     target_compile_options(walker PRIVATE /W3 $<$<CONFIG:Release>:/O2 /GL>)
     target_link_options(walker PRIVATE $<$<CONFIG:Release>:/LTCG>)
 else()
-    target_compile_options(walker PRIVATE $<$<CONFIG:Release>:-O3>)
+    # -flto matches the MSVC /GL+/LTCG whole-program path: the GCC/Clang Release
+    # binary (Linux CI + the shipped install.sh build) was previously -O3 only,
+    # with no cross-TU inlining. -flto must be on both compile and link.
+    # Portable (not a -march=native CPU-specific flag), so the install artifact
+    # still runs anywhere.
+    target_compile_options(walker PRIVATE $<$<CONFIG:Release>:-O3 -flto>)
+    target_link_options(walker PRIVATE $<$<CONFIG:Release>:-flto>)
 endif()
 
 # Clang source-based coverage. Applied to the walker target only so vendored

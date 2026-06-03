@@ -272,14 +272,16 @@ func runEvents(rawArgs []string) {
 		return records[i].Model < records[j].Model
 	})
 
-	// json.Marshal cannot fail on eventRecord (fixed primitive/string
-	// fields, no Map[K] with non-string K, no MarshalJSON methods), so we
-	// drop the dead error branch and discard the err with `_`.
+	// A json.Encoder reuses one internal buffer across records and appends the
+	// record terminator itself, so the hot loop avoids the per-record []byte
+	// allocation that json.Marshal incurs. Output is byte-identical to
+	// `Marshal(record) + '\n'` (same HTML escaping, same float formatting).
+	// Encode cannot fail on eventRecord (fixed primitive/string fields, no
+	// MarshalJSON, write target is the bufio buffer), so the error is dropped.
 	out := bufio.NewWriter(os.Stdout)
-	for _, record := range records {
-		b, _ := json.Marshal(record)
-		out.Write(b)
-		out.WriteByte('\n')
+	enc := json.NewEncoder(out)
+	for i := range records {
+		_ = enc.Encode(&records[i])
 	}
 	out.Flush()
 }
