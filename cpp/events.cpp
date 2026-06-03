@@ -137,7 +137,9 @@ static GroupMap discover_groups(
                 if (!file_entry.is_regular_file()) continue;
                 if (path.extension() != ".jsonl") continue;
 
-                auto mtime = fs::last_write_time(path, ec);
+                // Cached entry method (see main.cpp discover_groups): avoids a
+                // per-file stat round-trip that dominated Windows discovery.
+                auto mtime = file_entry.last_write_time(ec);
                 if (!ec && file_mtime_to_unix(mtime) < earliest) continue;
 
                 std::string sid = path.stem().string();
@@ -160,7 +162,7 @@ static GroupMap discover_groups(
                     std::string fname = apath.filename().string();
                     if (fname.substr(0, 6) != "agent-") continue;
 
-                    auto mtime = fs::last_write_time(apath, ec);
+                    auto mtime = agent_entry.last_write_time(ec);
                     if (!ec && file_mtime_to_unix(mtime) < earliest) continue;
 
                     groups[group_key(slug, sid)].push_back(apath);
