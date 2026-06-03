@@ -106,6 +106,10 @@ def corpus_context(manifest: dict, corpus_dir: Path) -> dict:
         "period": int(manifest["period_seconds"]),
         "win_start": manifest["win_start_unix"],
         "session_id": manifest["beacon_session_id"],
+        # The dense beacons-latest session lives in its own root, passed only to
+        # the beacons-latest run as --extra-projects-root (older manifests
+        # without this key fall back to the main corpus root).
+        "beacon_latest_root": manifest.get("beacon_latest_root"),
         "pattern": manifest["search_pattern"],
     }
 
@@ -119,6 +123,7 @@ def live_context() -> dict:
         "period": LIVE_PERIOD,
         "win_start": now - LIVE_PERIOD + 3600,
         "session_id": None,
+        "beacon_latest_root": None,
         "pattern": None,
     }
 
@@ -144,6 +149,12 @@ def build_cmd(binary: Path, mode: str, ctx: dict) -> list:
     if mode == "beacons-history":
         return base + ["beacons-history"] + window + root_flags
     if mode == "beacons-latest":
+        # The dense session lives in a separate root so it is not a straggler for
+        # the other (full-fleet) modes; beacons-latest reaches it via an extra
+        # root while still traversing the main corpus to find it realistically.
+        extra_root = []
+        if ctx.get("beacon_latest_root"):
+            extra_root = ["--extra-projects-root", str(ctx["beacon_latest_root"])]
         return (
             base
             + [
@@ -154,6 +165,7 @@ def build_cmd(binary: Path, mode: str, ctx: dict) -> list:
                 repr(ctx["now"]),
             ]
             + root_flags
+            + extra_root
         )
     if mode == "search":
         # --count-only does the full scan + match but skips snippet/context

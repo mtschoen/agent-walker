@@ -9,6 +9,9 @@ zig/.zig-cache/
 
 # Synthetic perf corpus (shared/generate_perf_corpus.py) -- large, regenerable, never commit
 shared/corpus-perf/
+# Dense beacon stress session lives in its own root (beacons-latest only) so it
+# is not a straggler for the parallel full-fleet modes.
+shared/corpus-perf-beacons/
 
 # Coverage artifacts (shared/coverage.py)
 /coverage/

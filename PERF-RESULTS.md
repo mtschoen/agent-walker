@@ -38,26 +38,41 @@ seeded token (search). A `manifest.json` pins the seed, window, file counts,
 a sample beacon session-id, and the search pattern so the bench is
 self-describing. The corpus is **never committed** (`.gitignore`).
 
-**Dense beacon session (added 2026-06-03).** The generator also emits one
-large beacon-packed transcript (`perf-beacon-stress/sid-beacon-stress.jsonl`,
-~6 MB / ~1500 begin->report*->end lifecycles, `--beacon-session-mb`) and pins
-it as the `beacons-latest` sample. Without it, `beacons-latest` read a single
-~7 KB transcript and timed almost pure directory traversal + process startup,
-masking any parse work. The dense session sits on a compressed clock placed
-*before* the `beacons-history` window, so it adds parse volume to history
-without polluting its `bias_factor` (its seconds-apart begin/end gaps would
-otherwise crush the median). `--beacon-rate` (default 0.18) tunes how many
-*ordinary* sessions also carry a lifecycle.
+**Dense beacon session, decoupled into its own root (revised 2026-06-03).** The
+generator emits one large beacon-packed transcript
+(`corpus-perf-beacons/perf-beacon-stress/sid-beacon-stress.jsonl`, 48 MB /
+~11.7k begin->report*->end lifecycles, `--beacon-session-mb`, default 48) and
+pins it as the `beacons-latest` sample. Without it, `beacons-latest` read a
+single ~7 KB transcript and timed almost pure directory traversal + process
+startup, masking any parse work.
+
+Crucially the dense session lives in a **separate root** (`corpus-perf-beacons/`,
+a sibling of the main corpus), passed to the walker **only** for the
+`beacons-latest` run via `--extra-projects-root`. Earlier it sat inside the main
+corpus, which made it a single-file straggler for every parallel full-fleet mode
+(`cost`/`events`/`search`/`beacons-history` parse *every* file, so one worker
+chewing a 20-48 MB transcript dominated the slow-parse impls) and, once grown,
+leaked its seconds-apart begin/end pairs into the `beacons-history` window and
+crushed `bias_factor` (11.9 -> 0.16 at 32 MB). In its own root none of that
+happens: only `beacons-latest` parses it, so it can be sized freely (48 MB lifts
+**all four impls above the noisy sub-100ms range** - cpp 108, zig 169, rust 237,
+go 286) without moving any other mode's numbers, and `beacons-history`'s bias
+stays driven purely by the realistic ordinary sessions. It is also generated
+**after** the main fill loop, so `--beacon-session-mb` no longer perturbs the
+main corpus RNG stream. `--beacon-rate` (default 0.18) tunes how many *ordinary*
+sessions carry a lifecycle (this is what gives `beacons-history` its work).
 
 ### Environment
 
 - Host: chonkers (Windows 11, 32 logical cores). Native impls cap their
   worker pool at `min(8, cores)`, so this is an 8-way-parallel measurement.
-- Corpus: 3050 files (2536 parents + 514 subagents), 150 MB, seed 1234,
-  including the ~6 MB dense beacon stress session (1476 lifecycles). (The
-  pre-2026-06-03 corpus was 3153 files without the dense session; adding it
-  shifts the RNG stream, so absolute counts and the `bias_factor` differ from
-  older runs even at the same seed.)
+- Corpus: main corpus 3153 files (2653 parents + 500 subagents), 150 MB of
+  purely ordinary sessions, seed 1234; plus a separate `corpus-perf-beacons/`
+  root holding only the 48 MB dense beacon session (parsed only by
+  `beacons-latest`). (Earlier the dense session lived inside the main corpus, so
+  the main corpus was 150 MB *including* it; moving it out and generating it
+  after the fill loop changed the file count and `bias_factor` once - both are
+  now independent of `--beacon-session-mb`.)
 - C++/Rust/Go built Release; **Zig must be built `-Doptimize=ReleaseFast`**
   (now the default for a bare `zig build` - see below). All pass
   `shared/conformance.py`.
@@ -85,24 +100,30 @@ but that is the Debug-build artifact, not a real characteristic of the impl.
 
 ## After optimization
 
-Current full-run state (medians of 5 interleaved runs on the **dense-beacon
+Current full-run state (medians of 7 interleaved runs on the **decoupled-beacon
 corpus**, 2026-06-03), with **all four impls built optimized** (Zig
 ReleaseFast). Bold = fastest in that mode:
 
 | mode             | cpp     | rust  | go    | zig      | python |
 | ---------------- | ------- | ----- | ----- | -------- | ------ |
-| cost             | **127** | 252   | 247   | 161      | 1035   |
-| events           | 410     | 439   | 448   | **398**  | n/a    |
-| beacons-history  | **119** | 193   | 237   | 166      | n/a    |
-| beacons-latest   | **38**  | 46    | 63    | 39       | n/a    |
-| search           | 133     | 144   | 213   | **108**  | n/a    |
+| cost             | **164** | 326   | 336   | 196      | ~1100  |
+| events           | 470     | 492   | 557   | **435**  | n/a    |
+| beacons-history  | **128** | 241   | 299   | 207      | n/a    |
+| beacons-latest   | **108** | 237   | 286   | 169      | n/a    |
+| search           | 153     | 162   | 237   | **120**  | n/a    |
 
 (Rust includes `panic = "abort"`; C++ cost includes the discovery fix; C++
 beacons include the walker buffer/parser reuse; Go + Rust got a dedicated pass
-2026-06-03 - see "Go + Rust pass" below. Numbers are on the dense-beacon
-corpus; the pre-2026-06-03 table lives in git history. Absolute ms shifted
-slightly with the RNG-stream change from adding the dense session, but the
-relative ordering held.)
+2026-06-03 - see "Go + Rust pass" below. **These absolutes are NOT comparable to
+the pre-2026-06-03 board**: the dense beacon session was moved out of the main
+corpus into its own root - see "Beacon corpus" above - so the main corpus is now
+150 MB of *purely ordinary* sessions instead of 150 MB *including* a 6 MB dense
+file. That extra ~6 MB of ordinary content (plus a fresh RNG instance) lifts the
+cost/events/search/beacons-history absolutes a notch for every impl; the Go+Rust
+win deltas below were measured pre-decouple. The headline change here is
+**beacons-latest: all four impls now clear 100 ms** (was a noisy 38-63 ms) via
+the 48 MB decoupled sample - cpp 38->108, zig 39->169, rust 46->237, go 63->286 -
+while `beacons-history` bias stays realistic (no straggler, no pollution).)
 
 The Go + Rust pass closed most of Go's gap: every Go mode dropped 20-60%
 (cost 361->247 now ties Rust, beacons-latest 171->63, search 366->213,

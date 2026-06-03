@@ -143,10 +143,15 @@ only). The corpus is deterministic (seeded), ~150 MB by default
 `generate_perf_corpus.py` writes a `manifest.json` (seed, pinned now/window,
 file counts, the pinned beacon session-id, the search pattern) that `bench.py`
 reads so every mode does real work against a self-describing fixture. It also
-pins a dedicated **dense beacon session** (`--beacon-session-mb`, default 6) as
+pins a dedicated **dense beacon session** (`--beacon-session-mb`, default 48) as
 the `beacons-latest` sample so that mode parses a real multi-MB transcript
-instead of timing pure directory traversal; the session sits before the
-`beacons-history` window so it adds parse volume without skewing `bias_factor`.
+instead of timing pure directory traversal. The dense session lives in a
+**separate root** (`corpus-perf-beacons/`) passed only to the `beacons-latest`
+run via `--extra-projects-root`, so it is not a straggler for the parallel
+full-fleet modes and cannot pollute `beacons-history`'s `bias_factor`; it is
+sized (48 MB) to keep `beacons-latest` above the noisy sub-100ms range for all
+four impls and generated after the main fill loop so the knob does not perturb
+the other modes' corpus.
 `--beacon-rate` (default 0.18) tunes how many ordinary sessions also carry a
 lifecycle. See `PERF-RESULTS.md` for the rationale and the beacon-walker
 optimization it enabled.

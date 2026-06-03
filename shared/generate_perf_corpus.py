@@ -357,31 +357,12 @@ def generate(
     seed: int,
     *,
     beacon_rate: float = 0.18,
-    beacon_session_bytes: int = 6 * 1024 * 1024,
+    beacon_session_bytes: int = 48 * 1024 * 1024,
 ) -> dict:
     rng = random.Random(seed)
     parent_count = subagent_count = total_bytes = 0
     beacon_session_ids: list[str] = []
     slug_idx = 0
-
-    # The dense beacon stress session. Generated first (so the pinned id is
-    # stable regardless of where the main fill loop stops) and counted toward
-    # the byte budget so the corpus total stays ~target_mb. It lives in its
-    # own slug as a parent transcript; beacons-latest pins it via the manifest.
-    dense_sid = "sid-beacon-stress"
-    # Start a few days BEFORE the history window (win_start = NOW - SPAN - 1d)
-    # so this session's compressed-clock lifecycles add parse volume to
-    # beacons-history without polluting its bias_factor. beacons-latest
-    # ignores the window and parses the whole file regardless.
-    dense_start = NOW_UNIX - (SPAN_SECONDS + 86400) - 3 * 86400
-    dense_lines, dense_lifecycles = emit_dense_beacon_session(
-        rng, dense_start, beacon_session_bytes, dense_sid
-    )
-    dense_bytes = write_jsonl(
-        out_dir / "perf-beacon-stress" / f"{dense_sid}.jsonl", dense_lines
-    )
-    total_bytes += dense_bytes
-    parent_count += 1
 
     while total_bytes < target_bytes:
         slug = f"perf-project-{slug_idx:03d}"
@@ -415,8 +396,35 @@ def generate(
                 subagent_count += 1
         slug_idx += 1
 
-    # Pin the dense beacon stress session as the beacons-latest sample so
-    # that mode parses a substantial file rather than a ~7 KB transcript.
+    # The dense beacon stress session for beacons-latest. It lives in its OWN
+    # root (a sibling dir), NOT in the main corpus, and is passed to the walker
+    # only via --extra-projects-root for the beacons-latest run. Keeping it out
+    # of the main corpus means:
+    #   - it is not a single-file straggler for the parallel full-fleet modes
+    #     (cost/events/search/beacons-history parse every file in the main root;
+    #     a 20-50 MB file would dominate the slow-parse impls);
+    #   - it cannot pollute beacons-history's bias_factor (the mode never sees
+    #     it), so its begin/end timing is irrelevant and placement is cosmetic;
+    #   - it can be sized freely to lift beacons-latest out of the noisy
+    #     sub-100ms range WITHOUT moving any other mode's numbers.
+    # Generated AFTER the main fill loop so the --beacon-session-mb knob does not
+    # perturb the main corpus RNG stream (the other modes' fixtures stay
+    # identical as the dense size changes). The pinned id is a constant string,
+    # so ordering does not affect it.
+    dense_sid = "sid-beacon-stress"
+    beacon_root = out_dir.with_name(out_dir.name + "-beacons")
+    if beacon_root.exists():
+        shutil.rmtree(beacon_root)  # sibling root isn't covered by main()'s wipe
+    # Cosmetic placement: a recent "current session" ending shortly before NOW
+    # (drives only the age_seconds field of beacons-latest output).
+    dense_start = NOW_UNIX - (beacon_session_bytes * 0.05) - 3600
+    dense_lines, dense_lifecycles = emit_dense_beacon_session(
+        rng, dense_start, beacon_session_bytes, dense_sid
+    )
+    dense_bytes = write_jsonl(
+        beacon_root / "perf-beacon-stress" / f"{dense_sid}.jsonl", dense_lines
+    )
+
     manifest = {
         "seed": seed,
         "now_unix": NOW_UNIX,
@@ -426,13 +434,16 @@ def generate(
         # Window spans the whole corpus too, so the cost window pass and the
         # beacons-history pairing both do full work (begin/end pairs land in-window).
         "win_start_unix": NOW_UNIX - (SPAN_SECONDS + 86400),
-        "slug_count": slug_idx + 1,  # +1 for the perf-beacon-stress slug
+        "slug_count": slug_idx,  # dense beacon session lives in a separate root
         "parent_count": parent_count,
         "subagent_count": subagent_count,
         "file_count": parent_count + subagent_count,
         "total_bytes": total_bytes,
         "beacon_rate": beacon_rate,
         "beacon_session_id": dense_sid,
+        # Separate root holding ONLY the dense session; beacons-latest is run
+        # with this as --extra-projects-root so no other mode parses it.
+        "beacon_latest_root": str(beacon_root),
         "beacon_session_bytes": dense_bytes,
         "beacon_session_lifecycles": dense_lifecycles,
         # Count of ordinary sessions that also carry a beacon lifecycle (the
@@ -466,10 +477,11 @@ def main() -> None:
     parser.add_argument(
         "--beacon-session-mb",
         type=float,
-        default=6.0,
+        default=48.0,
         help="Size of the dense beacon stress session pinned for "
-        "beacons-latest (default: 6). This is the lever that keeps "
-        "beacons-latest from being startup/traversal-bound.",
+        "beacons-latest (default: 48). It lives in a SEPARATE root parsed only "
+        "by beacons-latest, so this lever lifts that mode above the noisy "
+        "sub-100ms range without affecting any other mode's numbers.",
     )
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument(
