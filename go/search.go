@@ -33,6 +33,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
@@ -637,9 +638,112 @@ func isSearchNumeric(s string) bool {
 	return true
 }
 
+// === Matching ===
+
+// searchMatcher wraps the compiled regex with an optional fast pre-filter for
+// plain ASCII literal patterns. Go's regexp runs its backtracking engine (with
+// per-rune unicode.SimpleFold for the default case-insensitive search) at every
+// position of every message's text - the dominant cost when scanning a fleet
+// for a rare token. For a literal pattern the pre-filter answers "could this
+// text contain a match?" with a cheap byte scan and skips the regex on the
+// common no-match case.
+type searchMatcher struct {
+	re           *regexp.Regexp
+	literalLower []byte // non-nil => ASCII-literal fast path enabled
+}
+
+func newSearchMatcher(re *regexp.Regexp, args searchArgs) searchMatcher {
+	m := searchMatcher{re: re}
+	// Fast path only for a literal (non --regex), non-empty, pure-ASCII pattern.
+	if !args.Regex && args.Pattern != "" && isASCIIString(args.Pattern) {
+		m.literalLower = asciiLowerBytes(args.Pattern)
+	}
+	return m
+}
+
+// findAll returns every match [start,end) pair in text. When the ASCII-literal
+// fast path is active it pre-screens text: pure-ASCII text with no
+// case-folded occurrence cannot match (over ASCII text the default (?i)
+// behavior reduces to ASCII case-folding), so the regex is skipped. Any text
+// containing a non-ASCII byte falls back to the regex, so full Unicode
+// case-folding semantics are preserved exactly.
+func (m searchMatcher) findAll(text string) [][]int {
+	if m.literalLower != nil {
+		asciiOnly, found := asciiScanFold(text, m.literalLower)
+		if asciiOnly && !found {
+			return nil
+		}
+	}
+	return m.re.FindAllStringIndex(text, -1)
+}
+
+func isASCIIString(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiLowerBytes(s string) []byte {
+	b := make([]byte, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b[i] = c
+	}
+	return b
+}
+
+// asciiScanFold scans text once. It returns asciiOnly=false (and found=false)
+// the moment it sees a non-ASCII byte, signaling the caller to run the regex.
+// For pure-ASCII text it reports whether lowerPat (already ASCII-lowercased)
+// occurs under ASCII case-folding.
+func asciiScanFold(text string, lowerPat []byte) (asciiOnly, found bool) {
+	n, m := len(text), len(lowerPat)
+	for i := 0; i < n; i++ {
+		if text[i] >= 0x80 {
+			return false, false
+		}
+	}
+	if m == 0 {
+		return true, true
+	}
+	if m > n {
+		return true, false
+	}
+	p0 := lowerPat[0]
+	for i := 0; i+m <= n; i++ {
+		c := text[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != p0 {
+			continue
+		}
+		k := 1
+		for ; k < m; k++ {
+			d := text[i+k]
+			if d >= 'A' && d <= 'Z' {
+				d += 'a' - 'A'
+			}
+			if d != lowerPat[k] {
+				break
+			}
+		}
+		if k == m {
+			return true, true
+		}
+	}
+	return true, false
+}
+
 // === File processing ===
 
-func searchProcessFile(f searchFileInfo, args searchArgs, re *regexp.Regexp) []searchHit {
+func searchProcessFile(f searchFileInfo, args searchArgs, matcher searchMatcher) []searchHit {
 	msgs := searchScanFile(f.Path, args.IncludeQueueOps, args.IncludeToolBlocks)
 	var hits []searchHit
 
@@ -668,7 +772,7 @@ func searchProcessFile(f searchFileInfo, args searchArgs, re *regexp.Regexp) []s
 			continue
 		}
 
-		matches := re.FindAllStringIndex(text, -1)
+		matches := matcher.findAll(text)
 		if len(matches) == 0 {
 			continue
 		}
@@ -676,7 +780,7 @@ func searchProcessFile(f searchFileInfo, args searchArgs, re *regexp.Regexp) []s
 		firstMatch := matches[0]
 		snippet := searchMakeSnippet(text, [2]uint32{uint32(firstMatch[0]), uint32(firstMatch[1])}, args.SnippetChars)
 
-		snippetMatches := re.FindAllStringIndex(snippet, -1)
+		snippetMatches := matcher.re.FindAllStringIndex(snippet, -1)
 		var offsets [][2]uint32
 		for _, m2 := range snippetMatches {
 			offsets = append(offsets, [2]uint32{uint32(m2[0]), uint32(m2[1])})
@@ -765,6 +869,15 @@ func searchTruncateStr(s string, max int) string {
 
 func runSearch(argv []string) {
 	started := time.Now()
+
+	// Opt-in CPU profile for hotspot analysis (mirrors C++'s WALKER_PROFILE
+	// convention). Off unless WALKER_CPUPROFILE names an output path.
+	if profPath := os.Getenv("WALKER_CPUPROFILE"); profPath != "" {
+		if f, err := os.Create(profPath); err == nil {
+			_ = pprof.StartCPUProfile(f)
+			defer pprof.StopCPUProfile()
+		}
+	}
 	args, err := parseSearchArgs(argv)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "walker: search: %v\n", err)
@@ -786,6 +899,7 @@ func runSearch(argv []string) {
 		fmt.Fprintf(os.Stderr, "walker: search: bad regex: %v\n", err)
 		os.Exit(2)
 	}
+	matcher := newSearchMatcher(re, args)
 
 	// Resolve roots (primary + CLI extras + config extras).
 	roots := ResolveRoots(args.ProjectsRoot, args.ExtraProjectsRoots, args.ReadConfig)
@@ -823,7 +937,7 @@ func runSearch(argv []string) {
 			defer wg.Done()
 			local := perWorkerHits[tid][:0]
 			for f := range work {
-				hs := searchProcessFile(f, args, re)
+				hs := searchProcessFile(f, args, matcher)
 				if len(hs) > 0 {
 					local = append(local, hs...)
 				}

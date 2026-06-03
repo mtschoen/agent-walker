@@ -369,6 +369,35 @@ func TestParseSearchArgsHappy(t *testing.T) {
 	}
 }
 
+// TestSearchMatcherFastPathParity proves the ASCII-literal pre-filter returns
+// exactly what the underlying regex would, including the case it must NOT
+// short-circuit: non-ASCII text whose Unicode case-fold matches the pattern.
+func TestSearchMatcherFastPathParity(t *testing.T) {
+	build := func(pat string) searchMatcher {
+		re := regexp.MustCompile("(?i)" + regexp.QuoteMeta(pat))
+		return newSearchMatcher(re, searchArgs{Pattern: pat})
+	}
+	// Pure-ASCII no-match → pre-filter skips the regex, returns nil.
+	if got := build("zebra").findAll("nothing to see here"); got != nil {
+		t.Errorf("ascii no-match: got %v; want nil", got)
+	}
+	// Pure-ASCII case-insensitive match still found via the regex.
+	if got := build("zebra").findAll("a ZeBrA walks by"); len(got) != 1 {
+		t.Errorf("ascii match: got %v; want 1 match", got)
+	}
+	// U+212A KELVIN SIGN folds to 'k' under (?i). The text is non-ASCII, so the
+	// fast path MUST defer to the regex; the matcher must agree with it exactly.
+	kelvinText := "Kelvin"
+	got := build("k").findAll(kelvinText)
+	want := regexp.MustCompile("(?i)k").FindAllStringIndex(kelvinText, -1)
+	if len(want) == 0 {
+		t.Fatal("precondition: (?i)k should fold-match the Kelvin sign")
+	}
+	if len(got) != len(want) {
+		t.Errorf("kelvin fold: matcher=%v; regex=%v (must agree)", got, want)
+	}
+}
+
 // TestSearchProcessFileMatching wires scan→regex→snippet end-to-end on a
 // fixture that triggers the role-filter, only-tool-blocks, time-filter,
 // and empty-text continue branches.
@@ -390,7 +419,7 @@ func TestSearchProcessFileMatching(t *testing.T) {
 	re := regexp.MustCompile("hello")
 	hits := searchProcessFile(
 		searchFileInfo{Path: path, Slug: "p", SessionID: "s", HostRoot: "/r"},
-		args, re,
+		args, newSearchMatcher(re, args),
 	)
 	// The tool_result-only entry is filtered (only-tool-blocks); the other two match.
 	if len(hits) != 2 {
