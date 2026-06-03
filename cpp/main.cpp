@@ -465,6 +465,11 @@ static int run_cost(const std::vector<std::string>& argv) {
 // ---------------------------------------------------------------------------
 
 int main(int argc, char* argv[]) {
+    // Decouple std::cout from C stdio: the default sync makes every operator<<
+    // a synchronized stdio call, which dominated the high-volume events emit.
+    // The buffered emit paths write via std::fwrite, so they stay consistent.
+    std::ios_base::sync_with_stdio(false);
+
     std::vector<std::string> raw;
     raw.reserve(argc > 1 ? argc - 1 : 0);
     for (int i = 1; i < argc; ++i) raw.emplace_back(argv[i]);

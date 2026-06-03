@@ -7,6 +7,9 @@ zig/zig-out/
 zig/zig-cache/
 zig/.zig-cache/
 
+# Synthetic perf corpus (shared/generate_perf_corpus.py) -- large, regenerable, never commit
+shared/corpus-perf/
+
 # Coverage artifacts (shared/coverage.py)
 /coverage/
 cpp/build-cov/

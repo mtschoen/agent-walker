@@ -277,12 +277,18 @@ pub(crate) fn run(raw: &[String]) -> i32 {
 /// branch. Broken-pipe writes are silently absorbed: `walker events | head`
 /// is a normal usage pattern, not an error.
 fn emit_records<W: Write>(out: &mut W, records: &[EventRecord]) {
+    // Serialize every record into one buffer, then write it in a single call.
+    // A StdoutLock is unbuffered, so the previous per-record writeln! issued one
+    // syscall per line (233k+ for a weekly fleet), which dominated events-mode
+    // wall time. to_writer appends into the Vec without a per-record allocation.
+    let mut buf: Vec<u8> = Vec::with_capacity(records.len() * 128);
     for record in records {
-        let line = serde_json::to_string(record).expect("EventRecord serializes");
-        if writeln!(out, "{line}").is_err() {
-            break;
-        }
+        serde_json::to_writer(&mut buf, record).expect("EventRecord serializes");
+        buf.push(b'\n');
     }
+    // One write_all: a broken pipe (`walker events | head`) surfaces as a single
+    // failed attempt, silently absorbed — matching the prior break-on-error.
+    let _ = out.write_all(&buf);
 }
 
 #[cfg(test)]

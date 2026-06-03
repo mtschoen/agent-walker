@@ -12,7 +12,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <charconv>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -336,7 +339,25 @@ static std::vector<EventRecord> walk_group_events(
 // Entry point
 // ---------------------------------------------------------------------------
 
+// Phase timers for WALKER_PROFILE-driven profiling: prints per-phase wall-clock
+// to stderr (discover / walk / sort / emit) so the events hotspot is visible.
+// Off unless the env var is set; near-zero overhead in production.
+namespace {
+struct PhaseTimer {
+    bool enabled = std::getenv("WALKER_PROFILE") != nullptr;
+    std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+    void mark(const char* phase) {
+        if (!enabled) return;
+        auto now = std::chrono::steady_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(now - last).count();
+        std::cerr << "walker-profile events " << phase << ": " << ms << " ms\n";
+        last = now;
+    }
+};
+}  // namespace
+
 int run(const std::vector<std::string>& argv) {
+    PhaseTimer timer;
     Args args = parse_args(argv);
 
     double now_unix = args.now_unix.value_or(walker::current_unix());
@@ -360,6 +381,7 @@ int run(const std::vector<std::string>& argv) {
     }
 
     GroupMap groups = discover_groups(roots, cutoff);
+    timer.mark("discover");
 
     // Decompose group map into a vector of (slug, session_id, paths) tuples
     // for parallel dispatch.
@@ -419,6 +441,7 @@ int run(const std::vector<std::string>& argv) {
                                std::make_move_iterator(v.end()));
         }
     }
+    timer.mark("walk+merge");
 
     // Sort for deterministic output: (ts, session_id, model) — matches SPEC
     // §events §Ordering and the conformance harness's sort key.
@@ -428,20 +451,42 @@ int run(const std::vector<std::string>& argv) {
                   if (a.session_id != b.session_id) return a.session_id < b.session_id;
                   return a.model < b.model;
               });
+    timer.mark("sort");
 
     // Emit NDJSON — one line per record. Field order: ts, usd, model, session_id, slug
-    // per SPEC §events mandate.
+    // per SPEC §events mandate. Build the whole payload in one buffer and write it
+    // with a single fwrite: per-record std::cout/operator<< writes (re-applying the
+    // fixed/precision manipulators each field) dominated events-mode wall time.
+    std::string out;
+    out.reserve(all_records.size() * 128);
+    char num[64];
+    auto append_fixed6 = [&](double value) {
+        // std::to_chars(fixed, 6) is markedly faster than snprintf("%.6f") and
+        // produces the identical fixed-6-decimal form for these magnitudes.
+        auto [ptr, ec] = std::to_chars(num, num + sizeof(num), value,
+                                       std::chars_format::fixed, 6);
+        if (ec == std::errc()) {
+            out.append(num, static_cast<size_t>(ptr - num));
+        } else {  // defensive fallback; not expected for finite doubles
+            int n = std::snprintf(num, sizeof(num), "%.6f", value);
+            if (n > 0) out.append(num, static_cast<size_t>(n));
+        }
+    };
     for (const auto& r : all_records) {
-        std::cout
-            << "{\"ts\":" << std::fixed << std::setprecision(6) << r.ts
-            << ",\"usd\":" << r.usd
-            << ",\"model\":"; write_json_string(std::cout, r.model);
-        std::cout
-            << ",\"session_id\":"; write_json_string(std::cout, r.session_id);
-        std::cout
-            << ",\"slug\":"; write_json_string(std::cout, r.slug);
-        std::cout << "}\n";
+        out += "{\"ts\":";
+        append_fixed6(r.ts);
+        out += ",\"usd\":";
+        append_fixed6(r.usd);
+        out += ",\"model\":";
+        write_json_string(out, r.model);
+        out += ",\"session_id\":";
+        write_json_string(out, r.session_id);
+        out += ",\"slug\":";
+        write_json_string(out, r.slug);
+        out += "}\n";
     }
+    std::fwrite(out.data(), 1, out.size(), stdout);
+    timer.mark("emit");
 
     return 0;
 }
