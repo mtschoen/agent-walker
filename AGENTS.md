@@ -231,10 +231,17 @@ It also registers the `search` MCP server (`mcp/server.py`) via
   `.mcp.json`.
 
 Registration is additive: a failure (or a missing `claude` CLI) warns
-but does not fail the binary install. The installer also warns if the
-`mcp` SDK isn't importable by `python` (register succeeds, but the
-server won't start until `python -m pip install mcp`). Re-running is
-idempotent: the prior registration in that scope is removed first.
+but does not fail the binary install. The installer manages a dedicated
+venv at `mcp/.venv` (gitignored) to host the `mcp` SDK: it picks the
+newest Python ≥3.10 available (`python3.13` → `3.12` → `3.11` → `3.10`,
+falling back to `python3`/`python`; on Windows uses the `py` launcher),
+creates the venv if missing, runs `pip install --upgrade mcp` into it
+(idempotent), and registers the server with the venv's interpreter as an
+absolute path. This sidesteps both PEP 668 (modern macOS/Linux pythons
+refuse system-wide pip) and the trap that bare `python` may not exist on
+PATH for processes Claude Code spawns (shell aliases don't propagate).
+Re-running is idempotent: the prior registration in that scope is
+removed first, and an existing venv is reused.
 
 ## Remotes
 
