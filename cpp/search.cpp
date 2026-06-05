@@ -226,37 +226,76 @@ struct DiscoveredFile {
     std::string host_root;  // the effective root this file was discovered under
 };
 
+// Returns true when `path`'s mtime is at or after `since` (or when mtime can't
+// be read — match the parent-file behavior of erring on the side of inclusion).
+static bool mtimeAtOrAfter(const fs::directory_entry& ent, double since) {
+    std::error_code ec;
+    auto mt = ent.last_write_time(ec);
+    if (ec) return true;
+    auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+        mt - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+    return std::chrono::duration<double>(sctp.time_since_epoch()).count() >= since;
+}
+
 static std::vector<DiscoveredFile> discoverFiles(
     const fs::path& root,
     std::optional<double> since,
     const std::string* cwd_slug)
 {
     std::vector<DiscoveredFile> out;
-    std::error_code ec;
-    if (!fs::is_directory(root, ec)) return out;
-    for (auto const& slugent : fs::directory_iterator(root, ec)) {
-        if (ec) break;
+    std::error_code root_ec;
+    if (!fs::is_directory(root, root_ec)) return out;
+    // A single shared error_code accumulates state from per-entry stat calls,
+    // so each iterator construction takes its OWN error_code — otherwise an
+    // `ec`-polluted previous loop would make the next `if (ec) break;` exit
+    // immediately and silently truncate discovery to one slug.
+    std::error_code slug_ec;
+    for (auto const& slugent : fs::directory_iterator(root, slug_ec)) {
+        std::error_code ec;
         if (!slugent.is_directory(ec)) continue;
         std::string slug = slugent.path().filename().string();
         if (cwd_slug && slug != *cwd_slug) continue;
-        for (auto const& fent : fs::directory_iterator(slugent.path(), ec)) {
-            if (ec) break;
-            if (!fent.is_regular_file(ec)) continue;
+        // Parents: <root>/<slug>/<session_id>.jsonl
+        std::error_code parents_ec;
+        for (auto const& fent : fs::directory_iterator(slugent.path(), parents_ec)) {
+            std::error_code fec;
+            if (!fent.is_regular_file(fec)) continue;
             if (fent.path().extension() != ".jsonl") continue;
-            if (since) {
-                auto mt = fent.last_write_time(ec);
-                if (!ec) {
-                    auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
-                        mt - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
-                    if (std::chrono::duration<double>(sctp.time_since_epoch()).count() < *since) continue;
-                }
-            }
+            if (since && !mtimeAtOrAfter(fent, *since)) continue;
             DiscoveredFile df;
             df.path = fent.path();
             df.slug = slug;
             df.session_id = fent.path().stem().string();
             df.host_root = root.string();
             out.push_back(std::move(df));
+        }
+        // Subagents: <root>/<slug>/<session_id>/subagents/agent-*.jsonl.
+        // session_id is the grandparent dir (the parent session) so subagent
+        // hits group under the same session count as their parent. C++-only —
+        // SPEC/Rust/Go/Zig search modes don't yet walk subagents.
+        std::error_code sess_ec;
+        for (auto const& sessent : fs::directory_iterator(slugent.path(), sess_ec)) {
+            std::error_code dec;
+            if (!sessent.is_directory(dec)) continue;
+            std::string sid = sessent.path().filename().string();
+            std::error_code sdec;
+            fs::path subagents_dir = sessent.path() / "subagents";
+            if (!fs::is_directory(subagents_dir, sdec)) continue;
+            std::error_code agent_ec;
+            for (auto const& aent : fs::directory_iterator(subagents_dir, agent_ec)) {
+                std::error_code aec;
+                if (!aent.is_regular_file(aec)) continue;
+                if (aent.path().extension() != ".jsonl") continue;
+                std::string fname = aent.path().filename().string();
+                if (fname.substr(0, 6) != "agent-") continue;
+                if (since && !mtimeAtOrAfter(aent, *since)) continue;
+                DiscoveredFile df;
+                df.path = aent.path();
+                df.slug = slug;
+                df.session_id = sid;
+                df.host_root = root.string();
+                out.push_back(std::move(df));
+            }
         }
     }
     return out;
