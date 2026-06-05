@@ -36,4 +36,7 @@ Thumbs.db
 __pycache__/
 *.pyc
 
+# MCP server venv (created by install.sh / install.bat to host the `mcp` SDK)
+mcp/.venv/
+
 .maintenance.json

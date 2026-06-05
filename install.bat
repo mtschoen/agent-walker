@@ -76,28 +76,41 @@ exit /b 0
 
 :register_mcp
 REM Additive: a registration failure warns but does not fail the binary install.
+REM The server runs out of a dedicated venv at mcp\.venv to host the `mcp` SDK,
+REM so the registration doesn't depend on whatever `python` happens to be on PATH.
+set "SERVER_PATH=%SCRIPT_DIR%mcp\server.py"
+set "VENV_DIR=%SCRIPT_DIR%mcp\.venv"
+set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
+
 where claude >nul 2>&1
 if errorlevel 1 (
     echo.
     echo Note: 'claude' CLI not on PATH; skipped MCP server registration.
     echo Register later with:
-    echo   claude mcp add claude-walker -s user -- python "%SCRIPT_DIR%mcp\server.py"
+    echo   claude mcp add claude-walker -s user -- "%VENV_PY%" "%SERVER_PATH%"
     goto :eof
 )
-REM Warn (don't fail) if the MCP SDK isn't importable by the interpreter the
-REM server will launch under -- registration still lands; the server just won't
-REM start until `pip install mcp` runs.
-python -c "import mcp.server.fastmcp" >nul 2>&1
-if errorlevel 1 (
-    echo.
-    echo Note: the 'mcp' SDK isn't importable by 'python'. The server is registered
-    echo but won't start until you run: python -m pip install mcp
+
+call :ensure_venv
+set "VENV_READY=!errorlevel!"
+if "!VENV_READY!"=="0" (
+    REM Idempotent: pip install is fast when the wheel is already cached.
+    "%VENV_PY%" -m pip install --quiet --upgrade mcp
+    if errorlevel 1 (
+        echo warning: failed to install 'mcp' SDK into %VENV_DIR%
+        set "VENV_READY=1"
+    )
 )
-set "SERVER_PATH=%SCRIPT_DIR%mcp\server.py"
+if not "!VENV_READY!"=="0" (
+    echo.
+    echo Note: MCP server venv isn't ready. Registration will still land, but the
+    echo server won't start until the venv exists and has the 'mcp' SDK installed.
+)
+
 if /I "%MCP_SCOPE%"=="local" (
     pushd "%PROJECT_DIR%"
     claude mcp remove claude-walker -s local >nul 2>&1
-    claude mcp add claude-walker -s local -- python "%SERVER_PATH%"
+    claude mcp add claude-walker -s local -- "%VENV_PY%" "%SERVER_PATH%"
     set "MCP_RC=!errorlevel!"
     popd
     if not "!MCP_RC!"=="0" (
@@ -107,7 +120,7 @@ if /I "%MCP_SCOPE%"=="local" (
     )
 ) else (
     claude mcp remove claude-walker -s user >nul 2>&1
-    claude mcp add claude-walker -s user -- python "%SERVER_PATH%"
+    claude mcp add claude-walker -s user -- "%VENV_PY%" "%SERVER_PATH%"
     if errorlevel 1 (
         echo warning: MCP registration ^(user scope^) failed
     ) else (
@@ -115,6 +128,38 @@ if /I "%MCP_SCOPE%"=="local" (
     )
 )
 goto :eof
+
+:ensure_venv
+REM If the venv already exists, no work to do (pip upgrade runs unconditionally
+REM in the caller, so a stale venv self-heals as long as its python is usable).
+if exist "%VENV_PY%" exit /b 0
+REM Find Python >=3.10 (the `mcp` SDK's floor). The `py` launcher (PEP 397) is
+REM the canonical Windows tool for picking a specific version. Try newest first.
+set "PY_LAUNCHER="
+for %%v in (3.13 3.12 3.11 3.10) do (
+    if not defined PY_LAUNCHER (
+        py -%%v --version >nul 2>&1
+        if not errorlevel 1 set "PY_LAUNCHER=py -%%v"
+    )
+)
+REM Fall back to bare `python` if the launcher isn't installed -- then verify
+REM the version meets the floor before using it.
+if not defined PY_LAUNCHER (
+    where python >nul 2>&1
+    if not errorlevel 1 (
+        python -c "import sys; sys.exit(0 if sys.version_info>=(3,10) else 1)" >nul 2>&1
+        if not errorlevel 1 set "PY_LAUNCHER=python"
+    )
+)
+if not defined PY_LAUNCHER (
+    echo warning: no Python ^>=3.10 found on PATH; can't create %VENV_DIR%
+    echo          install Python 3.10+ ^(see https://www.python.org/downloads/^) and re-run.
+    exit /b 1
+)
+echo creating MCP server venv at %VENV_DIR% (using %PY_LAUNCHER%)
+%PY_LAUNCHER% -m venv "%VENV_DIR%"
+if errorlevel 1 exit /b 1
+exit /b 0
 
 :path_note
 REM Do NOT suggest `setx PATH "%PATH%;..."` here. At a cmd prompt %PATH% is the

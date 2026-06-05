@@ -84,34 +84,80 @@ fi
 
 # --- Register the search MCP server -----------------------------------------
 # Additive: a registration failure warns but does not fail the binary install.
+# The server runs out of a dedicated venv at mcp/.venv to host the `mcp` SDK,
+# so the registration doesn't depend on whatever `python` happens to be on PATH
+# (PEP 668 blocks system-wide pip on modern macOS/Linux distros anyway).
 server_path="$SCRIPT_DIR/mcp/server.py"
+venv_dir="$SCRIPT_DIR/mcp/.venv"
+# Venv layout differs between POSIX (bin/) and Windows-under-git-bash (Scripts/).
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) venv_py="$venv_dir/Scripts/python.exe" ;;
+    *)                    venv_py="$venv_dir/bin/python" ;;
+esac
+
+# Find a Python >=3.10 (the `mcp` SDK's floor). Tries newest first.
+pick_python() {
+    local candidate ver_major ver_minor
+    for candidate in python3.13 python3.12 python3.11 python3.10 python3 python; do
+        command -v "$candidate" >/dev/null 2>&1 || continue
+        # Single-shot version probe: prints "MAJOR MINOR" or nothing on failure.
+        read -r ver_major ver_minor < <("$candidate" -c \
+            'import sys; print(sys.version_info[0], sys.version_info[1])' 2>/dev/null) || continue
+        if [[ "$ver_major" -gt 3 || ( "$ver_major" -eq 3 && "$ver_minor" -ge 10 ) ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+ensure_venv() {
+    if [[ -x "$venv_py" ]]; then
+        return 0
+    fi
+    local py
+    if ! py=$(pick_python); then
+        echo "warning: no Python >=3.10 found on PATH; can't create $venv_dir" >&2
+        echo "         install Python 3.10+ (e.g. 'brew install python@3.13') and re-run." >&2
+        return 1
+    fi
+    echo "creating MCP server venv at $venv_dir (using $py)"
+    "$py" -m venv "$venv_dir" || return 1
+}
 
 if ! command -v claude >/dev/null 2>&1; then
     echo
     echo "Note: 'claude' CLI not on PATH; skipped MCP server registration."
     echo "Register later with:"
-    echo "  claude mcp add claude-walker -s user -- python \"$server_path\""
+    echo "  claude mcp add claude-walker -s user -- \"$venv_py\" \"$server_path\""
 else
-    # Warn (don't fail) if the MCP SDK isn't importable by the interpreter the
-    # server will launch under -- the registration still lands, but the server
-    # won't start until `pip install mcp` runs.
-    if ! python -c "import mcp.server.fastmcp" >/dev/null 2>&1; then
+    venv_ready=0
+    if ensure_venv; then
+        # Idempotent: pip install is fast when the wheel is already cached.
+        if "$venv_py" -m pip install --quiet --upgrade mcp; then
+            venv_ready=1
+        else
+            echo "warning: failed to install 'mcp' SDK into $venv_dir" >&2
+        fi
+    fi
+
+    if (( venv_ready == 0 )); then
         echo
-        echo "Note: the 'mcp' SDK isn't importable by 'python'. The server is registered"
-        echo "but won't start until you run: python -m pip install mcp"
+        echo "Note: MCP server venv isn't ready. Registration will still land, but the"
+        echo "server won't start until the venv exists and has the 'mcp' SDK installed."
     fi
 
     if [[ "$MCP_SCOPE" == "local" ]]; then
         if ( cd "$PROJECT_DIR" \
                 && { claude mcp remove claude-walker -s local >/dev/null 2>&1 || true; } \
-                && claude mcp add claude-walker -s local -- python "$server_path" ); then
+                && claude mcp add claude-walker -s local -- "$venv_py" "$server_path" ); then
             echo "registered claude-walker MCP server (local scope) for $PROJECT_DIR"
         else
             echo "warning: MCP registration (local scope) failed for $PROJECT_DIR" >&2
         fi
     else
         { claude mcp remove claude-walker -s user >/dev/null 2>&1 || true; }
-        if claude mcp add claude-walker -s user -- python "$server_path"; then
+        if claude mcp add claude-walker -s user -- "$venv_py" "$server_path"; then
             echo "registered claude-walker MCP server (user/global scope)"
         else
             echo "warning: MCP registration (user scope) failed" >&2
