@@ -151,7 +151,8 @@ def _run_search(arguments: list[str]) -> dict[str, Any]:
         completed = subprocess.run(
             command,
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=SUBPROCESS_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as error:
@@ -167,9 +168,24 @@ def _run_search(arguments: list[str]) -> dict[str, Any]:
             f"walker search failed (exit {completed.returncode}): {stderr or 'no stderr output'}"
         )
 
+    # stdout can be None even on a clean exit — observed on Windows when the
+    # target .jsonl is mid-write by a live session (see
+    # BUG-mcp-search-stdout-none.md). Guard it, and since a successful run
+    # always emits at least a summary line, treat empty stdout on exit 0 as a
+    # transient read failure with a real error rather than an opaque
+    # AttributeError downstream.
+    stdout = (completed.stdout or "").strip()
+    if not stdout:
+        raise RuntimeError(
+            "walker search returned no output on a clean exit. This can happen "
+            "transiently when a target transcript is being written by a live "
+            f"session; retry shortly. stderr: {stderr or 'none'}. "
+            f"Command: {' '.join(command)}"
+        )
+
     hits: list[dict[str, Any]] = []
     summary: dict[str, Any] | None = None
-    for line in completed.stdout.splitlines():
+    for line in stdout.splitlines():
         line = line.strip()
         if not line:
             continue
