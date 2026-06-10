@@ -260,19 +260,14 @@ walk_group_events(const std::vector<fs::path> &paths, const std::string &slug,
                     std::string_view stu_key;
                     if (stu_field.unescaped_key().get(stu_key) != sj::SUCCESS)
                       continue;
-                    uint64_t stu_value = 0;
-                    if (stu_field.value().get_uint64().get(stu_value) !=
-                        sj::SUCCESS)
-                      continue;
                     if (stu_key == "web_search_requests")
-                      web_search_requests = stu_value;
+                      web_search_requests =
+                          walker::lenient_count(stu_field.value());
                   }
                   continue;
                 }
 
-                uint64_t value = 0;
-                if (usage_field.value().get_uint64().get(value) != sj::SUCCESS)
-                  continue;
+                uint64_t value = walker::lenient_count(usage_field.value());
 
                 if (usage_key == "input_tokens")
                   input_tokens = value;

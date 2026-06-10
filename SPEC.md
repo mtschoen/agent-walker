@@ -234,6 +234,33 @@ Token field names in the JSONL `usage` object:
 deeper: `usage.server_tool_use.web_search_requests` (uint, default 0 when
 the object or field is absent).
 
+### Lenient per-field parsing
+
+Wrong-typed fields inside an otherwise-valid JSONL entry MUST NOT poison
+the line. A turn that passes the line filters (assistant role, parseable
+timestamp, window) is priced from whatever fields are usable; in the
+worst case it is emitted/counted as a zero-usd record. Decided 2026-06-10
+(closes the strict-vs-lenient divergence: rust/go previously dropped the
+whole line on any type mismatch, cpp/zig already parsed per-field):
+
+- A wrong-typed leaf is treated as **absent**. Non-string `model`, `id`,
+  `timestamp`, `role` behave exactly like a missing field (so a
+  non-string `timestamp` still skips the line via the existing
+  missing-timestamp filter, and a non-string `id` simply does not
+  participate in dedup).
+- A non-object `usage` or `server_tool_use` is treated as an absent
+  subtree (all counts 0).
+- A token-count field accepts any JSON **number**: the value used is
+  `trunc(n)` (toward zero) when `0 <= trunc(n) <= u64::MAX`, otherwise
+  the field is treated as absent (0). So `1.5` counts 1, `2e2` counts
+  200, `-5`, `1e300`, and 24-digit integers count 0. Out-of-range values
+  MUST NOT panic, saturate, or abort the walker. Non-number tokens
+  (strings, objects, …) are treated as absent.
+- Unknown keys inside `usage` and `server_tool_use` are skipped.
+
+These rules apply wherever the pricing formula is applied (cost, events
+— they share one parser per impl).
+
 ## Bucketing
 
 For each accepted assistant turn:

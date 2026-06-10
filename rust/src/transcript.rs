@@ -7,42 +7,91 @@ use std::fs::{read_dir, DirEntry};
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 // ── Entry types ──────────────────────────────────────────────────────────────
+//
+// Wrong-typed fields are treated as absent rather than poisoning the line,
+// per SPEC.md §"Lenient per-field parsing". The lenient_* helpers below back
+// the deserialize_with attributes.
 
 #[derive(Deserialize)]
 pub(crate) struct Entry {
+    #[serde(default, deserialize_with = "lenient_string")]
     pub(crate) timestamp: Option<String>,
     pub(crate) message: Option<Message>,
 }
 
 #[derive(Deserialize)]
 pub(crate) struct Message {
+    #[serde(default, deserialize_with = "lenient_string")]
     pub(crate) role: Option<String>,
+    #[serde(default, deserialize_with = "lenient_string")]
     pub(crate) id: Option<String>,
+    #[serde(default, deserialize_with = "lenient_string")]
     pub(crate) model: Option<String>,
+    #[serde(default, deserialize_with = "lenient_usage")]
     pub(crate) usage: Option<Usage>,
 }
 
 #[derive(Deserialize, Default)]
 pub(crate) struct Usage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_count")]
     pub(crate) input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_count")]
     pub(crate) output_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_count")]
     pub(crate) cache_read_input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_count")]
     pub(crate) cache_creation_input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_server_tool_use")]
     pub(crate) server_tool_use: ServerToolUse,
 }
 
 #[derive(Deserialize, Default)]
 pub(crate) struct ServerToolUse {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_count")]
     pub(crate) web_search_requests: u64,
+}
+
+/// Non-string values are treated as an absent field.
+fn lenient_string<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(match value {
+        serde_json::Value::String(s) => Some(s),
+        _ => None,
+    })
+}
+
+/// Token counts accept any JSON number, truncated toward zero; values
+/// outside [0, u64::MAX] and non-number tokens are treated as absent (0).
+fn lenient_count<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(match value {
+        serde_json::Value::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                u
+            } else {
+                match n.as_f64() {
+                    Some(f) if f >= 0.0 && f < 18446744073709551616.0 => f as u64,
+                    _ => 0,
+                }
+            }
+        }
+        _ => 0,
+    })
+}
+
+/// A non-object `usage` is an absent subtree (all counts 0).
+fn lenient_usage<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Usage>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(Usage::deserialize(value).ok())
+}
+
+/// A non-object `server_tool_use` is an absent subtree.
+fn lenient_server_tool_use<'de, D: Deserializer<'de>>(d: D) -> Result<ServerToolUse, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(ServerToolUse::deserialize(value).unwrap_or_default())
 }
 
 // ── Pricing ───────────────────────────────────────────────────────────────────

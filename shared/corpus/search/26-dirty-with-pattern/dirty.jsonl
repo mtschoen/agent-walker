@@ -1,0 +1,7 @@
+{"type": "assistant", "timestamp": "2026-05-10T11:43:20.000Z", "message": {"id": "msg_26_hit", "role": "assistant", "model": "claude-opus-4-7", "content": [{"type": "text", "text": "the only real dirtneedle line in this file"}], "usage": {"input_tokens": 50, "output_tokens": 25, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}
+
+ÿþ dirtneedle inside invalid utf-8
+{"bad": dirtneedle
+{"message": "bare", "x": "dirtneedle"}
+{"message": {"role": "", "content": [], "y": "dirtneedle"}}
+{"message": {"role": "user", "z": "dirtneedle"}}

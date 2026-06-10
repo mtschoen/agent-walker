@@ -162,22 +162,22 @@ func walkGroupEvents(paths []string, slug, sessionID string, cutoff float64) []e
 
 			// Dedup by message ID (if present).
 			if msg.ID != "" {
-				if _, already := seenIDs[msg.ID]; already {
+				if _, already := seenIDs[string(msg.ID)]; already {
 					continue
 				}
-				seenIDs[msg.ID] = struct{}{}
+				seenIDs[string(msg.ID)] = struct{}{}
 			}
 
 			// Timestamp must be parseable and in range.
 			if e.Timestamp == "" {
 				continue
 			}
-			ts, ok := parseISO8601(e.Timestamp)
+			ts, ok := parseISO8601(string(e.Timestamp))
 			if !ok || ts < cutoff {
 				continue
 			}
 
-			model := strings.ToLower(msg.Model)
+			model := strings.ToLower(string(msg.Model))
 			usd := costForTurn(msg.Usage, model)
 
 			records = append(records, eventRecord{

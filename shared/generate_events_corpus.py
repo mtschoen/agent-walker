@@ -430,6 +430,86 @@ def fixture_13_byte_edges():
     return name, [expected_record(good, slug, session_id)]
 
 
+def fixture_14_wrong_typed_usage():
+    """SPEC "Lenient per-field parsing" (COVERAGE-PLAN item 4): the events
+    scanner emits a record for every assistant turn whose wrong-typed fields
+    are treated as absent. Mirrors cost fixture 12-wrong-typed-usage; per-turn
+    records make the per-field semantics directly assertable. Also includes
+    an id-less turn (dedup skipped), unknown usage / server_tool_use keys,
+    and the out-of-range numbers that crashed the zig walker pre-fix."""
+    name = "14-wrong-typed-usage"
+    slug = "project-omicron"
+    session_id = "sess-014"
+
+    def rec(ts: float, usd: float, model: str) -> dict:
+        return {"ts": ts, "usd": round(usd, 6), "model": model,
+                "session_id": session_id, "slug": slug}
+
+    t = _IN_WINDOW
+    lines: list[dict | str] = [
+        {"type": "assistant", "timestamp": iso_z(t),
+         "message": {"role": "assistant", "id": "ev-wt-1",
+                     "model": "claude-sonnet-4-6", "usage": "not-an-object"}},
+        {"type": "assistant", "timestamp": iso_z(t + 1),
+         "message": {"role": "assistant", "id": "ev-wt-2",
+                     "model": "claude-sonnet-4-6",
+                     "usage": {"input_tokens": "abc", "output_tokens": 50}}},
+        {"type": "assistant", "timestamp": iso_z(t + 2),
+         "message": {"role": "assistant", "id": "ev-wt-3",
+                     "model": "claude-sonnet-4-6",
+                     "usage": {"input_tokens": 1.5, "output_tokens": 2e2}}},
+        {"type": "assistant", "timestamp": iso_z(t + 3),
+         "message": {"role": "assistant", "id": "ev-wt-4",
+                     "model": "claude-sonnet-4-6",
+                     "usage": {"input_tokens": -5, "output_tokens": 50,
+                               "server_tool_use": "nope"}}},
+        {"type": "assistant", "timestamp": iso_z(t + 4),
+         "message": {"role": "assistant", "id": "ev-wt-5", "model": 7,
+                     "usage": {"input_tokens": 100, "output_tokens": 10,
+                               "server_tool_use": {"web_search_requests": "x",
+                                                   "other": 1}}}},
+        {"type": "assistant", "timestamp": iso_z(t + 5),
+         "message": {"role": "assistant", "id": 42,
+                     "model": "claude-opus-4-7",
+                     "usage": {"input_tokens": 100, "output_tokens": 10,
+                               "service_tier": "standard"}}},
+        {"type": "assistant", "timestamp": iso_z(t + 6),
+         "message": {"role": "assistant", "id": "ev-wt-7",
+                     "model": "claude-sonnet-4-6",
+                     "usage": {"input_tokens": 1e300, "output_tokens": 5}}},
+        ('{"type": "assistant", "timestamp": "%s", "message": '
+         '{"role": "assistant", "id": "ev-wt-8", "model": "claude-sonnet-4-6", '
+         '"usage": {"input_tokens": 99999999999999999999999, '
+         '"output_tokens": 5}}}' % iso_z(t + 7)),
+        {"type": "assistant", "timestamp": iso_z(t + 8),
+         "message": {"role": "assistant", "id": "ev-wt-9",
+                     "model": "claude-sonnet-4-6",
+                     "usage": {"server_tool_use":
+                               {"web_search_requests": 2.9}}}},
+        {"type": "assistant", "timestamp": iso_z(t + 9),
+         "message": {"role": "assistant",
+                     "model": "claude-haiku-4-5",
+                     "usage": {"input_tokens": 100, "output_tokens": 50}}},
+    ]
+    write_fixture(name, slug, session_id, lines)
+    son_in, son_out = RATES["sonnet"]
+    opus_in, opus_out = RATES["opus"]
+    haiku_in, haiku_out = RATES["haiku"]
+    return name, [
+        rec(t, 0.0, "claude-sonnet-4-6"),
+        rec(t + 1, 50 * son_out / 1e6, "claude-sonnet-4-6"),
+        rec(t + 2, (1 * son_in + 200 * son_out) / 1e6, "claude-sonnet-4-6"),
+        rec(t + 3, 50 * son_out / 1e6, "claude-sonnet-4-6"),
+        # Wrong-typed model -> empty string -> sonnet rates.
+        rec(t + 4, (100 * son_in + 10 * son_out) / 1e6, ""),
+        rec(t + 5, (100 * opus_in + 10 * opus_out) / 1e6, "claude-opus-4-7"),
+        rec(t + 6, 5 * son_out / 1e6, "claude-sonnet-4-6"),
+        rec(t + 7, 5 * son_out / 1e6, "claude-sonnet-4-6"),
+        rec(t + 8, 2 * WEB_SEARCH_COST_USD, "claude-sonnet-4-6"),
+        rec(t + 9, (100 * haiku_in + 50 * haiku_out) / 1e6, "claude-haiku-4-5"),
+    ]
+
+
 FIXTURES = [
     fixture_01_empty,
     fixture_02_single,
@@ -444,6 +524,7 @@ FIXTURES = [
     fixture_11_iso_variants,
     fixture_12_many_sessions,
     fixture_13_byte_edges,
+    fixture_14_wrong_typed_usage,
 ]
 
 

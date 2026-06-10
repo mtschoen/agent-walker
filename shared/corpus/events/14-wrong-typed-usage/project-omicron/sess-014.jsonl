@@ -1,0 +1,10 @@
+{"type": "assistant", "timestamp": "2025-05-22T07:45:40.000Z", "message": {"role": "assistant", "id": "ev-wt-1", "model": "claude-sonnet-4-6", "usage": "not-an-object"}}
+{"type": "assistant", "timestamp": "2025-05-22T07:45:41.000Z", "message": {"role": "assistant", "id": "ev-wt-2", "model": "claude-sonnet-4-6", "usage": {"input_tokens": "abc", "output_tokens": 50}}}
+{"type": "assistant", "timestamp": "2025-05-22T07:45:42.000Z", "message": {"role": "assistant", "id": "ev-wt-3", "model": "claude-sonnet-4-6", "usage": {"input_tokens": 1.5, "output_tokens": 200.0}}}
+{"type": "assistant", "timestamp": "2025-05-22T07:45:43.000Z", "message": {"role": "assistant", "id": "ev-wt-4", "model": "claude-sonnet-4-6", "usage": {"input_tokens": -5, "output_tokens": 50, "server_tool_use": "nope"}}}
+{"type": "assistant", "timestamp": "2025-05-22T07:45:44.000Z", "message": {"role": "assistant", "id": "ev-wt-5", "model": 7, "usage": {"input_tokens": 100, "output_tokens": 10, "server_tool_use": {"web_search_requests": "x", "other": 1}}}}
+{"type": "assistant", "timestamp": "2025-05-22T07:45:45.000Z", "message": {"role": "assistant", "id": 42, "model": "claude-opus-4-7", "usage": {"input_tokens": 100, "output_tokens": 10, "service_tier": "standard"}}}
+{"type": "assistant", "timestamp": "2025-05-22T07:45:46.000Z", "message": {"role": "assistant", "id": "ev-wt-7", "model": "claude-sonnet-4-6", "usage": {"input_tokens": 1e+300, "output_tokens": 5}}}
+{"type": "assistant", "timestamp": "2025-05-22T07:45:47.000Z", "message": {"role": "assistant", "id": "ev-wt-8", "model": "claude-sonnet-4-6", "usage": {"input_tokens": 99999999999999999999999, "output_tokens": 5}}}
+{"type": "assistant", "timestamp": "2025-05-22T07:45:48.000Z", "message": {"role": "assistant", "id": "ev-wt-9", "model": "claude-sonnet-4-6", "usage": {"server_tool_use": {"web_search_requests": 2.9}}}}
+{"type": "assistant", "timestamp": "2025-05-22T07:45:49.000Z", "message": {"role": "assistant", "model": "claude-haiku-4-5", "usage": {"input_tokens": 100, "output_tokens": 50}}}

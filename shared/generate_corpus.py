@@ -46,9 +46,13 @@ def cost_for(usage: dict, model_id: str) -> float:
     inp, out = rates_for(model_id)
 
     def as_int(value) -> int:
-        # Wrong-typed token fields price as zero (mirrors every impl's
-        # observable behavior, whether it zeroes the field or drops the line).
-        return value if isinstance(value, int) else 0
+        # SPEC "Lenient per-field parsing": any JSON number is truncated
+        # toward zero and used iff it lands in [0, 2^64); everything else
+        # (strings, objects, out-of-range values) prices as zero.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 0
+        whole = int(value)  # truncates floats toward zero
+        return whole if 0 <= whole < 2**64 else 0
 
     i = as_int(usage.get("input_tokens", 0))
     r = as_int(usage.get("cache_read_input_tokens", 0))
@@ -437,6 +441,76 @@ def fixture_11_byte_edges():
     return slug, {f"{sid}.jsonl": entries}
 
 
+def fixture_12_wrong_typed_usage():
+    """SPEC "Lenient per-field parsing" (COVERAGE-PLAN item 4): wrong-typed
+    usage fields never poison the line. Numeric tokens truncate toward zero
+    (1.5 -> 1, 2e2 -> 200), out-of-range numbers (negative, 1e300, 24-digit
+    integers) price as absent without panicking, non-number tokens price as
+    absent, wrong-typed model/id behave as missing, unknown usage /
+    server_tool_use keys are skipped, and an id-less assistant turn still
+    counts (no dedup participation)."""
+    slug = "12-wrong-typed-usage"
+    sid = "wrongu"
+    entries: list[dict | str] = [
+        # usage is not an object -> zero-usd turn, still counted.
+        {"type": "assistant", "timestamp": iso(FRESH),
+         "message": {"role": "assistant", "id": "wt-1",
+                     "model": "claude-sonnet-4-6", "usage": "not-an-object"}},
+        # One wrong-typed field among good ones -> only that field absent.
+        {"type": "assistant", "timestamp": iso(FRESH),
+         "message": {"role": "assistant", "id": "wt-2",
+                     "model": "claude-sonnet-4-6",
+                     "usage": {"input_tokens": "abc", "output_tokens": 50}}},
+        # Fractional + exponent numbers truncate toward zero (1.5 -> 1,
+        # 2e2 -> 200).
+        {"type": "assistant", "timestamp": iso(FRESH),
+         "message": {"role": "assistant", "id": "wt-3",
+                     "model": "claude-sonnet-4-6",
+                     "usage": {"input_tokens": 1.5, "output_tokens": 2e2}}},
+        # Negative count absent; non-object server_tool_use absent.
+        {"type": "assistant", "timestamp": iso(FRESH),
+         "message": {"role": "assistant", "id": "wt-4",
+                     "model": "claude-sonnet-4-6",
+                     "usage": {"input_tokens": -5, "output_tokens": 50,
+                               "server_tool_use": "nope"}}},
+        # Wrong-typed model -> empty model -> sonnet rates; wrong-typed
+        # web_search_requests absent; unknown server_tool_use key skipped.
+        {"type": "assistant", "timestamp": iso(FRESH),
+         "message": {"role": "assistant", "id": "wt-5", "model": 7,
+                     "usage": {"input_tokens": 100, "output_tokens": 10,
+                               "server_tool_use": {"web_search_requests": "x",
+                                                   "other": 1}}}},
+        # Wrong-typed id -> no dedup participation; unknown usage key skipped.
+        {"type": "assistant", "timestamp": iso(FRESH),
+         "message": {"role": "assistant", "id": 42,
+                     "model": "claude-opus-4-7",
+                     "usage": {"input_tokens": 100, "output_tokens": 10,
+                               "service_tier": "standard"}}},
+        # Out-of-u64-range numbers price as absent and MUST NOT panic
+        # (1e300 aborted the zig walker before the 2026-06-10 fix).
+        {"type": "assistant", "timestamp": iso(FRESH),
+         "message": {"role": "assistant", "id": "wt-7",
+                     "model": "claude-sonnet-4-6",
+                     "usage": {"input_tokens": 1e300, "output_tokens": 5}}},
+        ('{"type": "assistant", "timestamp": "%s", "message": '
+         '{"role": "assistant", "id": "wt-8", "model": "claude-sonnet-4-6", '
+         '"usage": {"input_tokens": 99999999999999999999999, '
+         '"output_tokens": 5}}}' % iso(FRESH)),
+        # Fractional web_search_requests truncates (2.9 -> 2 -> $0.02).
+        {"type": "assistant", "timestamp": iso(FRESH),
+         "message": {"role": "assistant", "id": "wt-9",
+                     "model": "claude-sonnet-4-6",
+                     "usage": {"server_tool_use":
+                               {"web_search_requests": 2.9}}}},
+        # No id field at all -> counted, dedup is skipped for this turn.
+        {"type": "assistant", "timestamp": iso(FRESH),
+         "message": {"role": "assistant",
+                     "model": "claude-haiku-4-5",
+                     "usage": {"input_tokens": 100, "output_tokens": 50}}},
+    ]
+    return slug, {f"{sid}.jsonl": entries}
+
+
 FIXTURES = [
     fixture_01_single_parent,
     fixture_02_parent_acompact,
@@ -449,6 +523,7 @@ FIXTURES = [
     fixture_09_dirty_ladder,
     fixture_10_iso_variants,
     fixture_11_byte_edges,
+    fixture_12_wrong_typed_usage,
 ]
 
 
@@ -476,7 +551,9 @@ def walk_group(files: dict[str, list]) -> tuple[float, float]:
             if msg.get("role") != "assistant":
                 continue
             mid = msg.get("id")
-            if mid:
+            # Non-string ids behave as absent (SPEC lenient parsing): the
+            # turn is counted but does not participate in dedup.
+            if isinstance(mid, str) and mid:
                 if mid in seen_ids:
                     continue
                 seen_ids.add(mid)
@@ -495,7 +572,10 @@ def walk_group(files: dict[str, list]) -> tuple[float, float]:
             usage = msg.get("usage")
             if not isinstance(usage, dict):
                 usage = {}  # wrong-shaped usage prices as zero everywhere
-            c = cost_for(usage, msg.get("model") or "")
+            model = msg.get("model")
+            if not isinstance(model, str):
+                model = ""  # wrong-typed model behaves as absent -> sonnet
+            c = cost_for(usage, model)
             if ts >= period_cutoff:
                 trailing += c
             if ts >= WIN_START_UNIX:

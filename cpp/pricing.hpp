@@ -13,7 +13,24 @@
 #include <cstdint>
 #include <string_view>
 
+#include <simdjson.h>
+
 namespace walker {
+
+// SPEC.md "Lenient per-field parsing": a token-count field accepts any JSON
+// number, truncated toward zero; values outside [0, 2^64) and non-number
+// tokens are treated as absent (0). simdjson scalar getters do not consume
+// the value on a type mismatch, so the double fallback re-reads it safely.
+inline uint64_t lenient_count(simdjson::ondemand::value value) {
+    uint64_t whole = 0;
+    if (value.get_uint64().get(whole) == simdjson::SUCCESS)
+        return whole;
+    double numeric = 0.0;
+    if (value.get_double().get(numeric) == simdjson::SUCCESS &&
+        numeric >= 0.0 && numeric < 18446744073709551616.0)
+        return static_cast<uint64_t>(numeric);
+    return 0;
+}
 
 struct Rates {
     double input;   // per MTok

@@ -722,7 +722,10 @@ pub fn parseU64Value(scanner: *std.json.Scanner, alloc: Allocator) !u64 {
         return if (n >= 0) @intCast(n) else 0;
     } else |_| {}
     if (std.fmt.parseFloat(f64, slice)) |f| {
-        return if (f >= 0.0) @intFromFloat(f) else 0;
+        // Out-of-range numbers are treated as absent per SPEC "Lenient
+        // per-field parsing"; an unguarded @intFromFloat on f >= 2^64
+        // is safety-checked illegal behavior (observed panic on 1e300).
+        return if (f >= 0.0 and f < 18446744073709551616.0) @intFromFloat(f) else 0;
     } else |_| {}
     return 0;
 }
