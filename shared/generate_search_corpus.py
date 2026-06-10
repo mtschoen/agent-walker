@@ -1876,6 +1876,156 @@ def multi_root_scenario_02_cwd_filter():
     return scenario, "primary", [], files, combos
 
 
+def scenario_26_dirty_with_pattern():
+    """A transcript whose DIRTY lines carry the pattern bytes, so the
+    literal prefilter cannot skip the file and the per-line skip ladder runs
+    with the pattern in play: blank line, invalid UTF-8 containing the
+    pattern, malformed JSON containing the pattern, message-as-bare-string,
+    empty role, and content-less messages. Only the one valid line hits.
+    The regex combo disables the prefilter entirely, driving the same ladder
+    through the regex scan path."""
+    scenario = "26-dirty-with-pattern"
+    t1 = NOW_UNIX - 1000
+    text_hit = "the only real dirtneedle line in this file"
+    files = {
+        "dirty.jsonl": [
+            assistant_text(t1, "msg_26_hit", text_hit),
+            "",
+            b"\xff\xfe dirtneedle inside invalid utf-8",
+            '{"bad": dirtneedle',
+            '{"message": "bare", "x": "dirtneedle"}',
+            '{"message": {"role": "", "content": [], "y": "dirtneedle"}}',
+            '{"message": {"role": "user", "z": "dirtneedle"}}',
+        ],
+    }
+    snip, offsets = snippet_and_offsets(text_hit, "dirtneedle", 240)
+    the_hit = hit(
+        session_id="dirty", cwd_slug=scenario, line_number=1,
+        timestamp=iso(t1), role="assistant", snippet=snip,
+        match_offsets=offsets,
+    )
+    combos = {
+        "default": {
+            "description": "Substring scan over a prefilter-defeating dirty file.",
+            "pattern": "dirtneedle",
+            "flags": [],
+            "hits": [the_hit],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+        "regex": {
+            "description": "Same ladder via the regex path (no prefilter).",
+            "pattern": "dirtneedl[e]",
+            "flags": ["--regex"],
+            "hits": [the_hit],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+    }
+    return scenario, files, combos
+
+
+def scenario_27_padded_time_args():
+    """`--since`/`--until` values with surrounding whitespace must be trimmed
+    before parsing (every impl trims; cpp does so byte-by-byte)."""
+    scenario = "27-padded-time-args"
+    t1 = NOW_UNIX - 1000
+    text = "padded time argument padneedle survives trimming"
+    files = {"sid1.jsonl": [assistant_text(t1, "msg_27_a1", text)]}
+    o = find_offset(text, "padneedle")
+    the_hit = hit(
+        session_id="sid1", cwd_slug=scenario, line_number=1,
+        timestamp=iso(t1), role="assistant", snippet=text,
+        match_offsets=[[o[0], o[1]]],
+    )
+    combos = {
+        "leading-space-since": {
+            "description": "--since value with a leading space.",
+            "pattern": "padneedle",
+            "flags": ["--since", " 7d"],
+            "hits": [the_hit],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+        "trailing-space-until": {
+            "description": "--until value with a trailing space.",
+            "pattern": "padneedle",
+            "flags": ["--since", "7d ", "--until", " 1s "],
+            "hits": [the_hit],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+    }
+    return scenario, files, combos
+
+
+def scenario_28_regex_backtrack():
+    """A greedy `+` quantifier that must backtrack: in "rally" the engine
+    consumes both l's, fails on the trailing literal, backtracks to one l,
+    fails again, and gives up; in "totallx" the same pattern succeeds. Zig's
+    hand-rolled engine walks an explicit end-decrement loop here; the other
+    impls route through their regex libraries and must agree on the match."""
+    scenario = "28-regex-backtrack"
+    t1 = NOW_UNIX - 1000
+    text = "they rally around totallx results"
+    files = {"sid1.jsonl": [assistant_text(t1, "msg_28_a1", text)]}
+    mstart = text.find("allx")
+    combos = {
+        "plus-backtrack": {
+            "description": "Greedy + with a failing suffix forces backtracking.",
+            "pattern": "al+x",
+            "flags": ["--regex"],
+            "hits": [hit(
+                session_id="sid1", cwd_slug=scenario, line_number=1,
+                timestamp=iso(t1), role="assistant", snippet=text,
+                match_offsets=[[mstart, mstart + 4]],
+            )],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+    }
+    return scenario, files, combos
+
+
+def scenario_29_discovery_oddities():
+    """Discovery-layer oddities inside a slug: a session directory WITHOUT a
+    subagents/ child, a subagents/ dir containing a non-agent-named file and
+    a stray subdirectory, and a non-.jsonl file at the slug level. The
+    walker must skip them all silently and still find the parent + subagent
+    hits."""
+    scenario = "29-discovery-oddities"
+    t_parent, t_sub = NOW_UNIX - 2000, NOW_UNIX - 1000
+    text_parent = "parent oddneedle line"
+    text_sub = "subagent oddneedle line"
+    files = {
+        "main.jsonl": [assistant_text(t_parent, "msg_29_p1", text_parent)],
+        "main/subagents/agent-ok.jsonl": [
+            assistant_text(t_sub, "msg_29_s1", text_sub)
+        ],
+        # Skipped: bad name in subagents, stray dir in subagents, session
+        # dir without subagents, non-.jsonl file at slug level.
+        "main/subagents/notanagent.txt": ["oddneedle in a non-agent file"],
+        "main/subagents/straydir/notes.txt": ["oddneedle in a stray dir"],
+        "sess-no-subagents/notes.txt": ["oddneedle in a bare session dir"],
+        "README.txt": ["oddneedle in a non-jsonl slug file"],
+    }
+    o_p = find_offset(text_parent, "oddneedle")
+    o_s = find_offset(text_sub, "oddneedle")
+    combos = {
+        "default": {
+            "description": "Oddity entries are skipped; real hits survive.",
+            "pattern": "oddneedle",
+            "flags": [],
+            "hits": [
+                hit(session_id="main", cwd_slug=scenario, line_number=1,
+                    timestamp=iso(t_sub), role="assistant", snippet=text_sub,
+                    match_offsets=[[o_s[0], o_s[1]]]),
+                hit(session_id="main", cwd_slug=scenario, line_number=1,
+                    timestamp=iso(t_parent), role="assistant",
+                    snippet=text_parent,
+                    match_offsets=[[o_p[0], o_p[1]]]),
+            ],
+            "summary": summary(hits=2, sessions_matched=1),
+        },
+    }
+    return scenario, files, combos
+
+
 SCENARIOS = [
     scenario_01_basic,
     scenario_02_multi_match_per_session,
@@ -1902,6 +2052,10 @@ SCENARIOS = [
     scenario_23_regex_fold_single,
     scenario_24_snippet_no_whitespace,
     scenario_25_context_rich,
+    scenario_26_dirty_with_pattern,
+    scenario_27_padded_time_args,
+    scenario_28_regex_backtrack,
+    scenario_29_discovery_oddities,
 ]
 
 MULTI_ROOT_SCENARIOS = [

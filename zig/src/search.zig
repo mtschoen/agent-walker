@@ -726,7 +726,10 @@ fn scanFile(alloc: Allocator, path: []const u8, include_queue_ops: bool) ![]Scan
         const line = std.mem.trim(u8, raw, " \t\r\n");
         if (line.len == 0) continue;
 
-        if (try parseScanMessage(alloc, line, idx, include_queue_ops)) |m| {
+        // A malformed line is skipped, never the whole file (SPEC: malformed
+        // JSONL lines are skipped) -- propagating the parse error here used
+        // to abandon every line of the file, hits included.
+        if (parseScanMessage(alloc, line, idx, include_queue_ops) catch null) |m| {
             try out.append(alloc, m);
         }
     }
