@@ -435,6 +435,15 @@ pattern is an error.
 | `--format <pretty\|jsonl>` | pretty | `jsonl` is agent-consumable (one record per line). |
 | `--snippet-chars <N>` | 240 | Max snippet preview chars per hit. |
 
+**Discovery.** Search walks parent transcripts
+(`<root>/<slug>/<sid>.jsonl`) AND subagent transcripts
+(`<root>/<slug>/<session>/subagents/agent-*.jsonl`) in every resolved
+root, mirroring `## Discovery`. A subagent hit reports `session_id` =
+the enclosing session directory name (its parent session), so subagent
+hits group with their parent in `sessions_matched`. `--cwd <slug>`
+restricts both forms; the `--since` mtime fast-path prune applies per
+file to parents and subagents alike.
+
 Filters apply cheapest-first per `## Filters`: file mtime, slug, role,
 tool-block exclusion, time window, then the pattern match.
 

@@ -1513,6 +1513,49 @@ def scenario_17_queue_operation():
     return scenario, files, expected
 
 
+def scenario_18_subagent_traversal():
+    """Search must walk subagent transcripts
+    (`<slug>/<session>/subagents/agent-*.jsonl`) alongside parents, per SPEC
+    "Discovery" under `search`. A subagent hit reports session_id = the
+    enclosing session directory name (its parent session), so both hits here
+    share session_id and sessions_matched stays 1. The subagent message is
+    newer, so it sorts first.
+    """
+    scenario = "18-subagent-traversal"
+    t_parent, t_sub = NOW_UNIX - 2000, NOW_UNIX - 1000
+    text_parent = "parent transcript mentions needle here"
+    text_sub = "subagent transcript found the needle too"
+    files = {
+        "sid_parent.jsonl": [assistant_text(t_parent, "msg_18_p1", text_parent)],
+        "sid_parent/subagents/agent-sub1.jsonl": [
+            assistant_text(t_sub, "msg_18_s1", text_sub)
+        ],
+    }
+    o_p = find_offset(text_parent, "needle")
+    o_s = find_offset(text_sub, "needle")
+    hit_sub = hit(
+        session_id="sid_parent", cwd_slug=scenario, line_number=1,
+        timestamp=iso(t_sub), role="assistant", snippet=text_sub,
+        match_offsets=[[o_s[0], o_s[1]]],
+    )
+    hit_parent = hit(
+        session_id="sid_parent", cwd_slug=scenario, line_number=1,
+        timestamp=iso(t_parent), role="assistant", snippet=text_parent,
+        match_offsets=[[o_p[0], o_p[1]]],
+    )
+    expected = {
+        "default": {
+            "description": "Subagent transcript is searched; its hit carries the "
+                           "parent session's id, so sessions_matched stays 1.",
+            "pattern": "needle",
+            "flags": [],
+            "hits": [hit_sub, hit_parent],
+            "summary": summary(hits=2, sessions_matched=1),
+        },
+    }
+    return scenario, files, expected
+
+
 SCENARIOS = [
     scenario_01_basic,
     scenario_02_multi_match_per_session,
@@ -1531,6 +1574,7 @@ SCENARIOS = [
     *REGEX_CLASS_SCENARIOS,
     scenario_16_same_timestamp,
     scenario_17_queue_operation,
+    scenario_18_subagent_traversal,
 ]
 
 MULTI_ROOT_SCENARIOS = [
