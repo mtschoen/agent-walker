@@ -635,6 +635,16 @@ def main() -> int:
 
     write_report(results)
 
+    # A failing conformance run or native test suite fails the gate in EVERY
+    # mode, before any percentage comparison. The percentage paths below once
+    # masked a real cargo-test failure: floors were met, so --baseline
+    # returned 0 with "cargo test FAILED" sitting in the log.
+    failing = [r.lang for r in measured if not r.conformance_ok]
+    if failing:
+        print(f"\n[coverage] GATE FAILED: conformance or native tests failed "
+              f"for: {', '.join(failing)}")
+        return 1
+
     if baseline:
         # Compare on the rounded percent shown in TEST-REPORT.md so a threshold
         # of "97.47" matches the report value, not the unrounded 97.4683... .

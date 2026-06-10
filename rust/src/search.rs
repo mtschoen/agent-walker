@@ -1268,6 +1268,14 @@ mod tests {
         // Write a file inside the directory before locking it out.
         fs::write(bad_slug.join("session-x.jsonl"), b"").unwrap();
         fs::set_permissions(&bad_slug, fs::Permissions::from_mode(0o000)).unwrap();
+        // chmod 000 does not block root (CI containers) or permissive
+        // filesystems; the precondition is unobtainable there, so skip.
+        if fs::read_dir(&bad_slug).is_ok() {
+            fs::set_permissions(&bad_slug, fs::Permissions::from_mode(0o755)).unwrap();
+            let _ = fs::remove_dir_all(&root);
+            eprintln!("skipping: environment cannot produce an unreadable dir");
+            return;
+        }
 
         // Also set up a readable slug to confirm only the bad one is skipped.
         let good_slug = root.join("good-slug");
