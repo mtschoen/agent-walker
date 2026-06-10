@@ -5,7 +5,7 @@
   },
   "combos": {
     "default": {
-      "description": "[%-\\\\]+ \u2014 class range whose END is an escaped char",
+      "description": "[%-\\\\]+ - class range whose END is an escaped char",
       "pattern": "[%-\\\\]+",
       "flags": [
         "--regex",

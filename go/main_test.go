@@ -241,6 +241,99 @@ func TestDiscoverGroupsMissingRoot(t *testing.T) {
 	}
 }
 
+// TestParseArgumentsMissingValues covers the "flag as last arg" error path for
+// every flag that requires a following value.
+func TestParseArgumentsMissingValues(t *testing.T) {
+	for _, flag := range []string{
+		"--period", "--win-start", "--now", "--projects-root", "--extra-projects-root",
+	} {
+		if _, err := parseArguments([]string{flag}); err == nil {
+			t.Errorf("%s as last arg should return an error, got nil", flag)
+		}
+	}
+}
+
+// TestHomeEnvVarsOrdering confirms homeEnvVars returns the correct primary and
+// secondary env var names for "windows", "linux", and "darwin".
+func TestHomeEnvVarsOrdering(t *testing.T) {
+	primary, secondary := homeEnvVars("windows")
+	if primary != "USERPROFILE" || secondary != "HOME" {
+		t.Errorf("windows: got (%q,%q); want (USERPROFILE, HOME)", primary, secondary)
+	}
+	primary, secondary = homeEnvVars("linux")
+	if primary != "HOME" || secondary != "USERPROFILE" {
+		t.Errorf("linux: got (%q,%q); want (HOME, USERPROFILE)", primary, secondary)
+	}
+	primary, secondary = homeEnvVars("darwin")
+	if primary != "HOME" || secondary != "USERPROFILE" {
+		t.Errorf("darwin: got (%q,%q); want (HOME, USERPROFILE)", primary, secondary)
+	}
+}
+
+// TestDiscoverGroupsUnreadableSlugDir verifies that a slug directory that
+// cannot be listed (chmod 000) is silently skipped for the subagent walk.
+// The parent glob also silently fails on unlistable dirs.
+func TestDiscoverGroupsUnreadableSlugDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 000 not supported on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 000 ineffective for root")
+	}
+	root := t.TempDir()
+	slugPath := filepath.Join(root, "locked-slug")
+	if err := os.MkdirAll(slugPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Make the slug dir unreadable so ReadDir inside discoverGroups fails.
+	if err := os.Chmod(slugPath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(slugPath, 0o755) //nolint — best effort cleanup
+	groups := discoverGroups([]string{root}, 0)
+	if len(groups) != 0 {
+		t.Fatalf("expected 0 groups with unreadable slug dir, got %d", len(groups))
+	}
+}
+
+// TestDiscoverGroupsDanglingSymlinks verifies that dangling symlinks for both
+// the parent-glob path (os.Stat fails on the .jsonl symlink) and the subagent
+// path are silently skipped via the err != nil continue.
+func TestDiscoverGroupsDanglingSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require elevated privileges on Windows")
+	}
+	root := t.TempDir()
+	slugPath := filepath.Join(root, "myslug")
+	if err := os.MkdirAll(slugPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Dangling symlink at the parent position: <slug>/x.jsonl -> /nonexistent
+	danglingParent := filepath.Join(slugPath, "x.jsonl")
+	if err := os.Symlink("/no/such/target/x.jsonl", danglingParent); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	// Dangling symlink at the subagent position:
+	// <slug>/<sess>/subagents/agent-y.jsonl -> /nonexistent
+	sessDir := filepath.Join(slugPath, "mysess")
+	subagentsDir := filepath.Join(sessDir, "subagents")
+	if err := os.MkdirAll(subagentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	danglingAgent := filepath.Join(subagentsDir, "agent-y.jsonl")
+	if err := os.Symlink("/no/such/target/agent-y.jsonl", danglingAgent); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+
+	// Both should be skipped silently; no groups discovered.
+	groups := discoverGroups([]string{root}, 0)
+	if len(groups) != 0 {
+		t.Fatalf("expected 0 groups with all-dangling symlinks, got %d (%v)", len(groups), groups)
+	}
+}
+
 // TestDiscoverGroupsPrunesOldFiles — far-future cutoff causes Before() to be
 // true for every just-created file, exercising the mtime-prune continue.
 func TestDiscoverGroupsPrunesOldFiles(t *testing.T) {

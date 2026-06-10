@@ -234,6 +234,33 @@ Token field names in the JSONL `usage` object:
 deeper: `usage.server_tool_use.web_search_requests` (uint, default 0 when
 the object or field is absent).
 
+### Lenient per-field parsing
+
+Wrong-typed fields inside an otherwise-valid JSONL entry MUST NOT poison
+the line. A turn that passes the line filters (assistant role, parseable
+timestamp, window) is priced from whatever fields are usable; in the
+worst case it is emitted/counted as a zero-usd record. Decided 2026-06-10
+(closes the strict-vs-lenient divergence: rust/go previously dropped the
+whole line on any type mismatch, cpp/zig already parsed per-field):
+
+- A wrong-typed leaf is treated as **absent**. Non-string `model`, `id`,
+  `timestamp`, `role` behave exactly like a missing field (so a
+  non-string `timestamp` still skips the line via the existing
+  missing-timestamp filter, and a non-string `id` simply does not
+  participate in dedup).
+- A non-object `usage` or `server_tool_use` is treated as an absent
+  subtree (all counts 0).
+- A token-count field accepts any JSON **number**: the value used is
+  `trunc(n)` (toward zero) when `0 <= trunc(n) <= u64::MAX`, otherwise
+  the field is treated as absent (0). So `1.5` counts 1, `2e2` counts
+  200, `-5`, `1e300`, and 24-digit integers count 0. Out-of-range values
+  MUST NOT panic, saturate, or abort the walker. Non-number tokens
+  (strings, objects, …) are treated as absent.
+- Unknown keys inside `usage` and `server_tool_use` are skipped.
+
+These rules apply wherever the pricing formula is applied (cost, events
+— they share one parser per impl).
+
 ## Bucketing
 
 For each accepted assistant turn:
@@ -481,6 +508,45 @@ Output (`--format jsonl`): one hit record per line, a summary record last.
 from, closing the "agent didn't think to check the other host" gap. Ordering
 is newest-first, tiebroken by `(timestamp DESC, session_id ASC, line_number
 ASC)`. `pretty` mode renders the same data human-readably.
+
+**Pretty format** (`--format pretty`, the default). Decided 2026-06-10
+(previously the highlight spacing, the summary shape, and go's dropped
+post-match suffix diverged per impl). Per hit, in order:
+
+```
+[<timestamp>] cwd=<slug> role=<role> session=<session_id>
+  <file_path>:<line_number>
+  before: <context text, truncated to 120 chars + ellipsis>
+  >>> <pre>[<match>]<post> <<<
+  after:  <context text>
+<blank line>
+```
+
+The highlight line brackets the FIRST `match_offsets` pair with the full
+snippet on both sides: exactly `  >>> `, `[`, `]`, ` <<<`. (Offsets are
+always produced by re-running the matcher on the snippet, which is built
+around the first match; in the never-expected empty case the snippet line
+is omitted.) After the hits comes ONE human-readable summary line — never
+a JSONL record:
+
+```
+<hits> hits in <sessions> sessions across <roots> roots (<files> files). truncated=<true|false> elapsed <N>ms.
+```
+
+`--count-only` suppresses hit rendering but keeps the summary line. The
+truncation warning on stderr is shared verbatim across impls:
+`walker: search: truncated to --limit=<N> (had <M> total); narrow with --since`.
+
+**Tool blocks.** With `--include-tool-blocks`, an entry's searchable text
+additionally includes, newline-joined in content order (decided
+2026-06-10; previously rust sorted dump keys while cpp dropped non-string
+inputs and unwrapped string inputs):
+
+- `tool_use.input` — the input value's compact JSON serialization (no
+  added whitespace), object key order preserved from the source. A bare
+  string input keeps its JSON quotes.
+- `tool_result.content` — a string contributes its raw text; an array
+  contributes each `{"type":"text"}` block's `text`.
 
 **Snippet boundaries.** `match_offsets` and the snippet window are byte
 offsets. The snippet is the byte range `[match_start − ⌊snippet_chars/2⌋,

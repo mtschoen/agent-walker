@@ -184,10 +184,7 @@ func parseFloat64(s string) (float64, error) {
 // that isn't a valid native path), so prefer it; elsewhere HOME is canonical.
 // The fallback covers the rarer inverse case. Returns "" if neither is set.
 func homeDirectory() string {
-	primary, secondary := "HOME", "USERPROFILE"
-	if runtime.GOOS == "windows" {
-		primary, secondary = "USERPROFILE", "HOME"
-	}
+	primary, secondary := homeEnvVars(runtime.GOOS)
 	if v, ok := os.LookupEnv(primary); ok && v != "" {
 		return v
 	}
@@ -195,6 +192,15 @@ func homeDirectory() string {
 		return v
 	}
 	return ""
+}
+
+// homeEnvVars is the platform seam for home resolution: pure so a test can
+// drive the windows ordering from any OS (COVERAGE-PLAN section 5 option 1).
+func homeEnvVars(goos string) (primary, secondary string) {
+	if goos == "windows" {
+		return "USERPROFILE", "HOME"
+	}
+	return "HOME", "USERPROFILE"
 }
 
 func defaultProjectsRoot() string {
@@ -205,30 +211,82 @@ func defaultProjectsRoot() string {
 }
 
 // JSON structures for a JSONL line.
+//
+// Wrong-typed fields are treated as absent rather than poisoning the line,
+// per SPEC.md "Lenient per-field parsing": the lenient* wrapper types absorb
+// type mismatches instead of failing the whole-entry unmarshal.
 
 type entry struct {
-	Timestamp string   `json:"timestamp"`
-	Message   *message `json:"message"`
+	Timestamp lenientString `json:"timestamp"`
+	Message   *message      `json:"message"`
 }
 
 type message struct {
-	Role  string `json:"role"`
-	ID    string `json:"id"`
-	Model string `json:"model"`
-	Usage *usage `json:"usage"`
+	Role  lenientString `json:"role"`
+	ID    lenientString `json:"id"`
+	Model lenientString `json:"model"`
+	Usage *usage        `json:"usage"`
 }
 
 type usage struct {
-	InputTokens              uint64         `json:"input_tokens"`
-	OutputTokens             uint64         `json:"output_tokens"`
-	CacheReadInputTokens     uint64         `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens uint64         `json:"cache_creation_input_tokens"`
+	InputTokens              lenientCount   `json:"input_tokens"`
+	OutputTokens             lenientCount   `json:"output_tokens"`
+	CacheReadInputTokens     lenientCount   `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens lenientCount   `json:"cache_creation_input_tokens"`
 	ServerToolUse            *serverToolUse `json:"server_tool_use"`
 }
 
 // serverToolUse is the nested usage.server_tool_use object; nil when absent.
 type serverToolUse struct {
-	WebSearchRequests uint64 `json:"web_search_requests"`
+	WebSearchRequests lenientCount `json:"web_search_requests"`
+}
+
+// lenientString unmarshals a JSON string; any other type is an absent field.
+type lenientString string
+
+func (s *lenientString) UnmarshalJSON(b []byte) error {
+	var v string
+	if err := sonic.Unmarshal(b, &v); err == nil {
+		*s = lenientString(v)
+	}
+	return nil
+}
+
+// lenientCount accepts any JSON number, truncated toward zero; values outside
+// [0, math.MaxUint64] and non-number tokens are treated as absent (0).
+type lenientCount uint64
+
+func (c *lenientCount) UnmarshalJSON(b []byte) error {
+	var u uint64
+	if err := sonic.Unmarshal(b, &u); err == nil {
+		*c = lenientCount(u)
+		return nil
+	}
+	var f float64
+	if err := sonic.Unmarshal(b, &f); err == nil && f >= 0 && f < 18446744073709551616.0 {
+		*c = lenientCount(uint64(f))
+	}
+	return nil
+}
+
+// UnmarshalJSON on usage absorbs a non-object value as an absent subtree.
+func (u *usage) UnmarshalJSON(b []byte) error {
+	type usageAlias usage // drops the method set, avoiding recursion
+	var a usageAlias
+	if err := sonic.Unmarshal(b, &a); err == nil {
+		*u = usage(a)
+	}
+	return nil
+}
+
+// UnmarshalJSON on serverToolUse absorbs a non-object value the same way.
+func (s *serverToolUse) UnmarshalJSON(b []byte) error {
+	type stuAlias serverToolUse
+	var a stuAlias
+	if err := sonic.Unmarshal(b, &a); err == nil {
+		*s = serverToolUse(a)
+	}
+	return nil
 }
 
 // ratesForModel returns (inputPerMTok, outputPerMTok) for a model string.
@@ -260,7 +318,7 @@ func costForTurn(u *usage, model string) float64 {
 		float64(u.OutputTokens)*outputRate) / 1_000_000.0
 	var webSearches uint64
 	if u.ServerToolUse != nil {
-		webSearches = u.ServerToolUse.WebSearchRequests
+		webSearches = uint64(u.ServerToolUse.WebSearchRequests)
 	}
 	return tokenCost + float64(webSearches)*webSearchCostUSD
 }
@@ -329,22 +387,22 @@ func walkGroup(paths []string, periodCutoff, winStart float64) groupResult {
 
 			// Dedup by message ID (if present).
 			if msg.ID != "" {
-				if _, already := seenIDs[msg.ID]; already {
+				if _, already := seenIDs[string(msg.ID)]; already {
 					continue
 				}
-				seenIDs[msg.ID] = struct{}{}
+				seenIDs[string(msg.ID)] = struct{}{}
 			}
 
 			// Timestamp must be parseable and in range.
 			if e.Timestamp == "" {
 				continue
 			}
-			ts, ok := parseISO8601(e.Timestamp)
+			ts, ok := parseISO8601(string(e.Timestamp))
 			if !ok || ts < earliest {
 				continue
 			}
 
-			cost := costForTurn(msg.Usage, msg.Model)
+			cost := costForTurn(msg.Usage, string(msg.Model))
 			if ts >= periodCutoff {
 				result.trailing += cost
 			}

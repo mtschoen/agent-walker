@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -300,6 +301,109 @@ func TestDiscoverHistoryGroupsMissingRoot(t *testing.T) {
 	if len(groups) != 0 {
 		t.Errorf("expected empty result for missing root, got %v", groups)
 	}
+}
+
+// TestDiscoverLatestPathsUnreadableRoot verifies that an unreadable root dir
+// is silently skipped and returns no paths.
+func TestDiscoverLatestPathsUnreadableRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 000 not supported on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 000 ineffective for root")
+	}
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(root, 0o755) //nolint — best effort cleanup
+	paths := discoverLatestPaths([]string{root}, "some-session-id")
+	if len(paths) != 0 {
+		t.Fatalf("expected 0 paths from unreadable root, got %d", len(paths))
+	}
+}
+
+// TestDiscoverLatestPathsUnreadableSlugDir verifies that an unreadable slug
+// dir inside a readable root is silently skipped.
+func TestDiscoverLatestPathsUnreadableSlugDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 000 not supported on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 000 ineffective for root")
+	}
+	root := t.TempDir()
+	slugPath := filepath.Join(root, "locked-slug")
+	if err := os.MkdirAll(slugPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(slugPath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(slugPath, 0o755) //nolint — best effort cleanup
+	paths := discoverLatestPaths([]string{root}, "some-session-id")
+	if len(paths) != 0 {
+		t.Fatalf("expected 0 paths with unreadable slug dir, got %d", len(paths))
+	}
+}
+
+// TestDiscoverHistoryGroupsUnreadableSlugDir verifies that an unreadable slug
+// directory is silently skipped during history group discovery.
+func TestDiscoverHistoryGroupsUnreadableSlugDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 000 not supported on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 000 ineffective for root")
+	}
+	root := t.TempDir()
+	slugPath := filepath.Join(root, "locked-slug")
+	if err := os.MkdirAll(slugPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(slugPath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(slugPath, 0o755) //nolint — best effort cleanup
+	groups := discoverHistoryGroups([]string{root})
+	if len(groups) != 0 {
+		t.Fatalf("expected 0 groups with unreadable slug dir, got %d", len(groups))
+	}
+}
+
+// TestRunBeaconsLatestDefaultRoot exercises the default-root fallback path:
+// runBeaconsLatest is called WITHOUT --projects-root, so it falls back to
+// defaultProjectsRoot() derived from the HOME env var.
+func TestRunBeaconsLatestDefaultRoot(t *testing.T) {
+	tempDir := t.TempDir()
+	// Point HOME at a temp dir so defaultProjectsRoot() resolves to a known
+	// path. Create the .claude/projects subtree so the walk doesn't error.
+	projectsDir := filepath.Join(tempDir, ".claude", "projects")
+	if err := os.MkdirAll(projectsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", tempDir)
+	t.Setenv("USERPROFILE", tempDir)
+	// Call runBeaconsLatest without --projects-root. The session won't be
+	// found (empty tree), but the fallback path is exercised.
+	// runBeaconsLatest prints to stdout (null result); it does not os.Exit on
+	// this path.
+	runBeaconsLatest([]string{"--session-id", "nope", "--now", "1000"})
+}
+
+// TestRunBeaconsHistoryDefaultRoot exercises the default-root fallback path:
+// runBeaconsHistory is called WITHOUT --projects-root.
+func TestRunBeaconsHistoryDefaultRoot(t *testing.T) {
+	tempDir := t.TempDir()
+	projectsDir := filepath.Join(tempDir, ".claude", "projects")
+	if err := os.MkdirAll(projectsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", tempDir)
+	t.Setenv("USERPROFILE", tempDir)
+	// Call runBeaconsHistory without --projects-root. Empty tree means no
+	// pairs found; function completes normally.
+	runBeaconsHistory([]string{"--period", "3600", "--now", "1000"})
 }
 
 // TestFormatFloat — covers the integer-shortcut + decimal path.

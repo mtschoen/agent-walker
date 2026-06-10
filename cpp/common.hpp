@@ -4,7 +4,9 @@
 #ifndef WALKER_COMMON_HPP
 #define WALKER_COMMON_HPP
 
+#include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdlib>
 #include <filesystem>
 #include <optional>
@@ -14,6 +16,15 @@
 namespace walker {
 
 namespace fs = std::filesystem;
+
+// Worker-pool sizing seam shared by all four parallel modes: min(8, hardware
+// threads), with a fixed fallback because std::thread::hardware_concurrency()
+// is allowed to return 0 when the count is unknown. Pure so a unit test can
+// drive the zero case on any host (COVERAGE-PLAN section 5, option 1).
+inline size_t effective_workers(unsigned hardware_threads) {
+    size_t workers = std::min<size_t>(8, hardware_threads);
+    return workers == 0 ? 4 : workers;
+}
 
 // Single source for the C++ impl's --version string, used by both entry
 // points (main.cpp cost mode + events.cpp). Mirrors the go/zig convention of
@@ -93,6 +104,12 @@ inline std::optional<double> parse_iso8601(std::string_view ts) {
     if (had_z) ts.remove_suffix(1);
 
     if (ts.size() < 19) return std::nullopt;
+    // Positional digit parsing alone would accept any separator bytes;
+    // require the canonical ISO 8601 separators (go/zig parity - they
+    // reject e.g. a space in place of the 'T').
+    if (ts[4] != '-' || ts[7] != '-' || ts[10] != 'T' || ts[13] != ':' ||
+        ts[16] != ':')
+        return std::nullopt;
 
     auto parse_int = [](const char* p, int len) -> int {
         int v = 0;

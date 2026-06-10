@@ -21,12 +21,14 @@ use std::path::PathBuf;
 /// unset, or set by git-bash to a POSIX-style path (`/c/Users/...`) that is
 /// not a valid native path — so prefer `USERPROFILE`, fall back to `HOME`.
 /// On other platforms, `HOME` is canonical (fall back to `USERPROFILE`).
+#[cfg(windows)]
 pub fn home_directory() -> Option<OsString> {
-    if cfg!(windows) {
-        std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
-    } else {
-        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
-    }
+    std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
+}
+
+#[cfg(not(windows))]
+pub fn home_directory() -> Option<OsString> {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
 }
 
 pub fn walker_config_path() -> PathBuf {

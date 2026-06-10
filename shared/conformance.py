@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -478,13 +479,12 @@ def run_walker_search_pretty(
 
 # --- Pretty-format assertions ---
 #
-# Pretty output text differs per impl (rust/zig emit `>>> text [match] text <<<`
-# with surrounding whitespace and a human-readable summary line; cpp/go emit
-# `>>>text [match] text<<<` with no surrounding whitespace and embed a JSONL
-# summary record in the pretty stream). We assert only on the SHARED structural
-# contract: one header line per hit, one file-info line per hit, the highlight
-# tokens `>>>` and `<<<` appear once per hit, the match wrapped in `[<match>]`,
-# and one `before:` / `after:` line per expected context turn.
+# SPEC "Pretty format" (decided 2026-06-10) pins the renderer across impls:
+# the highlight line is exactly `  >>> <pre>[<match>]<post> <<<` built from
+# the first match_offsets pair, and the stream ends with ONE human-readable
+# summary line (never a JSONL record). These assertions check the exact
+# highlight line per hit and the exact summary line (files/elapsed counts
+# vary per run, so those two fields are wildcarded).
 
 def _count_hit_headers(stdout: str) -> int:
     """A hit header looks like `[<timestamp>] cwd=... role=... session=...`."""
@@ -545,29 +545,25 @@ def assert_search_pretty(
     if got_close != expected_hit_count:
         problems.append(f"<<< count: got {got_close}, expected {expected_hit_count}")
 
-    # Each hit's match text (from snippet[match_offsets[0]]) should appear as
-    # `[<match>]` somewhere in stdout. Skip when count_only suppresses hits.
+    # Each hit must render the SPEC-exact highlight line, built from the
+    # first match_offsets pair (byte offsets into the snippet).
     if not suppress_hits:
+        stdout_lines = stdout.splitlines()
         for index, hit in enumerate(expected_hits):
             offsets = hit.get("match_offsets") or []
             snippet = hit.get("snippet", "")
             if not offsets:
                 continue
             start, end = offsets[0]
-            # Slice on byte-bounded snippet — but snippet is a Python str of UTF-8
-            # text; the binaries emit byte offsets that map cleanly to chars
-            # for ASCII patterns we use in fixtures. The 11-multibyte fixture
-            # has multibyte text, but offsets are byte offsets — re-decode by
-            # finding the literal match in the snippet rather than slicing.
-            try:
-                match_text = snippet.encode("utf-8")[start:end].decode("utf-8")
-            except UnicodeDecodeError:
-                # If the byte slice cut mid-codepoint, fall back to a structural
-                # check: the pattern itself should be wrapped somewhere.
-                match_text = combo["pattern"]
-            wrapped = f"[{match_text}]"
-            if wrapped not in stdout:
-                problems.append(f"hit[{index}] missing `{wrapped}` in stdout")
+            snippet_bytes = snippet.encode("utf-8")
+            expected_line = "  >>> {}[{}]{} <<<".format(
+                snippet_bytes[:start].decode("utf-8"),
+                snippet_bytes[start:end].decode("utf-8"),
+                snippet_bytes[end:].decode("utf-8"),
+            )
+            if expected_line not in stdout_lines:
+                problems.append(
+                    f"hit[{index}] missing exact highlight line {expected_line!r}")
                 break
 
         # before:/after: line counts (only meaningful when --context > 0).
@@ -582,13 +578,23 @@ def assert_search_pretty(
         if got_after != expected_after:
             problems.append(f"after: lines: got {got_after}, expected {expected_after}")
 
-    # Summary signal: the pretty stream MUST convey truncated=true when the
-    # combo's expected summary says so. Rust/Zig emit `truncated=true` as a
-    # human-readable token; C++/Go embed a JSONL summary record. Accept either.
-    if expected_summary.get("truncated"):
-        if ("truncated=true" not in stdout
-                and '"truncated":true' not in stdout):
-            problems.append("expected truncated=true marker in pretty stdout")
+    # The stream must end with the SPEC-exact summary line (files walked and
+    # elapsed ms vary per run; hits/sessions/roots/truncated are pinned).
+    expected_hit_total = expected_summary.get("hits", len(expected_hits))
+    summary_re = re.compile(
+        r"^{hits} hits in {sessions} sessions across {roots} roots "
+        r"\(\d+ files\)\. truncated={trunc} elapsed \d+ms\.$".format(
+            hits=expected_hit_total,
+            sessions=expected_summary.get("sessions_matched", 0),
+            roots=expected_summary.get("roots_walked", 1),
+            trunc="true" if expected_summary.get("truncated") else "false",
+        ))
+    final_lines = [line for line in stdout.splitlines() if line.strip()]
+    if not final_lines or not summary_re.match(final_lines[-1]):
+        problems.append(
+            f"missing SPEC summary line matching {summary_re.pattern!r}; "
+            f"last line: {final_lines[-1]!r}" if final_lines else
+            "empty pretty stdout")
 
     if problems:
         print(f"  [{lang:>4s}] {label:48s} FAIL  " + "; ".join(problems))
@@ -716,7 +722,7 @@ def assert_search_truncated(lang: str, binary: Path) -> bool:
     if returncode != 0:
         print(f"  [{lang:>4s}] {label:48s} FAIL  pretty exit={returncode} stderr={stderr!r}")
         return False
-    if "truncated=true" not in stdout and '"truncated":true' not in stdout:
+    if "truncated=true" not in stdout:
         problems.append("pretty stdout missing truncated=true marker")
     if TRUNCATION_STDERR_TOKEN not in stderr:
         problems.append(f"pretty stderr missing {TRUNCATION_STDERR_TOKEN!r}")
@@ -2198,6 +2204,31 @@ def check_search_mtime_prune(lang: str, binary: Path) -> bool:
     if not ok:
         print(f"        got {len(got_hits)} hits, expected {len(exp_hits)}; "
               f"summary={got_summary}")
+        return False
+
+    # Phase 2: age the PARENT transcripts too -- the parent-side prune arm
+    # is distinct code in every impl (zig walks parents and subagents in
+    # separate scanners). All hits must now be pruned.
+    label2 = "search: --since mtime prune (parents)"
+    with tempfile.TemporaryDirectory(prefix="walker-search-mtime2-") as tmp:
+        scen = Path(tmp) / scenario_name
+        shutil.copytree(SEARCH_CORPUS / scenario_name, scen)
+        for transcript in scen.rglob("*.jsonl"):
+            os.utime(transcript, (0, 0))
+        try:
+            got_hits, got_summary = run_walker_search(
+                lang, binary, Path(tmp),
+                combo["pattern"], ["--since", "365d"], now_unix,
+            )
+        except Exception as e:
+            print(f"  [{lang:>4s}] {label2:38s} FAIL  {e}")
+            return False
+    ok = (got_hits == [] and got_summary is not None
+          and got_summary.get("hits") == 0)
+    print(f"  [{lang:>4s}] {label2:38s} {' OK ' if ok else 'FAIL'}")
+    if not ok:
+        print(f"        got {len(got_hits)} hits, expected 0; "
+              f"summary={got_summary}")
     return ok
 
 
@@ -2206,11 +2237,11 @@ def check_search_tool_blocks_rich(lang: str, binary: Path) -> bool:
     objects, arrays, numbers, bools, nulls, string inputs, blocks without a
     type, non-object blocks, scalar content).
 
-    Per COVERAGE-PLAN resume item 4, impls legitimately diverge on tool-block
-    serialization, so this check asserts LOOSELY: exit 0, exactly one hit per
-    combo (the pattern sits in a plain text block, far from the tool dump),
-    correct session, and the match present in the snippet. Do NOT tighten to
-    full structural equality without a SPEC decision.
+    SPEC "Tool blocks" (decided 2026-06-10) pins the serialization: compact
+    JSON, source key order, string inputs keep their quotes. The canonical
+    combos match INSIDE the tool dump and assert those exact fragments; the
+    first two combos keep the original looser shape (the pattern sits in a
+    plain text block, far from the dump).
     """
     if not SEARCH_CORPUS.is_dir() or lang not in IMPLS_WITH_SEARCH:
         return True
@@ -2223,6 +2254,8 @@ def check_search_tool_blocks_rich(lang: str, binary: Path) -> bool:
         "arr": [{"x": "y"}, [2, 3], "s", True, None],
         # Escape-needing characters inside dumped tool-input strings.
         "esc": "tab\there\nquote\"back\\slash bs\bff\fcr\rctl\x01",
+        # Searchable needle INSIDE the dump for the canonical-form combo.
+        "needle_key": "rich-tool-needle",
     }
     lines = [
         {"type": "assistant", "timestamp": ts, "message": {
@@ -2306,6 +2339,49 @@ def check_search_tool_blocks_rich(lang: str, binary: Path) -> bool:
             if not ok:
                 print(f"        exit={result.returncode} hits={len(hits)} "
                       f"stderr={result.stderr.strip()[:160]!r}")
+                all_ok = False
+
+        # Canonical-form combos (SPEC "Tool blocks"): the pattern matches
+        # inside the dumped tool_use input, and the snippet must carry the
+        # canonical serialization fragments verbatim. Escape-free fragments
+        # only -- escape rendering of control characters stays impl-local.
+        for combo_label, pattern, fragments in (
+            ("search: tool dump canonical object form",
+             "rich-tool-needle",
+             ['"needle_key":"rich-tool-needle"',
+              '"obj":{"k":[1,"two",false,null,{"d":2.5}]}',
+              '"none":null',
+              '"ratio":1.5']),
+            ("search: tool dump string input keeps quotes",
+             "pre-stringified",
+             ['"pre-stringified input"']),
+        ):
+            cmd = [
+                str(binary), "search", pattern,
+                "--projects-root", tmp,
+                "--now", repr(now_unix),
+                "--format", "jsonl",
+                "--no-config",
+                "--include-tool-blocks",
+                "--snippet-chars", "600",
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    encoding="utf-8", timeout=10)
+            ok = result.returncode == 0
+            hits = []
+            if ok:
+                try:
+                    hits = [json.loads(line) for line in result.stdout.splitlines()
+                            if line.strip() and json.loads(line).get("type") == "hit"]
+                except Exception:
+                    ok = False
+            snippet = hits[0].get("snippet", "") if hits else ""
+            missing = [f for f in fragments if f not in snippet]
+            ok = ok and len(hits) == 1 and not missing
+            print(f"  [{lang:>4s}] {combo_label:48s} {' OK ' if ok else 'FAIL'}")
+            if not ok:
+                print(f"        exit={result.returncode} hits={len(hits)} "
+                      f"missing={missing!r} snippet={snippet[:200]!r}")
                 all_ok = False
     return all_ok
 

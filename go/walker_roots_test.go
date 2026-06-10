@@ -192,3 +192,36 @@ func TestResolveRootsBrokenSymlinkSkipped(t *testing.T) {
 		t.Fatalf("expected primary-only result, got %v", got)
 	}
 }
+
+// TestResolveRootsNonexistentExtraSkipped verifies that a nonexistent extra
+// root is skipped (exercises the filepath.Clean fallback when EvalSymlinks
+// fails, followed by the os.Stat failure filter). The primary must appear in
+// the result; the nonexistent extra must not.
+func TestResolveRootsNonexistentExtraSkipped(t *testing.T) {
+	primary := t.TempDir()
+	nonexistent := filepath.Join(t.TempDir(), "does-not-exist")
+	got := ResolveRoots(primary, []string{nonexistent}, false)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 result (primary only), got %v", got)
+	}
+	if got[0] != primary {
+		// filepath.EvalSymlinks may return a canonical version of primary;
+		// check the resolved value ends with the basename of the tempdir.
+		// We just need to confirm the nonexistent path is absent.
+		for _, r := range got {
+			if r == nonexistent {
+				t.Errorf("nonexistent extra root %q should not appear in result", nonexistent)
+			}
+		}
+	}
+}
+
+// TestResolveRootsDedupDuplicatePaths verifies that passing the same path
+// twice (once as primary, once as an extra) yields only a single entry.
+func TestResolveRootsDedupDuplicatePaths(t *testing.T) {
+	primary := t.TempDir()
+	got := ResolveRoots(primary, []string{primary}, false)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 deduped result for same primary+extra, got %d (%v)", len(got), got)
+	}
+}

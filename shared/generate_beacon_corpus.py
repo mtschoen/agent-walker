@@ -138,6 +138,9 @@ def dirty_ladder_lines(good_entry: dict) -> list:
         {"type": "assistant", "timestamp": "definitely-not-iso",
          "message": {"role": "assistant", "id": "bad-ts",
                      "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}},
+        {"type": "assistant", "timestamp": "2026-05-09 11:00:00.000Z",
+         "message": {"role": "assistant", "id": "space-sep-ts",
+                     "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}},
         {"type": "assistant", "timestamp": iso(NOW_UNIX - 500),
          "message": {"role": "user", "id": "role-mismatch",
                      "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}},
@@ -506,6 +509,15 @@ def scenario_wrong_typed_fields():
         json.dumps({"kind": "begin", "eta_seconds": 60, "summary": "x",
                     "drift": 9}),
         json.dumps({"kind": "begin", "eta_seconds": "soon", "summary": "x"}),
+        # beats_left, when present, must be an i64 integer: floats, strings,
+        # and out-of-range numbers all reject the beacon (decided 2026-06-10,
+        # aligning cpp/zig to the rust/go strictness).
+        json.dumps({"kind": "begin", "eta_seconds": 60, "summary": "x",
+                    "beats_left": 5.5}),
+        json.dumps({"kind": "begin", "eta_seconds": 60, "summary": "x",
+                    "beats_left": "soon"}),
+        json.dumps({"kind": "begin", "eta_seconds": 60, "summary": "x",
+                    "beats_left": 1e30}),
     ]
     lines = [
         assistant_with_text(t + 10 * i, f"msg_wt_{i:03d}", beacon_text(body))
@@ -972,6 +984,13 @@ def scenario_dirty_ladder_history():
     valid = [
         assistant_with_text(t0, "msg_dlh_begin",
             beacon_text(beacon_json("begin", 300, "dirty history begin", drift=None))),
+        # Tag-matched bodies the history beacon parser must reject
+        # mid-lifecycle: invalid JSON inside the braces, and a valid but
+        # fieldless object. Neither may disturb the surrounding pair.
+        assistant_with_text(t0 + 10, "msg_dlh_badjson",
+            beacon_text('{"kind": }')),
+        assistant_with_text(t0 + 20, "msg_dlh_empty",
+            beacon_text('{}')),
         assistant_with_text(t1, "msg_dlh_end",
             beacon_text(beacon_json("end", 0, "dirty history end", drift=None))),
     ]
@@ -1066,11 +1085,10 @@ def main() -> None:
         # dirty_ladder_history: inject the ladder into the session file.
         if scenario == "dirty_ladder_history":
             for rel, lines in files.items():
-                # Take the first lifecycle's begin/end and interleave with
-                # bad lines so the walker has to filter them.
-                good_begin = lines[0]
-                good_end = lines[1]
-                mixed = dirty_ladder_lines(good_begin) + [good_end]
+                # Bracket the lifecycle's begin with the bad-line ladder,
+                # then append the rest of the scenario lines (malformed
+                # beacon bodies + the closing end) in order.
+                mixed = dirty_ladder_lines(lines[0]) + list(lines[1:])
                 write_jsonl_mixed(CORPUS_BEACONS / scenario / rel, mixed)
         else:
             for rel, lines in files.items():

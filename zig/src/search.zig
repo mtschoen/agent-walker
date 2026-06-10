@@ -133,10 +133,10 @@ fn parseArgs(alloc: Allocator, raw: [][]const u8) !SearchArgs {
         }
     }
 
-    const pat = pattern orelse {
-        writeStderrFmt(alloc, "walker: search: pattern must be non-empty\n", .{});
-        std.process.exit(2);
-    };
+    // Missing and empty positionals share one diagnostic block: the two
+    // previously-identical blocks were ICF-merged by the compiler, which
+    // attributed all hits to one of them and garbled line coverage.
+    const pat = pattern orelse "";
     if (pat.len == 0) {
         writeStderrFmt(alloc, "walker: search: pattern must be non-empty\n", .{});
         std.process.exit(2);
@@ -482,8 +482,9 @@ fn matchHere(items: []const Item, idx: usize, text: []const u8, pos: usize, case
 // Find all non-overlapping matches of `pattern` in `text`. Empty matches are
 // handled by advancing one byte to avoid infinite loops.
 fn findAllMatches(alloc: Allocator, pattern: *const Pattern, text: []const u8) ![][2]usize {
+    // alloc is arena-backed at every call site; an error path reclaims the
+    // list at arena deinit, so no errdefer cleanup is needed.
     var out: std.ArrayList([2]usize) = .empty;
-    errdefer out.deinit(alloc);
 
     if (pattern.mode == .literal) {
         const needle = pattern.literal_needle;
@@ -717,7 +718,6 @@ fn scanFile(alloc: Allocator, path: []const u8, include_queue_ops: bool) ![]Scan
     // the lifetime story explicit.
 
     var out: std.ArrayList(ScanMessage) = .empty;
-    errdefer out.deinit(alloc);
 
     var idx: u32 = 0;
     var iter = std.mem.splitScalar(u8, data, '\n');
@@ -726,7 +726,10 @@ fn scanFile(alloc: Allocator, path: []const u8, include_queue_ops: bool) ![]Scan
         const line = std.mem.trim(u8, raw, " \t\r\n");
         if (line.len == 0) continue;
 
-        if (try parseScanMessage(alloc, line, idx, include_queue_ops)) |m| {
+        // A malformed line is skipped, never the whole file (SPEC: malformed
+        // JSONL lines are skipped) -- propagating the parse error here used
+        // to abandon every line of the file, hits included.
+        if (parseScanMessage(alloc, line, idx, include_queue_ops) catch null) |m| {
             try out.append(alloc, m);
         }
     }
@@ -1002,8 +1005,9 @@ fn discoverFiles(
     since: ?f64,
     cwd_filter: ?[]const u8,
 ) ![]DiscoveredFile {
+    // alloc is arena-backed; an error path reclaims the list at arena
+    // deinit, so no errdefer cleanup is needed.
     var out: std.ArrayList(DiscoveredFile) = .empty;
-    errdefer out.deinit(alloc);
 
     for (roots) |root| {
         if (is_windows) {
@@ -1292,10 +1296,9 @@ fn scanSlugJsonlLinux(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), roo
     const slug_z = try alloc.dupeZ(u8, slug_dir);
     defer alloc.free(slug_z);
     const slug_fd: i32 = @bitCast(@as(u32, @truncate(linux.openat(linux.AT.FDCWD, slug_z, .{ .DIRECTORY = true }, 0))));
-    if (slug_fd < 0) {
-        alloc.free(slug_dir);
-        return;
-    }
+    // Non-directory root entries (e.g. a stray file in the slug position)
+    // fail the openat; slug_dir is arena-backed, so just return.
+    if (slug_fd < 0) return;
     defer _ = linux.close(slug_fd);
 
     var dent_buf: [8192]u8 = undefined;

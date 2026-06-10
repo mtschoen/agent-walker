@@ -181,6 +181,78 @@
         "session_id": "sess-013",
         "slug": "project-nu"
       }
+    ],
+    "14-wrong-typed-usage": [
+      {
+        "ts": 1747899940.0,
+        "usd": 0.0,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-014",
+        "slug": "project-omicron"
+      },
+      {
+        "ts": 1747899941.0,
+        "usd": 0.00075,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-014",
+        "slug": "project-omicron"
+      },
+      {
+        "ts": 1747899942.0,
+        "usd": 0.003003,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-014",
+        "slug": "project-omicron"
+      },
+      {
+        "ts": 1747899943.0,
+        "usd": 0.00075,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-014",
+        "slug": "project-omicron"
+      },
+      {
+        "ts": 1747899944.0,
+        "usd": 0.00045,
+        "model": "",
+        "session_id": "sess-014",
+        "slug": "project-omicron"
+      },
+      {
+        "ts": 1747899945.0,
+        "usd": 0.00075,
+        "model": "claude-opus-4-7",
+        "session_id": "sess-014",
+        "slug": "project-omicron"
+      },
+      {
+        "ts": 1747899946.0,
+        "usd": 7.5e-05,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-014",
+        "slug": "project-omicron"
+      },
+      {
+        "ts": 1747899947.0,
+        "usd": 7.5e-05,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-014",
+        "slug": "project-omicron"
+      },
+      {
+        "ts": 1747899948.0,
+        "usd": 0.02,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-014",
+        "slug": "project-omicron"
+      },
+      {
+        "ts": 1747899949.0,
+        "usd": 0.00035,
+        "model": "claude-haiku-4-5",
+        "session_id": "sess-014",
+        "slug": "project-omicron"
+      }
     ]
   }
 }

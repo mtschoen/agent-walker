@@ -1,22 +1,20 @@
 # claude-walker — Plan for 100% test coverage
 
-> Status: **Phases 0–4 live; gap to 100% closes in follow-up PRs** (2026-05-28).
-> Pipeline + baseline live (Phases 0–1, `shared/coverage.py` → `TEST-REPORT.md`).
-> Gap matrix written (Phase 2 → `COVERAGE-GAPS.md`). Phase 3 ran three rounds of
-> parallel fan-out (Batches B/C/D + sub-batches A-i/A-ii/A-iii + R3-α/β/γ),
-> then small follow-ups landed items 1/2/3 from the resume list (Zig §F
-> unreachable-asserts restructured, Go walker_roots:71 covered via a
-> wrong-typed-extras fixture, Rust events broken-pipe branch tested in-process).
-> Phase 4 CI gate live: `.gitea/workflows/ci.yml::coverage-linux` runs
-> `shared/coverage.py --baseline …` and fails on regression. Current:
-> **rust 98.00% · cpp 98.70% · go 97.89% · zig 97.99%** (locked as baseline
-> 2026-06-10, after the coverage-regression fix batch).
-> Three real bugs fixed along the way (2× Zig `parseTs`, 1× Zig regex parity).
-> Remaining work to 100% — items 4 (SPEC under-specs) and 6 (platform seam) —
-> in §"Resume points" below.
-> Goal: every line of production code in **all four impls** exercised by a
-> test, with a checked-in `TEST-REPORT.md` and a CI gate. See
-> `~/.claude/skills/maintaining-full-coverage` for the governing discipline.
+> Status: **COMPLETE — 100% in all four impls** (2026-06-10).
+> `shared/coverage.py` reports **rust 100.00 · cpp 100.00 · go 100.00 ·
+> zig 100.00** with zero exclusions; the CI gate
+> (`.gitea/workflows/ci.yml::coverage-linux`) now runs the strict
+> default mode (non-zero exit below 100%) instead of `--baseline`.
+> Items 4 (SPEC under-specs) and 6 (platform seams) closed in the same
+> push — see §"Resume points" for what landed. Five real bugs were fixed
+> by coverage work overall (2× Zig `parseTs`, 1× Zig regex parity, a Zig
+> abort on out-of-range usage numbers, and Zig search dropping a whole
+> file on one malformed line), plus a kcov accumulation bug and an
+> llvm-cov multi-object accounting trap fixed in the harness itself.
+> Goal (met): every line of production code in **all four impls**
+> exercised by a test, with a checked-in `TEST-REPORT.md` and a CI gate.
+> See `~/.claude/skills/maintaining-full-coverage` for the governing
+> discipline.
 
 ## 1. Where we are today (honest baseline)
 
@@ -132,23 +130,31 @@ still the right index. Items 1/2/3/5 below have **landed**; 4 and 6 remain:
    Extracted `emit_records<W: Write>` and added an in-process test using
    a `BrokenPipeWriter` that returns `ErrorKind::BrokenPipe` on first
    write; verifies the loop breaks after one attempt without panicking.
-4. **SPEC under-specifications surfaced by Phase 3 agents** — three
-   pretty-format divergences (highlight delimiter spacing, summary line
-   format, Go dropping post-match suffix) and three `--include-tool-blocks`
-   tool_use input formatting divergences (rust quotes / cpp unwraps /
-   go preserves bytes). Each needs a SPEC decision before a parity test
-   can be tightened beyond "substring presence" — not coverage work
-   per se but blocks the last few search.* lines.
+4. ~~**SPEC under-specifications surfaced by Phase 3 agents**~~ — landed
+   (2026-06-10). SPEC now pins: lenient per-field usage parsing (wrong-
+   typed leaves absent, numbers truncate toward zero, out-of-range
+   absent — fixed a zig abort on 1e300 token counts), the pretty format
+   (exact `  >>> pre[match]post <<<` highlight + one human summary
+   line), and tool-block serialization (compact JSON, source key order,
+   string inputs keep quotes). All four impls aligned and verified
+   byte-identical; conformance asserts the exact forms.
 5. ~~**Phase 4 CI gate**~~ — landed. `.gitea/workflows/ci.yml` gained a
    `coverage-linux` job that builds SimonKagstrom/kcov master and runs
    `python shared/coverage.py --baseline …` (floors raised whenever
    coverage rises; current values live in ci.yml).
    Regression below any threshold fails the job. Raise the floors in the
    same PR that raises coverage; the macOS check stays local-only.
-6. **Platform branches (§D, the long pole)** — Windows + macOS
-   discovery code. Per §5 of this plan, the preferred path is the
-   restructure-for-testability seam (inject home dir, dir-lister,
-   clock). Saved for last; large refactor across all four impls.
+6. ~~**Platform branches (§D, the long pole)**~~ — landed (2026-06-10),
+   smaller than feared: most "platform" lines were compile-time-gated
+   already (cpp `#ifdef`, zig comptime `is_windows`) and never in the
+   Linux denominator. The two runtime-checked stragglers got §5-option-1
+   seams: rust `home_directory` became `#[cfg]`-selected items and go
+   gained the pure `homeEnvVars(goos)` helper (unit-tested for both
+   orderings); cpp's `hardware_concurrency()==0` fallbacks collapsed
+   into the unit-tested `effective_workers` seam. A separate kcov bug
+   (in-place run accumulation drops lines hit only by earlier runs) was
+   masquerading as ~20 unmeasurable zig lines — fixed in coverage.py by
+   per-run `--collect-only` outdirs merged once via `kcov --merge`.
 
 ### Phase 3 — Fill the gaps
 - **Shared behavior gaps** → new `conformance.py` fixtures via the

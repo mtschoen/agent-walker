@@ -147,6 +147,11 @@ fn parse_cost_args(args: &[String]) -> Result<Args, String> {
 }
 
 pub(crate) fn parse_iso8601(ts: &str) -> Option<f64> {
+    // chrono tolerates a space as the date/time separator (RFC 3339 note);
+    // go/zig require the literal 'T', so enforce it here for parity.
+    if ts.as_bytes().get(10) != Some(&b'T') {
+        return None;
+    }
     // chrono accepts the "Z" suffix natively (RFC 3339 defines it as +00:00),
     // so no normalization pass (and no per-call allocation) is needed.
     DateTime::parse_from_rfc3339(ts)
@@ -263,14 +268,15 @@ fn main() {
         Some("beacons-history") => (Subcommand::BeaconsHistory, &raw[1..]),
         Some("search") => (Subcommand::Search, &raw[1..]),
         Some("events") => (Subcommand::Events, &raw[1..]),
-        // Bare flag invocation = cost mode (back-compat).
-        Some(s) if s.starts_with('-') => (Subcommand::Cost, &raw[..]),
-        Some(s) => {
+        Some(s) if !s.starts_with('-') => {
             eprintln!("walker: unknown subcommand: {}", s);
             usage_pointer();
             std::process::exit(2);
         }
-        None => (Subcommand::Cost, &raw[..]),
+        // Bare-flag invocation = cost mode (back-compat). wants_help()
+        // already exited for the no-args case, so None folds harmlessly
+        // into this arm.
+        _ => (Subcommand::Cost, &raw[..]),
     };
 
     match subcommand {

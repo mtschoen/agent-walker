@@ -85,7 +85,12 @@ func searchExtractAll(content json.RawMessage, includeToolBlocks bool) (textDefa
 			}
 		case "tool_use":
 			if includeToolBlocks && len(b.Input) > 0 {
-				toolParts = append(toolParts, string(b.Input))
+				// SPEC "Tool blocks": compact JSON serialization preserving
+				// source key order; json.Compact minifies without reordering.
+				var compacted bytes.Buffer
+				if err := json.Compact(&compacted, b.Input); err == nil {
+					toolParts = append(toolParts, compacted.String())
+				}
 			}
 		case "tool_result":
 			if includeToolBlocks && len(b.Content) > 0 {
@@ -740,9 +745,8 @@ func asciiScanFold(text string, lowerPat []byte) (asciiOnly, found bool) {
 			return false, false
 		}
 	}
-	if m == 0 {
-		return true, true
-	}
+	// m >= 1 always: parseSearchArgs rejects empty patterns, and the fold
+	// scan is only built for a non-empty literal.
 	if m > n {
 		return true, false
 	}
@@ -1049,7 +1053,9 @@ func runSearch(argv []string) {
 		out.WriteByte('\n')
 		fmt.Print(out.String())
 	} else {
-		// Pretty format
+		// Pretty format (SPEC "Pretty format"): highlight is
+		// `  >>> pre[match]post <<<`; the summary is one human-readable
+		// line, not a JSONL record.
 		if !args.CountOnly {
 			for _, h := range hits {
 				fmt.Printf("[%s] cwd=%s role=%s session=%s\n", h.TimestampStr, h.CwdSlug, h.Role, h.SessionID)
@@ -1057,19 +1063,14 @@ func runSearch(argv []string) {
 				for _, t := range h.ContextBefore {
 					fmt.Printf("  before: %s\n", searchTruncateStr(t.Text, 120))
 				}
+				// MatchOffsets come from re-running the matcher on a snippet
+				// built around the first match, so they are always present
+				// and in-bounds; SPEC omits the snippet line otherwise.
 				if len(h.MatchOffsets) > 0 {
 					mo := h.MatchOffsets[0]
 					pm := int(mo[0])
 					pe := int(mo[1])
-					if pm > len(h.Snippet) {
-						pm = len(h.Snippet)
-					}
-					if pe > len(h.Snippet) {
-						pe = len(h.Snippet)
-					}
-					fmt.Printf("  >>>%s[%s]<<<\n", h.Snippet[:pm], h.Snippet[pm:pe])
-				} else {
-					fmt.Printf("  %s\n", h.Snippet)
+					fmt.Printf("  >>> %s[%s]%s <<<\n", h.Snippet[:pm], h.Snippet[pm:pe], h.Snippet[pe:])
 				}
 				for _, t := range h.ContextAfter {
 					fmt.Printf("  after:  %s\n", searchTruncateStr(t.Text, 120))
@@ -1077,9 +1078,8 @@ func runSearch(argv []string) {
 				fmt.Println()
 			}
 		}
-		searchWriteSummary(out, hitsOutput, sessionsMatched, rootsWalked, filesWalked, truncated, elapsedMs)
-		out.WriteByte('\n')
-		fmt.Print(out.String())
+		fmt.Printf("%d hits in %d sessions across %d roots (%d files). truncated=%t elapsed %dms.\n",
+			hitsOutput, sessionsMatched, rootsWalked, filesWalked, truncated, elapsedMs)
 	}
 
 	if truncated {
