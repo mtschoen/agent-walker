@@ -958,9 +958,8 @@ int run(const std::vector<std::string> &argv) {
   // is const and does not mutate the regex/pattern state, so one shared
   // matcher is safe across threads. Mirrors the cost-mode pattern in
   // main.cpp::run_cost.
-  size_t num_workers = std::min<size_t>(8, std::thread::hardware_concurrency());
-  if (num_workers == 0)
-    num_workers = 4;
+  size_t num_workers =
+      walker::effective_workers(std::thread::hardware_concurrency());
 
   std::vector<std::vector<Hit>> per_thread_hits(num_workers);
   std::atomic<size_t> task_index(0);

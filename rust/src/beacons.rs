@@ -863,4 +863,52 @@ mod tests {
         assert!(groups.contains_key(&k2));
         let _ = fs::remove_dir_all(&root);
     }
+
+    /// discover_latest_paths returns empty when the root directory is unreadable.
+    #[cfg(unix)]
+    #[test]
+    fn discover_latest_paths_unreadable_root_returns_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempdir_path("latest-unreadable-root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+        let paths = discover_latest_paths(std::slice::from_ref(&root), "any-session");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        assert!(
+            paths.is_empty(),
+            "unreadable root should yield no paths"
+        );
+    }
+
+    /// discover_latest_paths silently skips a slug directory that is unreadable
+    /// when listing session entries within it.
+    #[cfg(unix)]
+    #[test]
+    fn discover_latest_paths_unreadable_slug_dir_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempdir_path("latest-unreadable-slug");
+
+        // Bad slug: a directory we can see from the root but cannot read.
+        let bad_slug = root.join("bad-slug");
+        fs::create_dir_all(&bad_slug).unwrap();
+        fs::set_permissions(&bad_slug, fs::Permissions::from_mode(0o000)).unwrap();
+
+        // Good slug: has a matching parent transcript.
+        let good_slug = root.join("good-slug");
+        fs::create_dir_all(&good_slug).unwrap();
+        fs::write(good_slug.join("target-session.jsonl"), b"").unwrap();
+
+        let paths = discover_latest_paths(std::slice::from_ref(&root), "target-session");
+
+        fs::set_permissions(&bad_slug, fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = fs::remove_dir_all(&root);
+
+        // The bad slug is skipped; the good slug's transcript is found.
+        assert_eq!(paths.len(), 1, "expected exactly one path from the good slug");
+        assert!(
+            paths[0].ends_with("target-session.jsonl"),
+            "unexpected path: {:?}",
+            paths[0]
+        );
+    }
 }

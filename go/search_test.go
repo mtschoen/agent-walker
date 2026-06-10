@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"testing"
 )
 
@@ -395,6 +396,59 @@ func TestSearchMatcherFastPathParity(t *testing.T) {
 	}
 	if len(got) != len(want) {
 		t.Errorf("kelvin fold: matcher=%v; regex=%v (must agree)", got, want)
+	}
+}
+
+// TestParseSearchArgsEmptyProjectsRootReappliesDefault covers the
+// `if args.ProjectsRoot == ""` branch at the bottom of parseSearchArgs:
+// passing --projects-root "" should re-apply defaultProjectsRoot() so the
+// result is non-empty.
+func TestParseSearchArgsEmptyProjectsRootReappliesDefault(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("HOME", tempDir)
+	t.Setenv("USERPROFILE", tempDir)
+	args, err := parseSearchArgs([]string{"pattern", "--projects-root", ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args.ProjectsRoot == "" {
+		t.Errorf("ProjectsRoot should be non-empty after re-applying default, got empty string")
+	}
+}
+
+// TestParseSearchTimeArgNumericShapeFailsParse covers the branch where the
+// argument passes isSearchNumeric but strconv.ParseFloat fails. This cannot
+// happen with a well-formed numeric-looking string, but a string like "1.1.1"
+// passes the character-class check (digits + dots) yet is not a valid float.
+func TestParseSearchTimeArgNumericShapeFailsParse(t *testing.T) {
+	// "1.1.1" passes isSearchNumeric (only digits and dots) but ParseFloat rejects it.
+	_, err := parseSearchTimeArg("1.1.1d", 0)
+	if err == nil {
+		t.Errorf("parseSearchTimeArg(1.1.1d) should return an error, got nil")
+	}
+}
+
+// TestSearchDiscoverFilesUnreadableSlugDir verifies that a slug directory that
+// cannot be listed (chmod 000) is silently skipped.
+func TestSearchDiscoverFilesUnreadableSlugDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 000 not supported on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("chmod 000 ineffective for root")
+	}
+	root := t.TempDir()
+	slugPath := filepath.Join(root, "locked-slug")
+	if err := os.MkdirAll(slugPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(slugPath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(slugPath, 0o755) //nolint — best effort cleanup
+	got := searchDiscoverFiles([]string{root}, nil, nil)
+	if len(got) != 0 {
+		t.Fatalf("expected 0 files with unreadable slug dir, got %d", len(got))
 	}
 }
 

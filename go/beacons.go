@@ -192,9 +192,8 @@ func findLatestInPath(path string) (*beaconWithTimestamp, bool) {
 		matches := beaconRegex.FindAllStringSubmatch(combined, -1)
 		var entryBeacon *beacon
 		for _, m := range matches {
-			if len(m) < 2 {
-				continue
-			}
+			// beaconRegex has exactly one capture group, so every match
+			// row has len 2; index m[1] directly.
 			var rb rawBeacon
 			if err := sonic.Unmarshal([]byte(m[1]), &rb); err != nil {
 				continue
@@ -273,9 +272,8 @@ func collectSessionEventsInPath(path string) sessionEvents {
 		combined := extractText(entry.Message.Content)
 		matches := beaconRegex.FindAllStringSubmatch(combined, -1)
 		for _, m := range matches {
-			if len(m) < 2 {
-				continue
-			}
+			// beaconRegex has exactly one capture group, so every match
+			// row has len 2; index m[1] directly.
 			var rb rawBeacon
 			if err := sonic.Unmarshal([]byte(m[1]), &rb); err != nil {
 				continue
@@ -456,11 +454,8 @@ func runBeaconsLatest(args []string) {
 		)
 		return
 	}
-	beaconJSON, err := sonic.Marshal(best.beacon)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "walker: beacons-latest: marshal: %v\n", err)
-		os.Exit(2)
-	}
+	// beacon is a fixed struct of strings/numbers; Marshal cannot fail.
+	beaconJSON, _ := sonic.Marshal(best.beacon)
 	age := nowUnix - best.timestamp
 	fmt.Printf(
 		"{\"beacon\":%s,\"emitted_at\":%s,\"age_seconds\":%s,\"elapsed_ms\":%d}\n",
@@ -735,10 +730,9 @@ func runBeaconsHistory(args []string) {
 						if pendingBegin != nil && b.timestamp > pendingBegin.timestamp {
 							wall := b.timestamp - pendingBegin.timestamp
 							idle := computeIdleInWindow(eventsAll, pendingBegin.timestamp, b.timestamp)
+							// idle sums gaps clipped to [begin,end], so it
+							// can never exceed wall.
 							active := wall - idle
-							if active < 0 {
-								active = 0
-							}
 							local = append(local, historyPair{
 								beginEta:      pendingBegin.beacon.EtaSeconds,
 								actualElapsed: wall,

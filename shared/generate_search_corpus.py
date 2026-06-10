@@ -1372,6 +1372,9 @@ def multi_root_scenario_01_two_roots():
     files = {
         "primary/proj-primary/sid_p.jsonl": [assistant_text(t_primary, "msg_mr_p", text_p)],
         "extra/proj-extra/sid_e.jsonl": [assistant_text(t_extra, "msg_mr_e", text_e)],
+        # Root-LEVEL stray file (slug position): discovery must skip a
+        # non-directory entry where a slug dir is expected.
+        "primary/stray.txt": ["needle inside a stray root-level file"],
     }
     o_p = find_offset(text_p, "needle")
     o_e = find_offset(text_e, "needle")

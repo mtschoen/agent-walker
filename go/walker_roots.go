@@ -53,16 +53,9 @@ func ReadExtraRootsFromConfig() []string {
 		fmt.Fprintf(os.Stderr, "walker: malformed %s -- ignoring extra roots\n", configPath)
 		return nil
 	}
-	// firstNonSpace returns the first non-whitespace byte or 0.
-	first := byte(0)
-	for _, b := range probe {
-		if b == ' ' || b == '\t' || b == '\n' || b == '\r' {
-			continue
-		}
-		first = b
-		break
-	}
-	if first != '{' {
+	// json.Unmarshal into a RawMessage strips leading whitespace, so the
+	// first byte of probe is the body's first significant byte.
+	if len(probe) == 0 || probe[0] != '{' {
 		fmt.Fprintf(os.Stderr, "walker: %s is not a JSON object -- ignoring\n", configPath)
 		return nil
 	}
@@ -108,14 +101,10 @@ func ResolveRoots(primary string, cliExtras []string, readConfig bool) []string 
 	var result []string
 	seen := make(map[string]struct{})
 	for _, c := range combined {
-		info, err := os.Stat(c.path)
-		if err != nil || !info.IsDir() {
-			if !c.isPrimary {
-				fmt.Fprintf(os.Stderr,
-					"walker: extra root not a directory, skipping: %s\n", c.path)
-			}
-			continue
-		}
+		// Dedup key per SPEC "Resolution": canonical form, falling back to
+		// the lexically-normalized path when canonicalization fails (e.g.
+		// a nonexistent extra). Canonicalize BEFORE the existence filter,
+		// matching rust/cpp, so the fallback is reachable.
 		canonical, err := filepath.EvalSymlinks(c.path)
 		if err != nil {
 			canonical = filepath.Clean(c.path)
@@ -124,6 +113,14 @@ func ResolveRoots(primary string, cliExtras []string, readConfig bool) []string 
 			continue
 		}
 		seen[canonical] = struct{}{}
+		info, err := os.Stat(c.path)
+		if err != nil || !info.IsDir() {
+			if !c.isPrimary {
+				fmt.Fprintf(os.Stderr,
+					"walker: extra root not a directory, skipping: %s\n", c.path)
+			}
+			continue
+		}
 		result = append(result, canonical)
 	}
 	return result

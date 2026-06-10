@@ -276,6 +276,13 @@ def fixture_08_dirty_ladder():
                         "model": "claude-opus-4-7", "usage": {"input_tokens": 99}},
         }),
         json.dumps({
+            # Space in place of the ISO 'T' separator: rejected everywhere
+            # (decided 2026-06-10; rust/cpp previously accepted it).
+            "type": "assistant", "timestamp": "2026-05-09 11:00:00.000Z",
+            "message": {"role": "assistant", "id": "space-sep-ts-events",
+                        "model": "claude-opus-4-7", "usage": {"input_tokens": 99}},
+        }),
+        json.dumps({
             "type": "assistant", "timestamp": iso_z(_IN_WINDOW),
             "message": {"role": "user", "id": "role-mismatch-events",
                         "model": "claude-opus-4-7", "usage": {"input_tokens": 99}},

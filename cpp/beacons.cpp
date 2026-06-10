@@ -438,15 +438,14 @@ void walk_entries_for_history(const fs::path &path, AssistantCb &&assistant_cb,
             }
           } else if (msg_key == "content") {
             auto val = msg_field.value();
-            sj::ondemand::json_type ct;
-            if (val.type().get(ct) != sj::SUCCESS)
-              continue;
             has_content = true;
-            if (ct == sj::ondemand::json_type::array) {
+            // Try the array shape directly: a freshly-iterated field's type
+            // can always be sniffed, so attempting get_array and falling to
+            // the scalar arm on failure replaces the prior unreachable
+            // type()/get_array error checks.
+            sj::ondemand::array arr;
+            if (val.get_array().get(arr) == sj::SUCCESS) {
               content_was_array = true;
-              sj::ondemand::array arr;
-              if (val.get_array().get(arr) != sj::SUCCESS)
-                continue;
               bool first_text = true;
               for (auto block_val : arr) {
                 sj::ondemand::object block;
@@ -490,10 +489,9 @@ void walk_entries_for_history(const fs::path &path, AssistantCb &&assistant_cb,
             } else {
               // Non-array content (bare string = real user prompt
               // in the older format; any other scalar can't carry a
-              // tool_result block either). simdjson on-demand
-              // auto-skips unconsumed scalars when iteration
-              // advances, and val.type() above peeked without
-              // consuming — so nothing more is needed here.
+              // tool_result block either). The failed get_array does
+              // not consume the value; on-demand auto-skips it when
+              // iteration advances, so nothing more is needed here.
               content_was_array = false;
             }
           }
@@ -936,9 +934,8 @@ int run_history(const std::vector<std::string> &args) {
   // *_beacons_in) keep parser state thread-local. std::regex const ops
   // are thread-safe, so the shared beacon_re() is fine. Mirrors the
   // cost-mode and search-mode patterns elsewhere in this codebase.
-  size_t num_workers = std::min<size_t>(8, std::thread::hardware_concurrency());
-  if (num_workers == 0)
-    num_workers = 4;
+  size_t num_workers =
+      walker::effective_workers(std::thread::hardware_concurrency());
 
   struct Local {
     std::vector<std::pair<double, double>> pairs;

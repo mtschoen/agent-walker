@@ -210,20 +210,20 @@ fn parse_time_arg(s: &str, now: f64) -> Result<f64, String> {
     if trimmed.is_empty() {
         return Err("empty value".into());
     }
-    if let Some(last) = trimmed.chars().last() {
-        let multiplier = match last {
-            'd' => Some(86_400.0_f64),
-            'h' => Some(3_600.0),
-            'm' => Some(60.0),
-            's' => Some(1.0),
-            _ => None,
-        };
-        if let Some(multiplier) = multiplier {
-            let head = &trimmed[..trimmed.len() - last.len_utf8()];
-            if !head.is_empty() && head.chars().all(|c| c.is_ascii_digit() || c == '.') {
-                let n: f64 = head.parse().map_err(|e| format!("relative prefix: {e}"))?;
-                return Ok(now - n * multiplier);
-            }
+    // trimmed is non-empty (guarded above), so last() always yields a char.
+    let last = trimmed.chars().next_back().expect("non-empty after guard");
+    let multiplier = match last {
+        'd' => Some(86_400.0_f64),
+        'h' => Some(3_600.0),
+        'm' => Some(60.0),
+        's' => Some(1.0),
+        _ => None,
+    };
+    if let Some(multiplier) = multiplier {
+        let head = &trimmed[..trimmed.len() - last.len_utf8()];
+        if !head.is_empty() && head.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            let n: f64 = head.parse().map_err(|e| format!("relative prefix: {e}"))?;
+            return Ok(now - n * multiplier);
         }
     }
     parse_iso8601(trimmed).ok_or_else(|| format!("not RFC3339 or relative: {trimmed}"))
@@ -1165,5 +1165,152 @@ mod tests {
         let files2 = discover_files(std::slice::from_ref(&root), None, None);
         assert_eq!(files2.len(), 1);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// mtime_pruned fallthrough: a pre-epoch mtime causes duration_since(UNIX_EPOCH)
+    /// to fail, so the function returns false (err on inclusion).
+    #[cfg(unix)]
+    #[test]
+    fn mtime_pruned_pre_epoch_mtime_returns_false() {
+        use std::time::Duration;
+        let root = tempdir_path("mtime-pruned-pre-epoch");
+        let file_path = root.join("file.jsonl");
+        fs::write(&file_path, b"").unwrap();
+
+        let pre_epoch = SystemTime::UNIX_EPOCH
+            .checked_sub(Duration::from_secs(86400))
+            .expect("UNIX_EPOCH - 1 day overflows");
+        if fs::File::open(&file_path)
+            .ok()
+            .and_then(|f| f.set_modified(pre_epoch).ok())
+            .is_none()
+        {
+            eprintln!("skip: set_modified(pre-epoch) not supported on this filesystem");
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
+
+        let entry = std::fs::read_dir(&root)
+            .expect("read_dir")
+            .flatten()
+            .next()
+            .expect("one entry");
+
+        let cutoff = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        // duration_since(UNIX_EPOCH) fails for pre-epoch mtime, so mtime_pruned
+        // must return false (include the file, don't prune it).
+        assert!(
+            !mtime_pruned(&entry, Some(cutoff)),
+            "pre-epoch mtime should fall through to false (err on inclusion)"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// discover_files returns empty when the root directory is unreadable.
+    #[cfg(unix)]
+    #[test]
+    fn discover_files_unreadable_root_returns_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempdir_path("search-unreadable-root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+        let files = discover_files(std::slice::from_ref(&root), None, None);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        assert!(files.is_empty(), "unreadable root should yield no files");
+    }
+
+    /// discover_files skips non-directory entries at the root level (i.e. a
+    /// plain file directly under root, which passes the flatten but fails the
+    /// is_dir check). No cfg(unix) needed: creating a plain file is portable.
+    #[test]
+    fn discover_files_non_dir_at_root_level_skipped() {
+        let root = tempdir_path("search-nondirroot");
+        // A plain file directly under root: the slug scan skips it.
+        fs::write(root.join("not-a-slug.jsonl"), b"").unwrap();
+        let files = discover_files(std::slice::from_ref(&root), None, None);
+        let _ = fs::remove_dir_all(&root);
+        assert!(
+            files.is_empty(),
+            "a plain file at root level should be skipped"
+        );
+    }
+
+    /// discover_files skips a slug directory that is unreadable.
+    #[cfg(unix)]
+    #[test]
+    fn discover_files_unreadable_slug_dir_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempdir_path("search-unreadable-slug");
+        let bad_slug = root.join("bad-slug");
+        fs::create_dir_all(&bad_slug).unwrap();
+        // Write a file inside the directory before locking it out.
+        fs::write(bad_slug.join("session-x.jsonl"), b"").unwrap();
+        fs::set_permissions(&bad_slug, fs::Permissions::from_mode(0o000)).unwrap();
+
+        // Also set up a readable slug to confirm only the bad one is skipped.
+        let good_slug = root.join("good-slug");
+        fs::create_dir_all(&good_slug).unwrap();
+        fs::write(good_slug.join("session-y.jsonl"), b"").unwrap();
+
+        let files = discover_files(std::slice::from_ref(&root), None, None);
+
+        fs::set_permissions(&bad_slug, fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = fs::remove_dir_all(&root);
+
+        // Only the good slug's file appears; the bad slug is silently skipped.
+        assert_eq!(files.len(), 1, "expected only the good slug's file");
+        assert!(
+            files[0].slug == "good-slug",
+            "wrong slug: {}",
+            files[0].slug
+        );
+    }
+
+    /// discover_files skips a dangling symlink inside a slug directory: its
+    /// file_type() returns the symlink type (not is_file/is_dir), which is
+    /// neither branch, and the entry is skipped.
+    #[cfg(unix)]
+    #[test]
+    fn discover_files_dangling_symlink_in_slug_skipped() {
+        use std::os::unix::fs::symlink;
+        let root = tempdir_path("search-dangling-symlink");
+        let slug = root.join("slug-b");
+        fs::create_dir_all(&slug).unwrap();
+        // Dangling symlink: target does not exist.
+        symlink("/nonexistent/ghost.jsonl", slug.join("ghost.jsonl")).unwrap();
+
+        let files = discover_files(std::slice::from_ref(&root), None, None);
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(
+            files.is_empty(),
+            "dangling symlink should be skipped, got {} files",
+            files.len()
+        );
+    }
+
+    /// contains_ascii_ci break branch: fires when the pattern's first byte is
+    /// non-alphabetic (b0 == b0_upper) and the only occurrence of that byte in
+    /// the haystack is at an index > last_start (too close to the end for the
+    /// pattern to fit). The break exits the iterator and returns false.
+    #[test]
+    fn contains_ascii_ci_break_when_first_byte_only_at_tail() {
+        // Pattern "1ab": first byte is b'1' (non-alphabetic: b0 == b0_upper).
+        // Haystack "xx1": the only '1' is at index 2, but last_start = 0
+        // (haystack.len() 3 - pattern.len() 3 = 0), so i=2 > last_start=0
+        // triggers the break and the function returns false.
+        assert!(
+            !contains_ascii_ci(b"xx1", b"1ab"),
+            "candidate at index > last_start should break and return false"
+        );
+
+        // Sanity: the pattern IS found when there is enough room.
+        assert!(
+            contains_ascii_ci(b"1ab", b"1ab"),
+            "should find pattern at index 0"
+        );
     }
 }

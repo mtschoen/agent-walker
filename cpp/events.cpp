@@ -384,9 +384,8 @@ int run(const std::vector<std::string> &argv) {
   }
 
   // Parallel walk — mirrors cost-mode's thread pool pattern from main.cpp.
-  size_t num_workers = std::min<size_t>(8, std::thread::hardware_concurrency());
-  if (num_workers == 0)
-    num_workers = 4;
+  size_t num_workers =
+      walker::effective_workers(std::thread::hardware_concurrency());
 
   std::vector<std::vector<EventRecord>> per_thread_records(num_workers);
   std::atomic<size_t> task_index(0);
@@ -453,13 +452,12 @@ int run(const std::vector<std::string> &argv) {
     // produces the identical fixed-6-decimal form for these magnitudes.
     auto [ptr, ec] = std::to_chars(num, num + sizeof(num), value,
                                    std::chars_format::fixed, 6);
-    if (ec == std::errc()) {
+    // ts and usd are always finite and small enough that the fixed-6 form
+    // fits the 64-byte buffer (token counts are u64-bounded by the lenient
+    // parser), so to_chars cannot fail; on the impossible failure the field
+    // is simply left empty rather than carrying a dead snprintf fallback.
+    if (ec == std::errc())
       out.append(num, static_cast<size_t>(ptr - num));
-    } else { // defensive fallback; not expected for finite doubles
-      int n = std::snprintf(num, sizeof(num), "%.6f", value);
-      if (n > 0)
-        out.append(num, static_cast<size_t>(n));
-    }
   };
   for (const auto &r : all_records) {
     out += "{\"ts\":";

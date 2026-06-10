@@ -184,10 +184,7 @@ func parseFloat64(s string) (float64, error) {
 // that isn't a valid native path), so prefer it; elsewhere HOME is canonical.
 // The fallback covers the rarer inverse case. Returns "" if neither is set.
 func homeDirectory() string {
-	primary, secondary := "HOME", "USERPROFILE"
-	if runtime.GOOS == "windows" {
-		primary, secondary = "USERPROFILE", "HOME"
-	}
+	primary, secondary := homeEnvVars(runtime.GOOS)
 	if v, ok := os.LookupEnv(primary); ok && v != "" {
 		return v
 	}
@@ -195,6 +192,15 @@ func homeDirectory() string {
 		return v
 	}
 	return ""
+}
+
+// homeEnvVars is the platform seam for home resolution: pure so a test can
+// drive the windows ordering from any OS (COVERAGE-PLAN section 5 option 1).
+func homeEnvVars(goos string) (primary, secondary string) {
+	if goos == "windows" {
+		return "USERPROFILE", "HOME"
+	}
+	return "HOME", "USERPROFILE"
 }
 
 func defaultProjectsRoot() string {

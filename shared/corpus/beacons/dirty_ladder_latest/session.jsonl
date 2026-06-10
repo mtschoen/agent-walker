@@ -6,6 +6,7 @@ this is not JSON at all
 {"type": "user", "timestamp": "2026-05-10T11:46:40.000Z", "message": {"role": "user", "content": "hi"}}
 {"type": "assistant", "message": {"role": "assistant", "id": "no-ts", "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}}
 {"type": "assistant", "timestamp": "definitely-not-iso", "message": {"role": "assistant", "id": "bad-ts", "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}}
+{"type": "assistant", "timestamp": "2026-05-09 11:00:00.000Z", "message": {"role": "assistant", "id": "space-sep-ts", "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}}
 {"type": "assistant", "timestamp": "2026-05-10T11:51:40.000Z", "message": {"role": "user", "id": "role-mismatch", "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}}
 ÿþ invalid utf-8 line
 {"\ud800": "lone surrogate key"}

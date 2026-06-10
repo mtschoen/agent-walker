@@ -73,7 +73,7 @@ fn lenient_count<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
                 u
             } else {
                 match n.as_f64() {
-                    Some(f) if f >= 0.0 && f < 18446744073709551616.0 => f as u64,
+                    Some(f) if (0.0..18446744073709551616.0).contains(&f) => f as u64,
                     _ => 0,
                 }
             }
@@ -336,5 +336,125 @@ mod tests {
     fn discover_groups_empty_when_no_roots() {
         let groups = discover_groups(&[], 0.0);
         assert!(groups.is_empty());
+    }
+
+    /// entry_mtime_before fallthrough: a file whose mtime is before the Unix
+    /// epoch causes duration_since(UNIX_EPOCH) to fail, so the function falls
+    /// through to `false` (err on inclusion).
+    #[cfg(unix)]
+    #[test]
+    fn entry_mtime_before_pre_epoch_mtime_returns_false() {
+        use std::time::Duration;
+        let root = tempdir_path("mtime-pre-epoch");
+        let file_path = root.join("sentinel.jsonl");
+        fs::write(&file_path, b"").unwrap();
+
+        // Attempt to set mtime before the Unix epoch. If the filesystem or OS
+        // rejects the time (e.g. FAT32 clamps at 1980), skip rather than fail.
+        let pre_epoch = SystemTime::UNIX_EPOCH
+            .checked_sub(Duration::from_secs(86400))
+            .expect("UNIX_EPOCH - 1 day overflows SystemTime");
+        if fs::File::open(&file_path)
+            .ok()
+            .and_then(|f| f.set_modified(pre_epoch).ok())
+            .is_none()
+        {
+            eprintln!("skip: set_modified(pre-epoch) not supported on this filesystem");
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
+
+        // Obtain a DirEntry via read_dir so we call the real entry_mtime_before.
+        let entry = std::fs::read_dir(&root)
+            .expect("read_dir")
+            .flatten()
+            .next()
+            .expect("one entry");
+
+        // Positive cutoff: a normal "now" timestamp. duration_since(UNIX_EPOCH)
+        // will fail for the pre-epoch mtime, so entry_mtime_before must return
+        // false (include the file) rather than treating it as old.
+        let cutoff = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        assert!(
+            !entry_mtime_before(&entry, cutoff),
+            "pre-epoch mtime should fall through to false (err on inclusion)"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// discover_groups returns empty when the root directory is unreadable.
+    #[cfg(unix)]
+    #[test]
+    fn discover_groups_unreadable_root_returns_empty() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempdir_path("unreadable-root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+        let groups = discover_groups(std::slice::from_ref(&root), f64::NEG_INFINITY);
+        // Restore before cleanup so the temp dir removal succeeds.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        assert!(
+            groups.is_empty(),
+            "unreadable root should yield no groups"
+        );
+    }
+
+    /// discover_groups skips a slug directory that is unreadable.
+    #[cfg(unix)]
+    #[test]
+    fn discover_groups_unreadable_slug_dir_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempdir_path("unreadable-slug");
+        let slug = root.join("bad-slug");
+        fs::create_dir_all(&slug).unwrap();
+        // Create a readable sibling so we can check it is still found.
+        let good_slug = root.join("good-slug");
+        fs::create_dir_all(&good_slug).unwrap();
+        fs::write(good_slug.join("session-ok.jsonl"), b"").unwrap();
+        fs::set_permissions(&slug, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let groups = discover_groups(std::slice::from_ref(&root), f64::NEG_INFINITY);
+
+        fs::set_permissions(&slug, fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = fs::remove_dir_all(&root);
+
+        // The bad slug is skipped; the good slug's file is discovered.
+        let bad_key = ("bad-slug".to_string(), "session-ok".to_string());
+        assert!(
+            !groups.contains_key(&bad_key),
+            "bad slug should be absent from groups"
+        );
+        let good_key = ("good-slug".to_string(), "session-ok".to_string());
+        assert!(
+            groups.contains_key(&good_key),
+            "good slug should be present in groups"
+        );
+    }
+
+    /// discover_groups falls through the "neither file nor dir" branch for a
+    /// dangling symlink: file_type() for a symlink returns the symlink's own
+    /// type, which is neither is_file() nor is_dir(), so it is skipped.
+    #[cfg(unix)]
+    #[test]
+    fn discover_groups_dangling_symlink_skipped() {
+        use std::os::unix::fs::symlink;
+        let root = tempdir_path("dangling-symlink");
+        let slug = root.join("slug-a");
+        fs::create_dir_all(&slug).unwrap();
+        // Create a dangling symlink pointing to a non-existent target.
+        symlink("/nonexistent/target.jsonl", slug.join("dangling.jsonl")).unwrap();
+
+        let groups = discover_groups(std::slice::from_ref(&root), f64::NEG_INFINITY);
+        let _ = fs::remove_dir_all(&root);
+
+        // The dangling symlink should not produce any group entry.
+        assert!(
+            groups.is_empty(),
+            "dangling symlink should be skipped, got {:?}",
+            groups
+        );
     }
 }

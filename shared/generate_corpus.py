@@ -300,6 +300,14 @@ def dirty_ladder_entries(good_msg_id: str = "dirty-good") -> list[dict | str]:
                         "model": "claude-opus-4-7",
                         "usage": {"input_tokens": 99}},
         }),
+        json.dumps({                           # 8b: space in place of the
+            # ISO 'T' separator -- digit-positional parsers must reject it
+            # (decided 2026-06-10; rust/cpp previously accepted it).
+            "type": "assistant", "timestamp": "2026-05-09 11:00:00.000Z",
+            "message": {"role": "assistant", "id": "space-sep-ts",
+                        "model": "claude-opus-4-7",
+                        "usage": {"input_tokens": 99}},
+        }),
         json.dumps({                           # 9: type=assistant, role=user
             "type": "assistant", "timestamp": iso(FRESH),
             "message": {"role": "user", "id": "role-mismatch",

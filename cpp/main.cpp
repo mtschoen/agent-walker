@@ -402,9 +402,8 @@ static int run_cost(const std::vector<std::string> &argv) {
   }
 
   // Parallel walk
-  size_t num_workers = std::min<size_t>(8, std::thread::hardware_concurrency());
-  if (num_workers == 0)
-    num_workers = 4;
+  size_t num_workers =
+      walker::effective_workers(std::thread::hardware_concurrency());
 
   std::vector<GroupResult> results(total_groups);
   std::atomic<size_t> task_index(0);
