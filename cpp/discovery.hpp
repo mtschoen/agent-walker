@@ -43,10 +43,9 @@ template <typename OnFile>
 inline void for_each_transcript(const std::vector<fs::path> &roots,
                                 const std::string *cwd_slug, OnFile &&on_file) {
   for (const fs::path &root : roots) {
-    std::error_code root_ec;
-    if (!fs::is_directory(root, root_ec))
-      continue;
-
+    // Roots arrive from resolve_roots, which already filters to existing
+    // directories; if one vanishes in a race, directory_iterator(root, ec)
+    // yields an empty range.
     std::error_code slug_iter_ec;
     for (auto const &slug_entry : fs::directory_iterator(root, slug_iter_ec)) {
       std::error_code slug_type_ec;

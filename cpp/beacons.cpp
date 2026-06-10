@@ -143,21 +143,14 @@ std::optional<Beacon> parse_beacon_body(std::string_view body) {
       b.kind.assign(v.data(), v.size());
       has_kind = true;
     } else if (key == "eta_seconds") {
-      // Accept either int or double.
+      // get_double accepts every well-formed JSON number (int or float), so
+      // any failure here means a non-numeric value -> reject the beacon.
+      // (A get_int64 fallback used to sit here; it was unreachable.)
       double dv;
-      auto val = field.value();
-      if (val.get_double().get(dv) == sj::SUCCESS) {
-        b.eta_seconds = dv;
-        has_eta = true;
-      } else {
-        int64_t iv;
-        if (val.get_int64().get(iv) == sj::SUCCESS) {
-          b.eta_seconds = static_cast<double>(iv);
-          has_eta = true;
-        } else {
-          return std::nullopt;
-        }
-      }
+      if (field.value().get_double().get(dv) != sj::SUCCESS)
+        return std::nullopt;
+      b.eta_seconds = dv;
+      has_eta = true;
     } else if (key == "summary") {
       std::string_view v;
       if (field.value().get_string().get(v) != sj::SUCCESS)
@@ -336,9 +329,10 @@ struct EventRow {
 };
 
 // Walk a transcript file for beacons-history. Emits:
-//   - assistant_cb(combined_text, ts_str): called once per assistant entry
-//     that has both a timestamp and content; combined_text is the joined
-//     text-block payload (used to extract beacons).
+//   - assistant_cb(combined_text, ts): called once per assistant entry that
+//     has both a parseable timestamp and content; combined_text is the joined
+//     text-block payload (used to extract beacons). The walker validates and
+//     parses the timestamp itself, so callbacks receive the epoch double.
 //   - event_cb(EventRow): called once per entry with a parseable timestamp,
 //     regardless of role. is_real_user = (top-level type == "user" AND
 //     content is NOT an array containing a tool_result block).
@@ -526,7 +520,7 @@ void walk_entries_for_history(const fs::path &path, AssistantCb &&assistant_cb,
       row.timestamp = *ts_opt;
       row.is_real_user = false;
       event_cb(row);
-      assistant_cb(combined_text, ts_str);
+      assistant_cb(combined_text, *ts_opt);
     }
   }
 }
@@ -807,10 +801,9 @@ int run_latest(const std::vector<std::string> &args) {
   std::string subagent_filename = "agent-" + parsed.session_id + ".jsonl";
 
   for (const fs::path &root : roots) {
+    // resolve_roots only returns existing directories; if one vanishes in a
+    // race, directory_iterator(root, ec) yields an empty range.
     std::error_code ec;
-    if (!fs::exists(root, ec))
-      continue;
-
     for (auto &slug_entry : fs::directory_iterator(root, ec)) {
       if (!slug_entry.is_directory())
         continue;
@@ -866,8 +859,8 @@ namespace {
 
 double compute_idle_in_window(const std::vector<EventRow> &events, double lo,
                               double hi) {
-  if (events.size() < 2)
-    return 0.0;
+  // No <2 early-out: the loop below starts at i=1, so empty/singleton event
+  // lists fall through to `return idle` (0.0) naturally.
   double idle = 0.0;
   for (size_t i = 1; i < events.size(); ++i) {
     if (!events[i].is_real_user)
@@ -964,11 +957,7 @@ int run_history(const std::vector<std::string> &args) {
       for (const auto &path : paths) {
         walk_entries_for_history(
             path,
-            [&](const std::string &text, const std::string &ts_str) {
-              auto ts_opt = walker::parse_iso8601(ts_str);
-              if (!ts_opt)
-                return;
-              double ts = *ts_opt;
+            [&](const std::string &text, double ts) {
               if (ts < window_lo)
                 return;
               for (auto &b : all_beacons_in(text)) {
