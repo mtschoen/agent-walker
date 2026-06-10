@@ -9,7 +9,8 @@
 > wrong-typed-extras fixture, Rust events broken-pipe branch tested in-process).
 > Phase 4 CI gate live: `.gitea/workflows/ci.yml::coverage-linux` runs
 > `shared/coverage.py --baseline …` and fails on regression. Current:
-> **rust 97.47% · cpp 98.40% · go 96.73% · zig 93.63%** (locked as baseline).
+> **rust 98.00% · cpp 98.70% · go 97.89% · zig 97.99%** (locked as baseline
+> 2026-06-10, after the coverage-regression fix batch).
 > Three real bugs fixed along the way (2× Zig `parseTs`, 1× Zig regex parity).
 > Remaining work to 100% — items 4 (SPEC under-specs) and 6 (platform seam) —
 > in §"Resume points" below.
@@ -112,9 +113,9 @@ shared gaps get fixed once via fixtures.
 
 ### Resume points (for a future session)
 
-Coverage today: rust 97.47% / cpp 98.40% / go 96.73% / zig 93.63% — locked
-as the CI baseline. The gap matrix in `COVERAGE-GAPS.md` is still the
-right index. Items 1/2/3/5 below have **landed**; 4 and 6 remain:
+Coverage today: rust 98.00% / cpp 98.70% / go 97.89% / zig 97.99% - locked
+as the CI baseline (2026-06-10). The gap matrix in `COVERAGE-GAPS.md` is
+still the right index. Items 1/2/3/5 below have **landed**; 4 and 6 remain:
 
 1. ~~**Zig §F unreachable-asserts**~~ — landed. The 8 token-switch /
    platform-assert sites were restructured (combined `.number,
@@ -140,7 +141,8 @@ right index. Items 1/2/3/5 below have **landed**; 4 and 6 remain:
    per se but blocks the last few search.* lines.
 5. ~~**Phase 4 CI gate**~~ — landed. `.gitea/workflows/ci.yml` gained a
    `coverage-linux` job that builds SimonKagstrom/kcov master and runs
-   `python shared/coverage.py --baseline rust=97.47,cpp=98.40,go=96.73,zig=93.63`.
+   `python shared/coverage.py --baseline …` (floors raised whenever
+   coverage rises; current values live in ci.yml).
    Regression below any threshold fails the job. Raise the floors in the
    same PR that raises coverage; the macOS check stays local-only.
 6. **Platform branches (§D, the long pole)** — Windows + macOS

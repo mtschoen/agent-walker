@@ -362,7 +362,7 @@ jobs:
         # here in the same PR. The remaining COVERAGE-PLAN items (4 — SPEC
         # under-specs, 6 — platform seam) close the gap to 100% from here.
         run: |
-          python shared/coverage.py --baseline rust=97.47,cpp=98.40,go=96.73,zig=93.63
+          python shared/coverage.py --baseline rust=98.00,cpp=98.70,go=97.89,zig=97.99
 
       - name: Post coverage status
         # Posts a Gitea commit status (context=pr-crew/coverage) with
