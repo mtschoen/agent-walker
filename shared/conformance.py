@@ -2204,6 +2204,31 @@ def check_search_mtime_prune(lang: str, binary: Path) -> bool:
     if not ok:
         print(f"        got {len(got_hits)} hits, expected {len(exp_hits)}; "
               f"summary={got_summary}")
+        return False
+
+    # Phase 2: age the PARENT transcripts too -- the parent-side prune arm
+    # is distinct code in every impl (zig walks parents and subagents in
+    # separate scanners). All hits must now be pruned.
+    label2 = "search: --since mtime prune (parents)"
+    with tempfile.TemporaryDirectory(prefix="walker-search-mtime2-") as tmp:
+        scen = Path(tmp) / scenario_name
+        shutil.copytree(SEARCH_CORPUS / scenario_name, scen)
+        for transcript in scen.rglob("*.jsonl"):
+            os.utime(transcript, (0, 0))
+        try:
+            got_hits, got_summary = run_walker_search(
+                lang, binary, Path(tmp),
+                combo["pattern"], ["--since", "365d"], now_unix,
+            )
+        except Exception as e:
+            print(f"  [{lang:>4s}] {label2:38s} FAIL  {e}")
+            return False
+    ok = (got_hits == [] and got_summary is not None
+          and got_summary.get("hits") == 0)
+    print(f"  [{lang:>4s}] {label2:38s} {' OK ' if ok else 'FAIL'}")
+    if not ok:
+        print(f"        got {len(got_hits)} hits, expected 0; "
+              f"summary={got_summary}")
     return ok
 
 

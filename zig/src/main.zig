@@ -844,11 +844,10 @@ fn processLine(
     if (id_str) |id| {
         if (id.len > 0) {
             if (seen.contains(id)) return;
+            // alloc is a worker arena: on a put failure the duped key is
+            // reclaimed at arena deinit, so no manual free is needed.
             const k = alloc.dupe(u8, id) catch return;
-            seen.put(k, {}) catch {
-                alloc.free(k);
-                return;
-            };
+            seen.put(k, {}) catch return;
         }
     }
 

@@ -133,10 +133,10 @@ fn parseArgs(alloc: Allocator, raw: [][]const u8) !SearchArgs {
         }
     }
 
-    const pat = pattern orelse {
-        writeStderrFmt(alloc, "walker: search: pattern must be non-empty\n", .{});
-        std.process.exit(2);
-    };
+    // Missing and empty positionals share one diagnostic block: the two
+    // previously-identical blocks were ICF-merged by the compiler, which
+    // attributed all hits to one of them and garbled line coverage.
+    const pat = pattern orelse "";
     if (pat.len == 0) {
         writeStderrFmt(alloc, "walker: search: pattern must be non-empty\n", .{});
         std.process.exit(2);
@@ -482,8 +482,9 @@ fn matchHere(items: []const Item, idx: usize, text: []const u8, pos: usize, case
 // Find all non-overlapping matches of `pattern` in `text`. Empty matches are
 // handled by advancing one byte to avoid infinite loops.
 fn findAllMatches(alloc: Allocator, pattern: *const Pattern, text: []const u8) ![][2]usize {
+    // alloc is arena-backed at every call site; an error path reclaims the
+    // list at arena deinit, so no errdefer cleanup is needed.
     var out: std.ArrayList([2]usize) = .empty;
-    errdefer out.deinit(alloc);
 
     if (pattern.mode == .literal) {
         const needle = pattern.literal_needle;
@@ -717,7 +718,6 @@ fn scanFile(alloc: Allocator, path: []const u8, include_queue_ops: bool) ![]Scan
     // the lifetime story explicit.
 
     var out: std.ArrayList(ScanMessage) = .empty;
-    errdefer out.deinit(alloc);
 
     var idx: u32 = 0;
     var iter = std.mem.splitScalar(u8, data, '\n');
@@ -1005,8 +1005,9 @@ fn discoverFiles(
     since: ?f64,
     cwd_filter: ?[]const u8,
 ) ![]DiscoveredFile {
+    // alloc is arena-backed; an error path reclaims the list at arena
+    // deinit, so no errdefer cleanup is needed.
     var out: std.ArrayList(DiscoveredFile) = .empty;
-    errdefer out.deinit(alloc);
 
     for (roots) |root| {
         if (is_windows) {

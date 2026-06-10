@@ -49,3 +49,16 @@ if(WALKER_COVERAGE)
     target_compile_options(walker PRIVATE -fprofile-instr-generate -fcoverage-mapping -O0 -g)
     target_link_options(walker PRIVATE -fprofile-instr-generate -fcoverage-mapping)
 endif()
+
+# Native unit tests (error arms the conformance harness cannot reach
+# portably). The test TU #includes the production .cpp files to call their
+# internal-linkage functions, so it must NOT be linked against them.
+option(WALKER_BUILD_TESTS "Build the native unit-test binary" OFF)
+if(WALKER_BUILD_TESTS)
+    add_executable(walker_unit_tests tests/unit_tests.cpp)
+    target_link_libraries(walker_unit_tests PRIVATE simdjson::simdjson)
+    if(WALKER_COVERAGE)
+        target_compile_options(walker_unit_tests PRIVATE -fprofile-instr-generate -fcoverage-mapping -O0 -g)
+        target_link_options(walker_unit_tests PRIVATE -fprofile-instr-generate -fcoverage-mapping)
+    endif()
+endif()

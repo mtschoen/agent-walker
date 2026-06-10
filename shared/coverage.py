@@ -274,6 +274,7 @@ def cov_cpp() -> Result | None:
     cmake_args = [
         "cmake", "-S", str(CPP_DIR), "-B", str(build),
         "-DCMAKE_BUILD_TYPE=Debug", "-DWALKER_COVERAGE=ON",
+        "-DWALKER_BUILD_TESTS=ON",
     ]
     # Reuse already-fetched simdjson if a normal build tree has it.
     fetched = CPP_DIR / "build" / "_deps"
@@ -282,17 +283,31 @@ def cov_cpp() -> Result | None:
     run(cmake_args, env=cfg_env)
     run(["cmake", "--build", str(build), "-j"], env=cfg_env)
     binary = build / "walker"
+    test_binary = build / "walker_unit_tests"
     env = dict(os.environ)
     env["LLVM_PROFILE_FILE"] = str(profraw_dir / "cpp-%p.profraw")
     env["WALKER_BIN_CPP"] = str(binary)
     ok, passed, failed = run_conformance("cpp", env)
+    # Native unit tests cover the error arms (unreadable files, the worker
+    # seam, lenient_count bounds) the harness cannot reach portably. The test
+    # TU #includes the production sources, so its profile merges into the
+    # same per-line counts via the extra -object below.
+    test_proc = run([str(test_binary)], env=env, check=False)
+    if test_proc.returncode != 0:
+        ok = False
+        failed += 1
+        sys.stderr.write("[coverage] cpp: walker_unit_tests FAILED:\n")
+        sys.stderr.write((test_proc.stderr or "")[-2000:] + "\n")
+    else:
+        passed += 1
     profdata = build / "cpp.profdata"
     raws = [str(p) for p in profraw_dir.glob("*.profraw")]
     run(["llvm-profdata", "merge", "-sparse", *raws, "-o", str(profdata)])
     export_json = run([
         "llvm-cov", "export", str(binary),
+        "-object", str(test_binary),
         f"-instr-profile={profdata}", "-summary-only",
-        "-ignore-filename-regex=_deps/",
+        "-ignore-filename-regex=_deps/|tests/",
     ]).stdout
     covered, total, files = _llvm_lines_from_export(export_json)
     return Result("cpp", "lines", covered, total, files, ok, passed, failed)
