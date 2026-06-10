@@ -1044,7 +1044,9 @@ fn discoverWindows(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), root: 
 fn scanSlugJsonlWindows(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), root: []const u8, slug: []const u8, since: ?f64) !void {
     const platform = main.platform;
     const slug_dir = try std.fmt.allocPrint(alloc, "{s}\\{s}", .{ root, slug });
-    const pat = try std.fmt.allocPrint(alloc, "{s}\\*.jsonl", .{slug_dir});
+    // `*` (not `*.jsonl`): one pass classifies parent transcripts AND session
+    // dirs, whose subagents/ are probed per SPEC "Discovery" under search.
+    const pat = try std.fmt.allocPrint(alloc, "{s}\\*", .{slug_dir});
     defer alloc.free(pat);
 
     const wpat = try std.unicode.utf8ToUtf16LeAllocZ(alloc, pat);
@@ -1063,8 +1065,16 @@ fn scanSlugJsonlWindows(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), r
 
     while (true) {
         const is_dir = (fd.dwFileAttributes & platform.FILE_ATTRIBUTE_DIRECTORY) != 0;
-        if (!is_dir) {
-            const name_w = std.mem.span(@as([*:0]const u16, @ptrCast(&fd.cFileName)));
+        const name_w = std.mem.span(@as([*:0]const u16, @ptrCast(&fd.cFileName)));
+        if (is_dir) {
+            const skip = name_w.len == 0 or
+                (name_w.len == 1 and name_w[0] == '.') or
+                (name_w.len == 2 and name_w[0] == '.' and name_w[1] == '.');
+            if (!skip) {
+                const sess = try std.unicode.utf16LeToUtf8Alloc(alloc, name_w);
+                try scanSubagentsWindows(alloc, out, slug_dir, slug, sess, root, since);
+            }
+        } else {
             const name = try std.unicode.utf16LeToUtf8Alloc(alloc, name_w);
             if (std.mem.endsWith(u8, name, ".jsonl")) {
                 if (since) |cutoff| {
@@ -1086,6 +1096,42 @@ fn scanSlugJsonlWindows(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), r
                 });
             }
             alloc.free(name);
+        }
+        if (platform.FindNextFileW(h, &fd) == 0) break;
+    }
+}
+
+/// Subagents: <slug>/<session>/subagents/agent-*.jsonl. session_id is the
+/// enclosing session dir name (the parent session), so subagent hits group
+/// with the parent in sessions_matched.
+fn scanSubagentsWindows(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), slug_dir: []const u8, slug: []const u8, sess: []const u8, root: []const u8, since: ?f64) !void {
+    const platform = main.platform;
+    const pat = try std.fmt.allocPrint(alloc, "{s}\\{s}\\subagents\\agent-*.jsonl", .{ slug_dir, sess });
+    defer alloc.free(pat);
+    const wpat = try std.unicode.utf8ToUtf16LeAllocZ(alloc, pat);
+    defer alloc.free(wpat);
+
+    var fd: platform.WIN32_FIND_DATAW = undefined;
+    const h = platform.FindFirstFileW(wpat.ptr, &fd) orelse return;
+    if (h == platform.INVALID_HANDLE_VALUE) return;
+    defer _ = platform.FindClose(h);
+
+    while (true) {
+        const is_dir = (fd.dwFileAttributes & platform.FILE_ATTRIBUTE_DIRECTORY) != 0;
+        if (!is_dir) {
+            const keep = if (since) |cutoff| fd.ftLastWriteTime.toUnix() >= cutoff else true;
+            if (keep) {
+                const name_w = std.mem.span(@as([*:0]const u16, @ptrCast(&fd.cFileName)));
+                const name = try std.unicode.utf16LeToUtf8Alloc(alloc, name_w);
+                defer alloc.free(name);
+                const path = try std.fmt.allocPrint(alloc, "{s}\\{s}\\subagents\\{s}", .{ slug_dir, sess, name });
+                try out.append(alloc, .{
+                    .path = path,
+                    .slug = slug,
+                    .session_id = try alloc.dupe(u8, sess),
+                    .host_root = root,
+                });
+            }
         }
         if (platform.FindNextFileW(h, &fd) == 0) break;
     }
@@ -1123,9 +1169,15 @@ fn scanSlugJsonlDarwin(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), ro
     defer _ = std.c.closedir(dir);
 
     while (std.c.readdir(dir)) |ent| {
-        if (ent.type != std.c.DT.REG and ent.type != std.c.DT.UNKNOWN) continue;
         const name_ptr: [*:0]const u8 = @ptrCast(&ent.name);
         const name = std.mem.span(name_ptr);
+        if (ent.type == std.c.DT.DIR) {
+            if (name.len == 0) continue;
+            if (name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.'))) continue;
+            try scanSubagentsDarwin(alloc, out, slug_dir, slug, name, root, since);
+            continue;
+        }
+        if (ent.type != std.c.DT.REG and ent.type != std.c.DT.UNKNOWN) continue;
         if (!std.mem.endsWith(u8, name, ".jsonl")) continue;
 
         const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ slug_dir, name });
@@ -1140,6 +1192,42 @@ fn scanSlugJsonlDarwin(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), ro
             .path = path,
             .slug = slug,
             .session_id = sid,
+            .host_root = root,
+        });
+    }
+}
+
+/// Subagents: <slug>/<session>/subagents/agent-*.jsonl. session_id is the
+/// enclosing session dir name (the parent session), so subagent hits group
+/// with the parent in sessions_matched.
+fn scanSubagentsDarwin(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), slug_dir: []const u8, slug: []const u8, sess: []const u8, root: []const u8, since: ?f64) !void {
+    const sub_dir = try std.fmt.allocPrint(alloc, "{s}/{s}/subagents", .{ slug_dir, sess });
+    const sub_z = try alloc.dupeZ(u8, sub_dir);
+    defer alloc.free(sub_z);
+    const dir = std.c.opendir(sub_z) orelse {
+        alloc.free(sub_dir);
+        return;
+    };
+    defer _ = std.c.closedir(dir);
+
+    while (std.c.readdir(dir)) |ent| {
+        if (ent.type != std.c.DT.REG and ent.type != std.c.DT.UNKNOWN) continue;
+        const name_ptr: [*:0]const u8 = @ptrCast(&ent.name);
+        const name = std.mem.span(name_ptr);
+        if (!std.mem.startsWith(u8, name, "agent-")) continue;
+        if (!std.mem.endsWith(u8, name, ".jsonl")) continue;
+
+        const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ sub_dir, name });
+        if (since) |cutoff| {
+            if (!mtimeOkDarwin(alloc, path, cutoff)) {
+                alloc.free(path);
+                continue;
+            }
+        }
+        try out.append(alloc, .{
+            .path = path,
+            .slug = slug,
+            .session_id = try alloc.dupe(u8, sess),
             .host_root = root,
         });
     }
@@ -1216,6 +1304,12 @@ fn scanSlugJsonlLinux(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), roo
 
             const name_ptr: [*:0]const u8 = @ptrCast(&entry.name);
             const name = std.mem.span(name_ptr);
+            if (entry.type == linux.DT.DIR) {
+                if (name.len == 0) continue;
+                if (name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.'))) continue;
+                try scanSubagentsLinux(alloc, out, slug_dir, slug, name, root, since);
+                continue;
+            }
             if (!std.mem.endsWith(u8, name, ".jsonl")) continue;
             if (entry.type != linux.DT.REG and entry.type != linux.DT.UNKNOWN) continue;
 
@@ -1231,6 +1325,55 @@ fn scanSlugJsonlLinux(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), roo
                 .path = path,
                 .slug = slug,
                 .session_id = sid,
+                .host_root = root,
+            });
+        }
+    }
+}
+
+/// Subagents: <slug>/<session>/subagents/agent-*.jsonl. session_id is the
+/// enclosing session dir name (the parent session), so subagent hits group
+/// with the parent in sessions_matched.
+fn scanSubagentsLinux(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), slug_dir: []const u8, slug: []const u8, sess: []const u8, root: []const u8, since: ?f64) !void {
+    const linux = main.platform.linux;
+    const sub_dir = try std.fmt.allocPrint(alloc, "{s}/{s}/subagents", .{ slug_dir, sess });
+    const sub_z = try alloc.dupeZ(u8, sub_dir);
+    defer alloc.free(sub_z);
+    const sub_fd: i32 = @bitCast(@as(u32, @truncate(linux.openat(linux.AT.FDCWD, sub_z, .{ .DIRECTORY = true }, 0))));
+    if (sub_fd < 0) {
+        alloc.free(sub_dir);
+        return;
+    }
+    defer _ = linux.close(sub_fd);
+
+    var dent_buf: [8192]u8 = undefined;
+    while (true) {
+        const n = linux.getdents64(sub_fd, &dent_buf, dent_buf.len);
+        const signed: isize = @bitCast(n);
+        if (signed <= 0) break;
+
+        var offset: usize = 0;
+        while (offset < n) {
+            const entry = @as(*align(1) const linux.dirent64, @ptrCast(&dent_buf[offset]));
+            offset += entry.reclen;
+
+            if (entry.type != linux.DT.REG and entry.type != linux.DT.UNKNOWN) continue;
+            const name_ptr: [*:0]const u8 = @ptrCast(&entry.name);
+            const name = std.mem.span(name_ptr);
+            if (!std.mem.startsWith(u8, name, "agent-")) continue;
+            if (!std.mem.endsWith(u8, name, ".jsonl")) continue;
+
+            const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ sub_dir, name });
+            if (since) |cutoff| {
+                if (!mtimeOkLinux(alloc, path, cutoff)) {
+                    alloc.free(path);
+                    continue;
+                }
+            }
+            try out.append(alloc, .{
+                .path = path,
+                .slug = slug,
+                .session_id = try alloc.dupe(u8, sess),
                 .host_root = root,
             });
         }

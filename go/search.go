@@ -284,6 +284,37 @@ func searchDiscoverFiles(roots []string, since *float64, cwdSlug *string) []sear
 			}
 			for _, fEnt := range dirEntries {
 				if fEnt.IsDir() {
+					// Subagents: <slug>/<session>/subagents/agent-*.jsonl, per
+					// SPEC "Discovery" under search. session_id is the
+					// enclosing session dir name (the parent session), so
+					// subagent hits group with the parent in sessions_matched.
+					sid := fEnt.Name()
+					subDir := filepath.Join(slugPath, sid, "subagents")
+					subEntries, err := os.ReadDir(subDir)
+					if err != nil {
+						continue
+					}
+					for _, sEnt := range subEntries {
+						if sEnt.IsDir() {
+							continue
+						}
+						name := sEnt.Name()
+						if !strings.HasPrefix(name, "agent-") || !strings.HasSuffix(name, ".jsonl") {
+							continue
+						}
+						if since != nil {
+							info, err := sEnt.Info()
+							if err == nil && info.ModTime().Before(earliestTime) {
+								continue
+							}
+						}
+						out = append(out, searchFileInfo{
+							Path:      filepath.Join(subDir, name),
+							Slug:      slug,
+							SessionID: sid,
+							HostRoot:  root,
+						})
+					}
 					continue
 				}
 				if !strings.HasSuffix(fEnt.Name(), ".jsonl") {
