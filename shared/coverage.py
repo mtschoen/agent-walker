@@ -370,19 +370,32 @@ def cov_zig() -> Result | None:
     run(["zig", "build", "-Dcoverage=true", "-Doptimize=Debug"], cwd=ZIG_DIR)
     real_bin = ZIG_DIR / "zig-out" / "bin" / "walker"
     kcov_out = COVERAGE_DIR / "zig"
-    if kcov_out.exists():
-        shutil.rmtree(kcov_out)
+    runs_dir = COVERAGE_DIR / "zig-runs"
+    for stale_dir in (kcov_out, runs_dir):
+        if stale_dir.exists():
+            shutil.rmtree(stale_dir)
     kcov_out.mkdir(parents=True)
-    # Wrapper the harness invokes in place of the binary: kcov accumulates all
-    # runs into one outdir (verified: sequential runs merge).
+    runs_dir.mkdir(parents=True)
+    # Wrapper the harness invokes in place of the binary. Each invocation
+    # collects into its OWN outdir; a final `kcov --merge` unions them.
+    # In-place accumulation into a single outdir (the previous approach)
+    # silently DROPS lines hit only by earlier runs - verified 2026-06-10:
+    # a search run followed by a cost run zeroed the search defers/cleanup
+    # lines, which is exactly the "kcov artifact" set the gap analysis had
+    # blamed on DWARF attribution. --collect-only skips per-run report
+    # generation; --merge accepts collect-only dirs.
     wrapper = COVERAGE_DIR / "walker-kcov.sh"
     wrapper.write_text(
         "#!/bin/sh\n"
-        f'exec "{kcov}" --include-path="{ZIG_DIR / "src"}" "{kcov_out}" "{real_bin}" "$@"\n'
+        f'd=$(mktemp -d "{runs_dir}/run-XXXXXXXX")\n'
+        f'exec "{kcov}" --collect-only --include-path="{ZIG_DIR / "src"}" "$d" "{real_bin}" "$@"\n'
     )
     wrapper.chmod(0o755)
     env = dict(os.environ, WALKER_BIN_ZIG=str(wrapper))
     ok, passed, failed = run_conformance("zig", env)
+    run_dirs = sorted(str(p) for p in runs_dir.iterdir() if p.is_dir())
+    if run_dirs:
+        run([kcov, "--merge", str(kcov_out), *run_dirs])
     cov_json = _find_kcov_json(kcov_out)
     if not cov_json:
         return Result("zig", "lines", 0, 0, conformance_ok=ok,
