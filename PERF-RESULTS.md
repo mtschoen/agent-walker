@@ -98,9 +98,63 @@ pure-Python walker) is 4-6x slower than the native impls in cost mode, the
 only mode with a Python implementation. Zig appears to trail everywhere -
 but that is the Debug-build artifact, not a real characteristic of the impl.
 
-## After optimization
+## After the 2026-06-09 pass (current)
 
-Current full-run state (medians of 7 interleaved runs on the **decoupled-beacon
+Medians of 5 interleaved runs, same decoupled-beacon corpus, all impls
+optimized. Bold = fastest in that mode:
+
+| mode             | cpp     | rust    | go    | zig     | python |
+| ---------------- | ------- | ------- | ----- | ------- | ------ |
+| cost             | 143     | **107** | 317   | 192     | ~1270  |
+| events           | 433     | **275** | 468   | 412     | n/a    |
+| beacons-history  | 109     | **108** | 263   | 169     | n/a    |
+| beacons-latest   | **100** | 196     | 250   | 154     | n/a    |
+| search           | 138     | 161     | 242   | **136** | n/a    |
+
+What changed (commits e667590 / 47e17a6 / d0278da; absolute cross-session
+comparisons are noisy - go/zig cost rose ~25% on UNTOUCHED code vs the
+06-03 board, so read same-run relative standings, not deltas):
+
+- **Rust allocation pass** (the big one): all five per-line loops dropped
+  `BufReader::lines()` (one String alloc per line) for a reused
+  `read_line` buffer; `parse_iso8601` lost its per-call `.replace('Z',..)`
+  alloc; `extract_text` accumulates into one String. Rust went from
+  trailing C++ badly to **fastest in cost, events, and (tied) history**.
+- **Rust discovery**: the `glob` crate is gone - one fused `read_dir`
+  walk classifies parents + subagents per slug pass, mtime from
+  `DirEntry::metadata` (no second stat). `discover_history_groups`
+  (a drifted near-copy) deleted in favor of the shared walk.
+- **C++ discovery consolidated** into `discovery.hpp` (same fused
+  single-pass walk, per-call error_codes). Kills two real divergence
+  bugs the 4-way duplication bred (shared-error_code root skipping;
+  search's fractional-vs-truncated mtime conversion).
+- **search literal pre-filter (rust + cpp)**: whole-file raw-byte scan
+  skips ALL JSON parsing when a non-regex ASCII pattern can't occur in
+  the file (memchr/memmem; k/s Unicode-fold hazard passes through).
+  **Neutral on this corpus by design** - the seeded needle hits ~95% of
+  sessions (sessions=2514/2653), so almost no file can be skipped. The
+  real-fleet recall case (rare pattern, most files skippable) is where
+  it pays; `--count-only` a nonsense literal on the live fleet to see it.
+  C++ search also got a thread_local DOM parser (was constructed per
+  file) and a memchr candidate scan replacing `std::search`+tolower.
+- **bias_factor now agrees across all four impls (14.2562)** - the Zig
+  contentless-assistant event bug is fixed (fix(zig) 2c8feb3, fixture
+  `usage_only_idle`). The 06-03 board's 3-vs-1 split (11.89 vs 12.24)
+  is gone; the absolute moved because the corpus was regenerated after
+  the dense-session decouple.
+- **search now walks subagent transcripts in every impl** (SPEC'd,
+  fixture-locked; was C++-only). files=3153 in search above includes
+  the 500 subagents - the per-impl cost of the extra 500 files is in
+  these numbers.
+
+Remaining levers (unchanged from below): raw-syscall `list_directory`
+for C++ beacons-latest/search traversal; Go's sonic root+content
+double-parse (spike an AST walk); Rust beacons-latest still enumerates
+every session dir per slug (196 vs cpp 100).
+
+## After optimization (2026-06-03 pass)
+
+Full-run state (medians of 7 interleaved runs on the **decoupled-beacon
 corpus**, 2026-06-03), with **all four impls built optimized** (Zig
 ReleaseFast). Bold = fastest in that mode:
 
