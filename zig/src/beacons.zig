@@ -303,7 +303,9 @@ fn scanEntry(
             events_out.append(alloc, .{ .ts = cls.ts, .is_real_user = false }) catch {};
         },
         .assistant => {
-            events_out.append(alloc, .{ .ts = cls.ts, .is_real_user = false }) catch {};
+            if (cls.has_content) {
+                events_out.append(alloc, .{ .ts = cls.ts, .is_real_user = false }) catch {};
+            }
             if (cls.text) |text| {
                 var it = MatchIter{ .text = text };
                 while (it.next()) |m| {
@@ -324,6 +326,12 @@ const Classified = struct {
     kind: EntryKind,
     /// Owned, joined "\n" of text-block contents (assistant only). Caller frees.
     text: ?[]u8,
+    /// True when the message had a `content` key at all. Assistant entries
+    /// WITHOUT content (usage-only turns) are not idle-detection events --
+    /// mirrors rust collect_session_events_in_path, which `continue`s before
+    /// the event push when message.content is absent. Note the criterion is
+    /// content PRESENCE, not text: a tool_use-only content array still counts.
+    has_content: bool = false,
 };
 
 /// Scanner-streamed entry classification. Walks the line in one pass,
@@ -342,6 +350,7 @@ fn classifyEntry(alloc: Allocator, line: []const u8) ?Classified {
     var type_is_user = false;
     var role_is_assistant = false;
     var has_tool_result = false;
+    var saw_content = false;
     var text_buf: std.ArrayList(u8) = .empty;
     var text_first = true;
 
@@ -361,6 +370,7 @@ fn classifyEntry(alloc: Allocator, line: []const u8) ?Classified {
                     const v = main.parseStringValue(&scanner, alloc) catch return null;
                     if (v) |s| role_is_assistant = std.mem.eql(u8, s, "assistant");
                 } else if (std.mem.eql(u8, mkey, "content")) {
+                    saw_content = true;
                     walkContentForClassify(&scanner, alloc, &text_buf, &text_first, &has_tool_result) catch return null;
                 } else {
                     scanner.skipValue() catch return null;
@@ -382,7 +392,7 @@ fn classifyEntry(alloc: Allocator, line: []const u8) ?Classified {
     }
     if (role_is_assistant) {
         const text: ?[]u8 = if (text_first) null else (text_buf.toOwnedSlice(alloc) catch return null);
-        return .{ .ts = t, .kind = .assistant, .text = text };
+        return .{ .ts = t, .kind = .assistant, .text = text, .has_content = saw_content };
     }
     return .{ .ts = t, .kind = .other, .text = null };
 }

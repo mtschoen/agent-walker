@@ -131,6 +131,17 @@
       "session_count": 1,
       "n_pairs": 1,
       "bias_factor": 1.0
+    },
+    "usage_only_idle": {
+      "pairs": [
+        {
+          "begin_eta": 500.0,
+          "actual_elapsed": 1000.0
+        }
+      ],
+      "session_count": 1,
+      "n_pairs": 1,
+      "bias_factor": 1.2
     }
   }
 }

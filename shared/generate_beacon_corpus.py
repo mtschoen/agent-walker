@@ -178,6 +178,40 @@ def history_expected_with_idle(
     }
 
 
+def assistant_usage_only(unix_ts: float, msg_id: str) -> dict:
+    """An assistant entry with usage but NO content key at all (the corpus's
+    'usage-only turn' shape). Per the reference impls (rust/cpp/go) this entry
+    is NOT an idle-detection event: only assistant entries WITH content count.
+    """
+    return {
+        "type": "assistant",
+        "timestamp": iso(unix_ts),
+        "message": {
+            "id": msg_id,
+            "role": "assistant",
+            "model": "claude-opus-4-7",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            },
+        },
+    }
+
+
+def assistant_tool_use_only(unix_ts: float, msg_id: str) -> dict:
+    """An assistant entry whose content is a single tool_use block - content
+    key PRESENT but no text blocks. Per the reference impls this entry IS an
+    idle-detection event (the criterion is content presence, not text)."""
+    entry = assistant_usage_only(unix_ts, msg_id)
+    entry["message"]["content"] = [
+        {"type": "tool_use", "id": "toolu_fixture", "name": "Bash",
+         "input": {"command": "echo hi"}}
+    ]
+    return entry
+
+
 def user_entry(unix_ts: float, msg_id: str, content) -> dict:
     """A `type: "user"` entry. content may be a bare string (real user prompt)
     or a list of content blocks (e.g., tool_result blocks). Used by A15 to
@@ -624,6 +658,39 @@ def scenario_idle_gap_history():
         [(500.0, 1000.0, 100.0)], session_count=1)
 
 
+def scenario_usage_only_idle():
+    """A16: contentless and text-less assistant entries vs idle detection.
+
+    Between begin and the real user prompt sit two special assistant turns:
+      - tool_use-only (content present, no text blocks)  -> IS an event
+      - usage-only (no content key at all)               -> is NOT an event
+    The idle gap before the real user prompt must therefore be measured from
+    the tool_use-only turn. The three behaviors give three distinct biases:
+      correct:                   idle = t_user - t_tool_use = 400 -> bias 1.2
+      count usage-only as event: idle = t_user - t_usage    = 300 -> bias 1.4
+      require text for events:   idle = t_user - t_begin    = 600 -> bias 0.8
+    so both the known Zig divergence AND the tempting overcorrection fail.
+    """
+    t_begin = NOW_UNIX - 3000
+    t_tool_use = NOW_UNIX - 2800
+    t_usage = NOW_UNIX - 2700
+    t_user = NOW_UNIX - 2400
+    t_resume = NOW_UNIX - 2200
+    t_end = NOW_UNIX - 2000
+    lines = [
+        assistant_with_text(t_begin, "msg_uo_begin",
+            beacon_text(beacon_json("begin", 500, "usage-only idle test", drift=None))),
+        assistant_tool_use_only(t_tool_use, "msg_uo_tool"),
+        assistant_usage_only(t_usage, "msg_uo_usage"),
+        user_entry(t_user, "msg_uo_user", "real user follow-up"),
+        assistant_with_text(t_resume, "msg_uo_resume", "agent resuming"),
+        assistant_with_text(t_end, "msg_uo_end",
+            beacon_text(beacon_json("end", 0, "usage-only idle done", drift=None))),
+    ]
+    return "usage_only_idle", {"slug/session.jsonl": lines}, history_expected_with_idle(
+        [(500.0, 1000.0, 400.0)], session_count=1)
+
+
 def scenario_dirty_ladder_history():
     """A8 for history: a dirty-line ladder in a session group that also
     contains one valid begin/end lifecycle. Walker must skip every bad line
@@ -673,6 +740,8 @@ HISTORY_SCENARIOS = (
     scenario_all_zero_eta,
     scenario_idle_gap_history,
     scenario_dirty_ladder_history,
+    # A16 (Zig bias_factor divergence repro):
+    scenario_usage_only_idle,
 )
 
 
