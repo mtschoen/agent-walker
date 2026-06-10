@@ -5,7 +5,6 @@ use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -57,15 +56,21 @@ fn beacon_re() -> Regex {
 fn find_latest_in_path(path: &Path, re: &Regex) -> Option<(Beacon, f64)> {
     let file = File::open(path).ok()?;
     let mut latest: Option<(Beacon, f64)> = None;
-    for line in BufReader::new(file).lines() {
-        let line = match line {
-            Ok(l) => l,
+    let mut reader = BufReader::new(file);
+    // Reused line buffer; see walk_group in main.rs for the rationale.
+    let mut line = String::with_capacity(8 * 1024);
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
             Err(_) => continue,
-        };
-        if line.trim().is_empty() {
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
             continue;
         }
-        let entry: Entry = match serde_json::from_str(&line) {
+        let entry: Entry = match serde_json::from_str(trimmed) {
             Ok(e) => e,
             Err(_) => continue,
         };
@@ -126,15 +131,21 @@ fn collect_session_events_in_path(path: &Path, re: &Regex) -> SessionEvents {
         Ok(f) => f,
         Err(_) => return SessionEvents { beacons, events },
     };
-    for line in BufReader::new(file).lines() {
-        let line = match line {
-            Ok(l) => l,
+    let mut reader = BufReader::new(file);
+    // Reused line buffer; see walk_group in main.rs for the rationale.
+    let mut buf = String::with_capacity(8 * 1024);
+    loop {
+        buf.clear();
+        match reader.read_line(&mut buf) {
+            Ok(0) => break,
+            Ok(_) => {}
             Err(_) => continue,
-        };
-        if line.trim().is_empty() {
+        }
+        let line = buf.trim();
+        if line.is_empty() {
             continue;
         }
-        let entry: Entry = match serde_json::from_str(&line) {
+        let entry: Entry = match serde_json::from_str(line) {
             Ok(e) => e,
             Err(_) => continue,
         };
@@ -319,11 +330,8 @@ pub fn run_latest(args: &[String]) {
         }
     };
     let primary = parsed.projects_root.unwrap_or_else(default_projects_root);
-    let roots = walker_roots::resolve_roots(
-        primary,
-        &parsed.extra_projects_roots,
-        parsed.read_config,
-    );
+    let roots =
+        walker_roots::resolve_roots(primary, &parsed.extra_projects_roots, parsed.read_config);
     let now_unix = parsed.now_unix.unwrap_or_else(current_unix);
 
     // Try parent transcript first, then any subagent transcript, across
@@ -424,47 +432,6 @@ fn parse_history_args(args: &[String]) -> Result<HistoryArgs, String> {
     })
 }
 
-fn discover_history_groups(roots: &[PathBuf]) -> HashMap<(String, String), Vec<PathBuf>> {
-    let mut groups: HashMap<(String, String), Vec<PathBuf>> = HashMap::new();
-
-    for root in roots {
-        let parent_pattern = format!("{}/*/*.jsonl", root.display());
-        if let Ok(paths) = glob::glob(&parent_pattern) {
-            for entry in paths.flatten() {
-                let slug = entry
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let sid = entry
-                    .file_stem()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                groups.entry((slug, sid)).or_default().push(entry);
-            }
-        }
-
-        let sub_pattern = format!("{}/*/*/subagents/agent-*.jsonl", root.display());
-        if let Ok(paths) = glob::glob(&sub_pattern) {
-            for entry in paths.flatten() {
-                let session_dir = entry.parent().and_then(|p| p.parent());
-                let sid = session_dir
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let slug = session_dir
-                    .and_then(|p| p.parent())
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                groups.entry((slug, sid)).or_default().push(entry);
-            }
-        }
-    }
-
-    groups
-}
-
 fn bias_factor(pairs: &[(f64, f64)]) -> Option<f64> {
     if pairs.is_empty() {
         return None;
@@ -501,13 +468,12 @@ pub fn run_history(args: &[String]) {
     // a pair requires its begin (and end) timestamp inside the window.
     let window_lo = period_cutoff.max(parsed.win_start_unix);
     let primary = parsed.projects_root.unwrap_or_else(default_projects_root);
-    let roots = walker_roots::resolve_roots(
-        primary,
-        &parsed.extra_projects_roots,
-        parsed.read_config,
-    );
+    let roots =
+        walker_roots::resolve_roots(primary, &parsed.extra_projects_roots, parsed.read_config);
 
-    let groups = discover_history_groups(&roots);
+    // Same discovery as cost/events, with the mtime prune disabled: history
+    // pairing must see every transcript regardless of age.
+    let groups = crate::transcript::discover_groups(&roots, f64::NEG_INFINITY);
     let session_count = groups.len();
     let re = beacon_re();
 
@@ -629,7 +595,9 @@ mod tests {
         p
     }
 
-    fn s(x: &str) -> String { x.to_string() }
+    fn s(x: &str) -> String {
+        x.to_string()
+    }
 
     #[test]
     fn bias_factor_empty_pairs_returns_none() {
@@ -713,12 +681,17 @@ mod tests {
     #[test]
     fn parse_latest_args_accepts_all_flags() {
         let r = parse_latest_args(&[
-            s("--session-id"), s("abc"),
-            s("--projects-root"), s("/tmp/p"),
-            s("--extra-projects-root"), s("/tmp/q"),
+            s("--session-id"),
+            s("abc"),
+            s("--projects-root"),
+            s("/tmp/p"),
+            s("--extra-projects-root"),
+            s("/tmp/q"),
             s("--no-config"),
-            s("--now"), s("1.5"),
-        ]).unwrap();
+            s("--now"),
+            s("1.5"),
+        ])
+        .unwrap();
         assert_eq!(r.session_id, "abc");
         assert_eq!(r.projects_root, Some(PathBuf::from("/tmp/p")));
         assert_eq!(r.extra_projects_roots, vec![PathBuf::from("/tmp/q")]);
@@ -741,10 +714,16 @@ mod tests {
 
     #[test]
     fn parse_history_args_all_flag_value_errors() {
-        for flag in ["--win-start", "--projects-root", "--extra-projects-root", "--now"] {
+        for flag in [
+            "--win-start",
+            "--projects-root",
+            "--extra-projects-root",
+            "--now",
+        ] {
             assert!(
                 parse_history_args(&[s("--period"), s("60"), s(flag)]).is_err(),
-                "{} should error when value missing", flag
+                "{} should error when value missing",
+                flag
             );
         }
         assert!(parse_history_args(&[s("--period"), s("60"), s("--bogus")]).is_err());
@@ -753,13 +732,19 @@ mod tests {
     #[test]
     fn parse_history_args_accepts_all_flags() {
         let r = parse_history_args(&[
-            s("--period"), s("3600"),
-            s("--win-start"), s("0"),
-            s("--projects-root"), s("/tmp/p"),
-            s("--extra-projects-root"), s("/tmp/q"),
+            s("--period"),
+            s("3600"),
+            s("--win-start"),
+            s("0"),
+            s("--projects-root"),
+            s("/tmp/p"),
+            s("--extra-projects-root"),
+            s("/tmp/q"),
             s("--no-config"),
-            s("--now"), s("100.0"),
-        ]).unwrap();
+            s("--now"),
+            s("100.0"),
+        ])
+        .unwrap();
         assert_eq!(r.period_seconds, 3600);
         assert_eq!(r.win_start_unix, 0.0);
         assert_eq!(r.now_unix, Some(100.0));
@@ -780,9 +765,8 @@ mod tests {
         let line_a = r#"{"timestamp":"2025-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"<progress-beacon>{\"kind\":\"report\",\"eta_seconds\":1,\"summary\":\"a\"}</progress-beacon>"}]}}"#.to_string();
         let line_b = r#"{"timestamp":"2025-01-02T00:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"<progress-beacon>{\"kind\":\"report\",\"eta_seconds\":2,\"summary\":\"b\"}</progress-beacon>"}]}}"#.to_string();
         // Also include a non-assistant + a blank + a malformed JSON to exercise skip ladder.
-        let lines = format!(
-            "\n   \n{{junk\n{{\"message\":{{\"role\":\"user\"}}}}\n{line_a}\n{line_b}\n"
-        );
+        let lines =
+            format!("\n   \n{{junk\n{{\"message\":{{\"role\":\"user\"}}}}\n{line_a}\n{line_b}\n");
         fs::write(&path, lines).unwrap();
         let re = beacon_re();
         let (b, ts) = find_latest_in_path(&path, &re).unwrap();
@@ -831,6 +815,9 @@ mod tests {
 
     #[test]
     fn discover_history_groups_parents_and_subagents() {
+        // History discovery is shared transcript::discover_groups with the
+        // mtime prune disabled; assert the no-prune call still finds both
+        // parent and subagent layouts.
         let root = tempdir_path("hist-disc");
         let slug = root.join("slug");
         fs::create_dir_all(&slug).unwrap();
@@ -838,7 +825,8 @@ mod tests {
         let subagents = slug.join("sid-2").join("subagents");
         fs::create_dir_all(&subagents).unwrap();
         fs::write(subagents.join("agent-x.jsonl"), b"").unwrap();
-        let groups = discover_history_groups(std::slice::from_ref(&root));
+        let groups =
+            crate::transcript::discover_groups(std::slice::from_ref(&root), f64::NEG_INFINITY);
         let k1 = ("slug".to_string(), "sid-1".to_string());
         let k2 = ("slug".to_string(), "sid-2".to_string());
         assert!(groups.contains_key(&k1));

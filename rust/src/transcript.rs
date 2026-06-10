@@ -3,7 +3,7 @@
 // Extracted from main.rs so both modules reference a single definition.
 
 use std::collections::HashMap;
-use std::fs::metadata;
+use std::fs::{read_dir, DirEntry};
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 
@@ -76,65 +76,95 @@ pub(crate) fn cost_for(usage: &Usage, model: &str) -> f64 {
 
 // ── Discovery ─────────────────────────────────────────────────────────────────
 
+/// True when the entry's mtime is readable and earlier than `earliest`.
+/// Unreadable mtimes err on the side of inclusion (matches the prior glob
+/// path and C++'s mtimeAtOrAfter). Uses DirEntry::metadata so the stat comes
+/// from the directory scan's own data where the platform provides it.
+pub(crate) fn entry_mtime_before(entry: &DirEntry, earliest: f64) -> bool {
+    if let Ok(meta) = entry.metadata() {
+        if let Ok(mt) = meta.modified() {
+            if let Ok(d) = mt.duration_since(UNIX_EPOCH) {
+                return d.as_secs_f64() < earliest;
+            }
+        }
+    }
+    false
+}
+
 /// Discover all `.jsonl` files under `roots`, grouped by `(slug, session_id)`.
-/// Files whose mtime is earlier than `earliest` are skipped (fast-path prune).
+/// Files whose mtime is earlier than `earliest` are skipped (fast-path prune);
+/// pass `f64::NEG_INFINITY` to disable the prune (skips the stat entirely).
+///
+/// Single fused walk per slug dir: parents (`<slug>/<sid>.jsonl`) and
+/// subagents (`<slug>/<session>/subagents/agent-*.jsonl`) are classified in
+/// one directory pass, replacing the prior two-glob approach that re-read
+/// every slug dir twice and paid an extra stat per file.
 pub(crate) fn discover_groups(
     roots: &[PathBuf],
     earliest: f64,
 ) -> HashMap<(String, String), Vec<PathBuf>> {
     let mut groups: HashMap<(String, String), Vec<PathBuf>> = HashMap::new();
+    let prune = earliest > f64::NEG_INFINITY;
 
     for root in roots {
-        // Parents: <root>/<slug>/<session_id>.jsonl
-        let parent_pattern = format!("{}/*/*.jsonl", root.display());
-        if let Ok(paths) = glob::glob(&parent_pattern) {
-            for entry in paths.flatten() {
-                if let Ok(meta) = metadata(&entry) {
-                    if let Ok(mt) = meta.modified() {
-                        if let Ok(d) = mt.duration_since(UNIX_EPOCH) {
-                            if d.as_secs_f64() < earliest {
-                                continue;
-                            }
-                        }
-                    }
-                }
-                let slug = entry
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let sid = entry
-                    .file_stem()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                groups.entry((slug, sid)).or_default().push(entry);
+        let slug_entries = match read_dir(root) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for slug_entry in slug_entries.flatten() {
+            if !slug_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
             }
-        }
-
-        // Subagents: <root>/<slug>/<session_id>/subagents/agent-*.jsonl
-        let sub_pattern = format!("{}/*/*/subagents/agent-*.jsonl", root.display());
-        if let Ok(paths) = glob::glob(&sub_pattern) {
-            for entry in paths.flatten() {
-                if let Ok(meta) = metadata(&entry) {
-                    if let Ok(mt) = meta.modified() {
-                        if let Ok(d) = mt.duration_since(UNIX_EPOCH) {
-                            if d.as_secs_f64() < earliest {
-                                continue;
-                            }
+            let slug = slug_entry.file_name().to_string_lossy().to_string();
+            let entries = match read_dir(slug_entry.path()) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let file_type = match entry.file_type() {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                if file_type.is_file() {
+                    // Parent: <root>/<slug>/<session_id>.jsonl
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    let stem = match name.strip_suffix(".jsonl") {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    if prune && entry_mtime_before(&entry, earliest) {
+                        continue;
+                    }
+                    groups
+                        .entry((slug.clone(), stem.to_string()))
+                        .or_default()
+                        .push(entry.path());
+                } else if file_type.is_dir() {
+                    // Subagents: <root>/<slug>/<session>/subagents/agent-*.jsonl
+                    let sid = entry.file_name().to_string_lossy().to_string();
+                    let sub_entries = match read_dir(entry.path().join("subagents")) {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    for sub in sub_entries.flatten() {
+                        if !sub.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                            continue;
                         }
+                        let sub_name = sub.file_name();
+                        let sub_name = sub_name.to_string_lossy();
+                        if !sub_name.starts_with("agent-") || !sub_name.ends_with(".jsonl") {
+                            continue;
+                        }
+                        if prune && entry_mtime_before(&sub, earliest) {
+                            continue;
+                        }
+                        groups
+                            .entry((slug.clone(), sid.clone()))
+                            .or_default()
+                            .push(sub.path());
                     }
                 }
-                let session_dir = entry.parent().and_then(|p| p.parent());
-                let sid = session_dir
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let slug = session_dir
-                    .and_then(|p| p.parent())
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                groups.entry((slug, sid)).or_default().push(entry);
             }
         }
     }
@@ -176,7 +206,9 @@ mod tests {
             output_tokens: 0,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
-            server_tool_use: ServerToolUse { web_search_requests: 3 },
+            server_tool_use: ServerToolUse {
+                web_search_requests: 3,
+            },
         };
         // 3 * $0.01 = $0.03, no token cost.
         assert!((cost_for(&usage, "sonnet") - 0.03).abs() < 1e-9);
@@ -197,8 +229,8 @@ mod tests {
         let usage2 = Usage {
             input_tokens: 0,
             output_tokens: 0,
-            cache_read_input_tokens: 10_000_000,    // 10M * $3 * 0.10 = $3
-            cache_creation_input_tokens: 800_000,   // 800k * $3 * 1.25 = $3
+            cache_read_input_tokens: 10_000_000, // 10M * $3 * 0.10 = $3
+            cache_creation_input_tokens: 800_000, // 800k * $3 * 1.25 = $3
             server_tool_use: ServerToolUse::default(),
         };
         assert!((cost_for(&usage2, "sonnet") - 6.0).abs() < 1e-6);
@@ -221,9 +253,14 @@ mod tests {
         let far_future = (SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0)) + 1e9;
+            .unwrap_or(0.0))
+            + 1e9;
         let groups = discover_groups(std::slice::from_ref(&root), far_future);
-        assert!(groups.is_empty(), "future cutoff should prune everything, got {:?}", groups);
+        assert!(
+            groups.is_empty(),
+            "future cutoff should prune everything, got {:?}",
+            groups
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -238,7 +275,11 @@ mod tests {
         let groups = discover_groups(std::slice::from_ref(&root), 0.0);
         // Subagent file should be discovered under (slug, session-1).
         let key = ("slug".to_string(), "session-1".to_string());
-        assert!(groups.contains_key(&key), "expected key in {:?}", groups.keys().collect::<Vec<_>>());
+        assert!(
+            groups.contains_key(&key),
+            "expected key in {:?}",
+            groups.keys().collect::<Vec<_>>()
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

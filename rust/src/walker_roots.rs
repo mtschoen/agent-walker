@@ -83,11 +83,7 @@ pub fn read_extra_roots_from_config() -> Vec<PathBuf> {
     extras
 }
 
-pub fn resolve_roots(
-    primary: PathBuf,
-    cli_extras: &[PathBuf],
-    read_config: bool,
-) -> Vec<PathBuf> {
+pub fn resolve_roots(primary: PathBuf, cli_extras: &[PathBuf], read_config: bool) -> Vec<PathBuf> {
     let mut combined: Vec<(PathBuf, bool)> = Vec::new();
     combined.push((primary, true));
     for p in cli_extras {

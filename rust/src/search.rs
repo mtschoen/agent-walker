@@ -7,8 +7,8 @@ use rayon::prelude::*;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::fs::{metadata, File};
-use std::io::{BufRead, BufReader, Write};
+use std::fs::{read_dir, DirEntry};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, UNIX_EPOCH};
 
@@ -84,9 +84,11 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
                     "user" => Role::User,
                     "assistant" => Role::Assistant,
                     "both" => Role::Both,
-                    other => return Err(format!(
-                        "--role: invalid value {other}; expected user|assistant|both"
-                    )),
+                    other => {
+                        return Err(format!(
+                            "--role: invalid value {other}; expected user|assistant|both"
+                        ))
+                    }
                 };
             }
             "--since" => since_raw = Some(iter.next().ok_or("--since needs a value")?.clone()),
@@ -94,12 +96,18 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
             "--cwd" => cwd = Some(iter.next().ok_or("--cwd needs a value")?.clone()),
             "--any-cwd" => any_cwd_explicit = true,
             "--context" => {
-                context = iter.next().ok_or("--context needs a value")?
-                    .parse().map_err(|e| format!("--context: {e}"))?;
+                context = iter
+                    .next()
+                    .ok_or("--context needs a value")?
+                    .parse()
+                    .map_err(|e| format!("--context: {e}"))?;
             }
             "--limit" => {
-                limit = iter.next().ok_or("--limit needs a value")?
-                    .parse().map_err(|e| format!("--limit: {e}"))?;
+                limit = iter
+                    .next()
+                    .ok_or("--limit needs a value")?
+                    .parse()
+                    .map_err(|e| format!("--limit: {e}"))?;
             }
             "--count-only" => count_only = true,
             "--include-tool-blocks" => include_tool_blocks = true,
@@ -109,14 +117,19 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
                 format = match v.as_str() {
                     "pretty" => Format::Pretty,
                     "jsonl" => Format::Jsonl,
-                    other => return Err(format!(
-                        "--format: invalid value {other}; expected pretty|jsonl"
-                    )),
+                    other => {
+                        return Err(format!(
+                            "--format: invalid value {other}; expected pretty|jsonl"
+                        ))
+                    }
                 };
             }
             "--snippet-chars" => {
-                snippet_chars = iter.next().ok_or("--snippet-chars needs a value")?
-                    .parse().map_err(|e| format!("--snippet-chars: {e}"))?;
+                snippet_chars = iter
+                    .next()
+                    .ok_or("--snippet-chars needs a value")?
+                    .parse()
+                    .map_err(|e| format!("--snippet-chars: {e}"))?;
             }
             "--projects-root" => {
                 projects_root = Some(PathBuf::from(
@@ -132,8 +145,12 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
                 read_config = false;
             }
             "--now" => {
-                now_override = Some(iter.next().ok_or("--now needs a value")?
-                    .parse().map_err(|e| format!("--now: {e}"))?);
+                now_override = Some(
+                    iter.next()
+                        .ok_or("--now needs a value")?
+                        .parse()
+                        .map_err(|e| format!("--now: {e}"))?,
+                );
             }
             s if s.starts_with("--") => return Err(format!("unknown flag: {s}")),
             _ => {
@@ -155,18 +172,33 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
 
     let now = now_override.unwrap_or_else(current_unix);
     let since = match since_raw {
-        Some(s) => Some(parse_time_arg(&s, now).map_err(|e| format!("bad time: --since={s} ({e})"))?),
+        Some(s) => {
+            Some(parse_time_arg(&s, now).map_err(|e| format!("bad time: --since={s} ({e})"))?)
+        }
         None => None,
     };
     let until = match until_raw {
-        Some(s) => Some(parse_time_arg(&s, now).map_err(|e| format!("bad time: --until={s} ({e})"))?),
+        Some(s) => {
+            Some(parse_time_arg(&s, now).map_err(|e| format!("bad time: --until={s} ({e})"))?)
+        }
         None => None,
     };
 
     Ok(SearchArgs {
-        pattern, regex, case_sensitive, role, since, until, cwd,
-        context, limit, count_only, include_tool_blocks, include_queue_ops,
-        format, snippet_chars,
+        pattern,
+        regex,
+        case_sensitive,
+        role,
+        since,
+        until,
+        cwd,
+        context,
+        limit,
+        count_only,
+        include_tool_blocks,
+        include_queue_ops,
+        format,
+        snippet_chars,
         projects_root: projects_root.unwrap_or_else(default_projects_root),
         extra_projects_roots,
         read_config,
@@ -194,8 +226,7 @@ fn parse_time_arg(s: &str, now: f64) -> Result<f64, String> {
             }
         }
     }
-    parse_iso8601(trimmed)
-        .ok_or_else(|| format!("not RFC3339 or relative: {trimmed}"))
+    parse_iso8601(trimmed).ok_or_else(|| format!("not RFC3339 or relative: {trimmed}"))
 }
 
 // === Scan / file IO ===
@@ -211,21 +242,38 @@ struct ScanMessage {
     is_only_tool_blocks: bool,
 }
 
-fn scan_file(path: &Path, include_queue_ops: bool) -> Vec<ScanMessage> {
+fn scan_file(
+    path: &Path,
+    include_queue_ops: bool,
+    include_tool_blocks: bool,
+    prefilter: Option<&PreFilter>,
+) -> Vec<ScanMessage> {
     let mut out: Vec<ScanMessage> = Vec::new();
-    let file = match File::open(path) {
-        Ok(f) => f,
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
         Err(_) => return out,
     };
-    for (idx, line) in BufReader::new(file).lines().enumerate() {
-        let line = match line {
-            Ok(l) => l,
+    // File-level literal pre-filter: when the pattern is a plain literal whose
+    // bytes survive JSON string-escaping unchanged, a transcript whose raw
+    // bytes never contain it cannot produce a hit; skip all JSON parsing.
+    // Context turns are only emitted for files WITH hits, so whole-file
+    // skipping cannot change any output.
+    if let Some(pf) = prefilter {
+        if !pf.contains(&data) {
+            return out;
+        }
+    }
+    for (idx, raw) in data.split(|&b| b == b'\n').enumerate() {
+        // Mirrors the previous BufReader::lines() semantics: invalid-UTF-8
+        // lines are skipped, surrounding lines keep their numbering.
+        let line = match std::str::from_utf8(raw) {
+            Ok(s) => s.trim(),
             Err(_) => continue,
         };
-        if line.trim().is_empty() {
+        if line.is_empty() {
             continue;
         }
-        let entry: Value = match serde_json::from_str(&line) {
+        let entry: Value = match serde_json::from_str(line) {
             Ok(e) => e,
             Err(_) => continue,
         };
@@ -241,8 +289,11 @@ fn scan_file(path: &Path, include_queue_ops: bool) -> Vec<ScanMessage> {
                 Some(t) => t,
                 None => continue,
             };
-            let timestamp_str = entry.get("timestamp")
-                .and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let timestamp_str = entry
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let timestamp = if timestamp_str.is_empty() {
                 None
             } else {
@@ -263,7 +314,11 @@ fn scan_file(path: &Path, include_queue_ops: bool) -> Vec<ScanMessage> {
             Some(m) => m,
             None => continue,
         };
-        let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let role = message
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if role.is_empty() {
             continue;
         }
@@ -271,15 +326,24 @@ fn scan_file(path: &Path, include_queue_ops: bool) -> Vec<ScanMessage> {
             Some(c) => c,
             None => continue,
         };
-        let timestamp_str = entry.get("timestamp")
-            .and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let timestamp_str = entry
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let timestamp = if timestamp_str.is_empty() {
             None
         } else {
             parse_iso8601(&timestamp_str)
         };
         let text_default = extract_text(content, false);
-        let text_with_tools = extract_text(content, true);
+        // The with-tools variant costs a second content walk + allocation;
+        // only build it when --include-tool-blocks will actually read it.
+        let text_with_tools = if include_tool_blocks {
+            extract_text(content, true)
+        } else {
+            String::new()
+        };
         let only_tool_blocks = is_only_tool_blocks(content);
         out.push(ScanMessage {
             line_number: (idx + 1) as u32,
@@ -303,42 +367,100 @@ struct DiscoveredFile {
     host_root: String,
 }
 
+fn mtime_pruned(entry: &DirEntry, since: Option<f64>) -> bool {
+    let cutoff = match since {
+        Some(c) => c,
+        None => return false,
+    };
+    if let Ok(meta) = entry.metadata() {
+        if let Ok(mt) = meta.modified() {
+            if let Ok(d) = mt.duration_since(UNIX_EPOCH) {
+                return d.as_secs_f64() < cutoff;
+            }
+        }
+    }
+    // Unreadable mtime errs on the side of inclusion.
+    false
+}
+
+/// Walk parents (`<root>/<slug>/<sid>.jsonl`) and subagents
+/// (`<root>/<slug>/<session>/subagents/agent-*.jsonl`) per SPEC "Discovery"
+/// under `search`. A subagent file reports session_id = its enclosing
+/// session directory's name (the parent session), so its hits group with
+/// the parent in sessions_matched.
 fn discover_files(
     roots: &[PathBuf],
     since: Option<f64>,
     cwd_slug: Option<&str>,
 ) -> Vec<DiscoveredFile> {
     let mut files: Vec<DiscoveredFile> = Vec::new();
-    let slug_pat = cwd_slug.unwrap_or("*");
     for root in roots {
         let host_root = root.display().to_string();
-        let parent_pattern = format!("{}/{}/*.jsonl", root.display(), slug_pat);
-        if let Ok(entries) = glob::glob(&parent_pattern) {
+        let slug_entries = match read_dir(root) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for slug_entry in slug_entries.flatten() {
+            if !slug_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let slug = slug_entry.file_name().to_string_lossy().to_string();
+            if let Some(want) = cwd_slug {
+                if slug != want {
+                    continue;
+                }
+            }
+            let entries = match read_dir(slug_entry.path()) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
             for entry in entries.flatten() {
-                if let Some(cutoff) = since {
-                    if let Ok(meta) = metadata(&entry) {
-                        if let Ok(mt) = meta.modified() {
-                            if let Ok(d) = mt.duration_since(UNIX_EPOCH) {
-                                if d.as_secs_f64() < cutoff {
-                                    continue;
-                                }
-                            }
+                let file_type = match entry.file_type() {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+                if file_type.is_file() {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    let stem = match name.strip_suffix(".jsonl") {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    if mtime_pruned(&entry, since) {
+                        continue;
+                    }
+                    files.push(DiscoveredFile {
+                        path: entry.path(),
+                        slug: slug.clone(),
+                        session_id: stem.to_string(),
+                        host_root: host_root.clone(),
+                    });
+                } else if file_type.is_dir() {
+                    let sid = entry.file_name().to_string_lossy().to_string();
+                    let sub_entries = match read_dir(entry.path().join("subagents")) {
+                        Ok(e) => e,
+                        Err(_) => continue,
+                    };
+                    for sub in sub_entries.flatten() {
+                        if !sub.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                            continue;
                         }
+                        let sub_name = sub.file_name();
+                        let sub_name = sub_name.to_string_lossy();
+                        if !sub_name.starts_with("agent-") || !sub_name.ends_with(".jsonl") {
+                            continue;
+                        }
+                        if mtime_pruned(&sub, since) {
+                            continue;
+                        }
+                        files.push(DiscoveredFile {
+                            path: sub.path(),
+                            slug: slug.clone(),
+                            session_id: sid.clone(),
+                            host_root: host_root.clone(),
+                        });
                     }
                 }
-                let slug = entry.parent()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let sid = entry.file_stem()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                files.push(DiscoveredFile {
-                    path: entry,
-                    slug,
-                    session_id: sid,
-                    host_root: host_root.clone(),
-                });
             }
         }
     }
@@ -346,6 +468,99 @@ fn discover_files(
 }
 
 // === Pattern matching ===
+
+/// Raw-byte necessary-condition check for literal (non --regex) patterns,
+/// applied to a whole file's bytes before any JSON parsing. Sound because:
+/// - the pattern is restricted to ASCII without `"`, `\`, or control bytes,
+///   so JSON string-escaping never alters an occurrence of it: if the
+///   extracted text contains the literal, the raw line bytes do too;
+/// - false positives only cost a normal parse, never an output change.
+enum PreFilter {
+    // Boxed: Finder embeds its searcher tables and would otherwise dwarf the
+    // other variant (clippy::large_enum_variant).
+    CaseSensitive(Box<memchr::memmem::Finder<'static>>),
+    /// `lower` is the pattern lowercased. `fold_hazard` is set when the
+    /// pattern contains k/s (either case): under Unicode simple case folding
+    /// those also match U+212A KELVIN SIGN / U+017F LONG S, whose UTF-8 lead
+    /// bytes are 0xE2/0xC5 - when the haystack contains either lead byte the
+    /// filter passes the file through rather than risk a false negative.
+    /// (Same edge Go locks with TestSearchMatcherFastPathParity.)
+    AsciiInsensitive {
+        lower: Vec<u8>,
+        fold_hazard: bool,
+    },
+}
+
+impl PreFilter {
+    fn build(args: &SearchArgs) -> Option<PreFilter> {
+        if args.regex {
+            return None;
+        }
+        let bytes = args.pattern.as_bytes();
+        if bytes.is_empty()
+            || bytes
+                .iter()
+                .any(|&b| !b.is_ascii() || b == b'"' || b == b'\\' || b.is_ascii_control())
+        {
+            return None;
+        }
+        if args.case_sensitive {
+            return Some(PreFilter::CaseSensitive(Box::new(
+                memchr::memmem::Finder::new(bytes).into_owned(),
+            )));
+        }
+        let fold_hazard = bytes
+            .iter()
+            .any(|&b| matches!(b, b'k' | b'K' | b's' | b'S'));
+        Some(PreFilter::AsciiInsensitive {
+            lower: args.pattern.to_ascii_lowercase().into_bytes(),
+            fold_hazard,
+        })
+    }
+
+    fn contains(&self, hay: &[u8]) -> bool {
+        match self {
+            PreFilter::CaseSensitive(finder) => finder.find(hay).is_some(),
+            PreFilter::AsciiInsensitive { lower, fold_hazard } => {
+                contains_ascii_ci(hay, lower)
+                    || (*fold_hazard && memchr::memchr2(0xE2, 0xC5, hay).is_some())
+            }
+        }
+    }
+}
+
+/// Allocation-free ASCII case-insensitive substring scan: SIMD memchr on the
+/// first byte (both cases), then a window compare at each candidate.
+fn contains_ascii_ci(hay: &[u8], lower: &[u8]) -> bool {
+    let n = lower.len();
+    if n == 0 || hay.len() < n {
+        return false;
+    }
+    let b0 = lower[0];
+    let b0_upper = b0.to_ascii_uppercase();
+    let last_start = hay.len() - n;
+    let candidate_hits = |i: usize| hay[i..i + n].eq_ignore_ascii_case(lower);
+    if b0 == b0_upper {
+        for i in memchr::memchr_iter(b0, hay) {
+            if i > last_start {
+                break;
+            }
+            if candidate_hits(i) {
+                return true;
+            }
+        }
+    } else {
+        for i in memchr::memchr2_iter(b0, b0_upper, hay) {
+            if i > last_start {
+                break;
+            }
+            if candidate_hits(i) {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 fn build_pattern_regex(args: &SearchArgs) -> Result<Regex, String> {
     let body = if args.regex {
@@ -409,8 +624,16 @@ fn make_snippet(text: &str, first_match: (usize, usize), snippet_chars: u32) -> 
     let lo = nudge_char_boundary(text, raw_lo);
     let hi = nudge_char_boundary(text, raw_hi);
     // Only nudge to whitespace if we actually clipped on that side.
-    let lo = if lo > 0 { nudge_to_whitespace(text, lo, -1, 20) } else { lo };
-    let hi = if hi < text.len() { nudge_to_whitespace(text, hi, 1, 20) } else { hi };
+    let lo = if lo > 0 {
+        nudge_to_whitespace(text, lo, -1, 20)
+    } else {
+        lo
+    };
+    let hi = if hi < text.len() {
+        nudge_to_whitespace(text, hi, 1, 20)
+    } else {
+        hi
+    };
     let lo = nudge_char_boundary(text, lo);
     let hi = nudge_char_boundary(text, hi);
     text[lo..hi].to_string()
@@ -419,7 +642,7 @@ fn make_snippet(text: &str, first_match: (usize, usize), snippet_chars: u32) -> 
 // === Hit assembly ===
 
 struct Hit {
-    timestamp: f64,                 // for sorting; not emitted
+    timestamp: f64, // for sorting; not emitted
     timestamp_str: String,
     session_id: String,
     cwd_slug: String,
@@ -477,8 +700,14 @@ fn process_file(
     file: &DiscoveredFile,
     args: &SearchArgs,
     re: &Regex,
+    prefilter: Option<&PreFilter>,
 ) -> Vec<Hit> {
-    let messages = scan_file(&file.path, args.include_queue_ops);
+    let messages = scan_file(
+        &file.path,
+        args.include_queue_ops,
+        args.include_tool_blocks,
+        prefilter,
+    );
     let mut hits: Vec<Hit> = Vec::new();
     for (idx, m) in messages.iter().enumerate() {
         if !role_matches(args.role, &m.role) {
@@ -629,8 +858,12 @@ fn write_pretty(hits: &[Hit], summary: &SearchSummary, suppress_hits: bool) {
     let _ = writeln!(
         out,
         "{} hits in {} sessions across {} roots ({} files). truncated={} elapsed {}ms.",
-        summary.total_hits, summary.sessions_matched, summary.roots_walked,
-        summary.files_walked, summary.truncated, summary.elapsed_ms
+        summary.total_hits,
+        summary.sessions_matched,
+        summary.roots_walked,
+        summary.files_walked,
+        summary.truncated,
+        summary.elapsed_ms
     );
 }
 
@@ -665,6 +898,7 @@ pub fn run(raw: &[String]) {
             std::process::exit(2);
         }
     };
+    let prefilter = PreFilter::build(&args);
 
     let roots = walker_roots::resolve_roots(
         args.projects_root.clone(),
@@ -696,7 +930,7 @@ pub fn run(raw: &[String]) {
     let mut hits: Vec<Hit> = pool.install(|| {
         files
             .par_iter()
-            .map(|f| process_file(f, &args, &re))
+            .map(|f| process_file(f, &args, &re, prefilter.as_ref()))
             .reduce(Vec::new, |mut acc, mut next| {
                 if acc.is_empty() {
                     next
@@ -710,17 +944,20 @@ pub fn run(raw: &[String]) {
     // Sort newest first by timestamp; tiebreak by (session_id, line_number) for
     // deterministic ordering when timestamps collide.
     hits.sort_by(|a, b| {
-        b.timestamp.partial_cmp(&a.timestamp).unwrap_or(std::cmp::Ordering::Equal)
+        b.timestamp
+            .partial_cmp(&a.timestamp)
+            .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.session_id.cmp(&b.session_id))
             .then_with(|| a.line_number.cmp(&b.line_number))
     });
 
     // sessions_matched is counted BEFORE truncation: how many distinct sessions
     // had any matching message at all.
-    let pre_truncate_sessions: HashSet<String> = hits.iter()
-        .map(|h| format!("{}/{}", h.cwd_slug, h.session_id))
-        .collect();
-    let sessions_matched = pre_truncate_sessions.len();
+    let sessions_matched = hits
+        .iter()
+        .map(|h| (h.cwd_slug.as_str(), h.session_id.as_str()))
+        .collect::<HashSet<_>>()
+        .len();
 
     let total_unfiltered = hits.len();
     let truncated = total_unfiltered > args.limit as usize;
@@ -730,7 +967,11 @@ pub fn run(raw: &[String]) {
 
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let summary_stats = SearchSummary {
-        total_hits: if args.count_only { total_unfiltered } else { hits.len() },
+        total_hits: if args.count_only {
+            total_unfiltered
+        } else {
+            hits.len()
+        },
         sessions_matched,
         roots_walked,
         files_walked,
@@ -847,7 +1088,7 @@ mod tests {
         let mend = mstart + "gamma".len();
         let snippet = make_snippet(text, (mstart, mend), 20);
         assert!(snippet.contains("gamma"));
-        assert!(snippet.len() <= 40);  // ~snippet_chars + a little nudge slack
+        assert!(snippet.len() <= 40); // ~snippet_chars + a little nudge slack
     }
 
     #[test]
@@ -875,7 +1116,7 @@ mod tests {
     fn scan_file_open_error_returns_empty() {
         // Covers lines 212-214: File::open Err → return empty vec.
         let missing = PathBuf::from("/nonexistent/path/to/file.jsonl");
-        let msgs = scan_file(&missing, false);
+        let msgs = scan_file(&missing, false, false, None);
         assert!(msgs.is_empty());
     }
 
@@ -886,20 +1127,20 @@ mod tests {
         let dir = tempdir_path("scan-skip");
         let path = dir.join("session.jsonl");
         let lines = [
-            "",                                                       // blank
-            "   ",                                                    // whitespace-only
-            "{garbage",                                               // bad JSON
-            "{}",                                                     // no message
-            r#"{"message":{}}"#,                                     // missing role
-            r#"{"message":{"role":""}}"#,                            // empty role
-            r#"{"message":{"role":"user"}}"#,                        // no content
-            r#"{"message":{"role":"user","content":""},"timestamp":"garbage"}"#,  // bad ts
+            "",                                                                                 // blank
+            "   ",                            // whitespace-only
+            "{garbage",                       // bad JSON
+            "{}",                             // no message
+            r#"{"message":{}}"#,              // missing role
+            r#"{"message":{"role":""}}"#,     // empty role
+            r#"{"message":{"role":"user"}}"#, // no content
+            r#"{"message":{"role":"user","content":""},"timestamp":"garbage"}"#, // bad ts
             r#"{"message":{"role":"user","content":"hi"},"timestamp":"2025-01-01T00:00:00Z"}"#, // good
         ];
         fs::write(&path, lines.join("\n")).unwrap();
-        let msgs = scan_file(&path, false);
-        assert_eq!(msgs.len(), 2);  // the empty-content user and the good user line
-        // First valid message has content "" (line 7); second has "hi".
+        let msgs = scan_file(&path, false, false, None);
+        assert_eq!(msgs.len(), 2); // the empty-content user and the good user line
+                                   // First valid message has content "" (line 7); second has "hi".
         assert_eq!(msgs.last().unwrap().text_default, "hi");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -913,7 +1154,10 @@ mod tests {
         fs::write(slug.join("sid-1.jsonl"), b"").unwrap();
         // Cutoff far in the future → entry is filtered out.
         let far_future = SystemTime::now()
-            .duration_since(UNIX_EPOCH).unwrap().as_secs_f64() + 1e9;
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+            + 1e9;
         let files = discover_files(std::slice::from_ref(&root), Some(far_future), None);
         assert!(files.is_empty());
         // Without a cutoff, the file is discovered.

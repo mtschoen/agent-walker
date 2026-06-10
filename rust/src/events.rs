@@ -9,8 +9,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 
-use crate::{current_unix, default_projects_root, parse_iso8601, walker_roots};
 use crate::transcript::{cost_for, discover_groups, Entry};
+use crate::{current_unix, default_projects_root, parse_iso8601, walker_roots};
 
 // ── Output record ─────────────────────────────────────────────────────────────
 
@@ -126,20 +126,26 @@ fn walk_group_events(
     let mut records: Vec<EventRecord> = Vec::new();
     let mut seen_ids: std::collections::HashSet<String> = Default::default();
 
+    // Reused line buffer; see walk_group in main.rs for the rationale.
+    let mut line = String::with_capacity(8 * 1024);
     for path in paths {
         let file = match File::open(path) {
             Ok(f) => f,
             Err(_) => continue,
         };
-        for line in BufReader::new(file).lines() {
-            let line = match line {
-                Ok(l) => l,
+        let mut reader = BufReader::new(file);
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {}
                 Err(_) => continue,
-            };
-            if line.trim().is_empty() {
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
                 continue;
             }
-            let entry: Entry = match serde_json::from_str(&line) {
+            let entry: Entry = match serde_json::from_str(trimmed) {
                 Ok(e) => e,
                 Err(_) => continue,
             };
@@ -241,9 +247,7 @@ pub(crate) fn run(raw: &[String]) -> i32 {
     let mut all_records: Vec<EventRecord> = pool.install(|| {
         group_list
             .par_iter()
-            .map(|((slug, session_id), paths)| {
-                walk_group_events(paths, slug, session_id, cutoff)
-            })
+            .map(|((slug, session_id), paths)| walk_group_events(paths, slug, session_id, cutoff))
             .reduce(Vec::new, |mut acc, mut next| {
                 if acc.is_empty() {
                     next
@@ -308,7 +312,9 @@ mod tests {
         p
     }
 
-    fn s(x: &str) -> String { x.to_string() }
+    fn s(x: &str) -> String {
+        x.to_string()
+    }
 
     #[test]
     fn parse_events_args_requires_period() {
@@ -330,10 +336,16 @@ mod tests {
 
     #[test]
     fn parse_events_args_flag_value_errors() {
-        for flag in ["--win-start", "--now", "--projects-root", "--extra-projects-root"] {
+        for flag in [
+            "--win-start",
+            "--now",
+            "--projects-root",
+            "--extra-projects-root",
+        ] {
             assert!(
                 parse_events_args(&[s("--period"), s("60"), s(flag)]).is_err(),
-                "{} should error with no value", flag
+                "{} should error with no value",
+                flag
             );
         }
     }
@@ -346,9 +358,7 @@ mod tests {
     #[test]
     fn parse_events_args_win_start_default_now_minus_period() {
         // Omit --win-start → defaults to now - period.
-        let r = parse_events_args(&[
-            s("--period"), s("100"), s("--now"), s("1000.0"),
-        ]).unwrap();
+        let r = parse_events_args(&[s("--period"), s("100"), s("--now"), s("1000.0")]).unwrap();
         assert_eq!(r.period_seconds, 100);
         assert_eq!(r.now_unix, 1000.0);
         assert_eq!(r.win_start_unix, 900.0);
@@ -356,20 +366,26 @@ mod tests {
 
     #[test]
     fn parse_events_args_no_config_disables_config() {
-        let r = parse_events_args(&[
-            s("--period"), s("60"), s("--now"), s("0"), s("--no-config"),
-        ]).unwrap();
+        let r = parse_events_args(&[s("--period"), s("60"), s("--now"), s("0"), s("--no-config")])
+            .unwrap();
         assert!(!r.read_config);
     }
 
     #[test]
     fn parse_events_args_accepts_extras() {
         let r = parse_events_args(&[
-            s("--period"), s("60"), s("--now"), s("0"),
-            s("--projects-root"), s("/tmp/p"),
-            s("--extra-projects-root"), s("/tmp/q"),
-            s("--win-start"), s("50.0"),
-        ]).unwrap();
+            s("--period"),
+            s("60"),
+            s("--now"),
+            s("0"),
+            s("--projects-root"),
+            s("/tmp/p"),
+            s("--extra-projects-root"),
+            s("/tmp/q"),
+            s("--win-start"),
+            s("50.0"),
+        ])
+        .unwrap();
         assert_eq!(r.projects_root, PathBuf::from("/tmp/p"));
         assert_eq!(r.extra_projects_roots, vec![PathBuf::from("/tmp/q")]);
         assert_eq!(r.win_start_unix, 50.0);
@@ -377,10 +393,7 @@ mod tests {
 
     #[test]
     fn walk_group_events_missing_file_yields_no_records() {
-        let recs = walk_group_events(
-            &[PathBuf::from("/no/such/file.jsonl")],
-            "slug", "sid", 0.0,
-        );
+        let recs = walk_group_events(&[PathBuf::from("/no/such/file.jsonl")], "slug", "sid", 0.0);
         assert!(recs.is_empty());
     }
 
@@ -395,7 +408,9 @@ mod tests {
             self.writes_attempted += 1;
             Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
         }
-        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
         fn write_all(&mut self, _buf: &[u8]) -> std::io::Result<()> {
             self.writes_attempted += 1;
             Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
@@ -405,11 +420,31 @@ mod tests {
     #[test]
     fn emit_records_absorbs_broken_pipe() {
         let records = vec![
-            EventRecord { ts: 1.0, usd: 0.1, model: s("sonnet"), session_id: s("sid1"), slug: s("slug1") },
-            EventRecord { ts: 2.0, usd: 0.2, model: s("opus"),   session_id: s("sid2"), slug: s("slug2") },
-            EventRecord { ts: 3.0, usd: 0.3, model: s("haiku"),  session_id: s("sid3"), slug: s("slug3") },
+            EventRecord {
+                ts: 1.0,
+                usd: 0.1,
+                model: s("sonnet"),
+                session_id: s("sid1"),
+                slug: s("slug1"),
+            },
+            EventRecord {
+                ts: 2.0,
+                usd: 0.2,
+                model: s("opus"),
+                session_id: s("sid2"),
+                slug: s("slug2"),
+            },
+            EventRecord {
+                ts: 3.0,
+                usd: 0.3,
+                model: s("haiku"),
+                session_id: s("sid3"),
+                slug: s("slug3"),
+            },
         ];
-        let mut writer = BrokenPipeWriter { writes_attempted: 0 };
+        let mut writer = BrokenPipeWriter {
+            writes_attempted: 0,
+        };
         // Must NOT panic, must NOT propagate the error.
         emit_records(&mut writer, &records);
         // First write fails → loop breaks → exactly one attempt despite 3 records.
@@ -419,8 +454,20 @@ mod tests {
     #[test]
     fn emit_records_writes_all_to_healthy_sink() {
         let records = vec![
-            EventRecord { ts: 1.0, usd: 0.5, model: s("sonnet"), session_id: s("sid"), slug: s("slug") },
-            EventRecord { ts: 2.0, usd: 0.6, model: s("opus"),   session_id: s("sid"), slug: s("slug") },
+            EventRecord {
+                ts: 1.0,
+                usd: 0.5,
+                model: s("sonnet"),
+                session_id: s("sid"),
+                slug: s("slug"),
+            },
+            EventRecord {
+                ts: 2.0,
+                usd: 0.6,
+                model: s("opus"),
+                session_id: s("sid"),
+                slug: s("slug"),
+            },
         ];
         let mut buf: Vec<u8> = Vec::new();
         emit_records(&mut buf, &records);
@@ -428,8 +475,11 @@ mod tests {
         let lines: Vec<_> = text.lines().collect();
         assert_eq!(lines.len(), 2);
         // Verify the field order matches SPEC (ts, usd, model, session_id, slug).
-        assert!(lines[0].starts_with(r#"{"ts":1.0,"usd":0.5,"model":"sonnet""#),
-                "unexpected line 0: {}", lines[0]);
+        assert!(
+            lines[0].starts_with(r#"{"ts":1.0,"usd":0.5,"model":"sonnet""#),
+            "unexpected line 0: {}",
+            lines[0]
+        );
     }
 
     #[test]

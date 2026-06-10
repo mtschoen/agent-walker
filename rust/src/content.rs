@@ -20,29 +20,38 @@ pub fn extract_text(content: &Value, include_tool_blocks: bool) -> String {
         Some(a) => a,
         None => return String::new(),
     };
-    let mut parts: Vec<String> = Vec::new();
+    // Accumulate into one String (push_str + '\n' separators) instead of a
+    // Vec<String> + join: byte-identical output, one allocation instead of
+    // one per block.
+    let mut result = String::new();
+    let push_part = |result: &mut String, part: &str| {
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(part);
+    };
     for block in arr {
         let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
         match block_type {
             "text" => {
                 if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
-                    parts.push(t.to_string());
+                    push_part(&mut result, t);
                 }
             }
             "tool_use" if include_tool_blocks => {
                 if let Some(input) = block.get("input") {
-                    parts.push(input.to_string());
+                    push_part(&mut result, &input.to_string());
                 }
             }
             "tool_result" if include_tool_blocks => {
                 if let Some(c) = block.get("content") {
                     if let Some(s) = c.as_str() {
-                        parts.push(s.to_string());
+                        push_part(&mut result, s);
                     } else if let Some(inner) = c.as_array() {
                         for ib in inner {
                             if ib.get("type").and_then(|v| v.as_str()) == Some("text") {
                                 if let Some(t) = ib.get("text").and_then(|v| v.as_str()) {
-                                    parts.push(t.to_string());
+                                    push_part(&mut result, t);
                                 }
                             }
                         }
@@ -52,7 +61,7 @@ pub fn extract_text(content: &Value, include_tool_blocks: bool) -> String {
             _ => {}
         }
     }
-    parts.join("\n")
+    result
 }
 
 /// True when content is an array entirely composed of `tool_use`/`tool_result`
@@ -95,9 +104,8 @@ pub fn user_content_is_tool_result(content: Option<&Value>) -> bool {
         Some(a) => a,
         None => return false,
     };
-    arr.iter().any(|block| {
-        block.get("type").and_then(|v| v.as_str()) == Some("tool_result")
-    })
+    arr.iter()
+        .any(|block| block.get("type").and_then(|v| v.as_str()) == Some("tool_result"))
 }
 
 #[cfg(test)]

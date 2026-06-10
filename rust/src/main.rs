@@ -17,7 +17,13 @@ mod search;
 mod transcript;
 mod walker_roots;
 
-const SUBCOMMANDS: [&str; 5] = ["cost", "beacons-latest", "beacons-history", "search", "events"];
+const SUBCOMMANDS: [&str; 5] = [
+    "cost",
+    "beacons-latest",
+    "beacons-history",
+    "search",
+    "events",
+];
 
 const HELP: &str = r#"claude-walker - fast cost & progress walker over Claude Code transcripts
 
@@ -135,10 +141,10 @@ fn parse_cost_args(args: &[String]) -> Result<Args, String> {
     Ok(result)
 }
 
-
 pub(crate) fn parse_iso8601(ts: &str) -> Option<f64> {
-    // Accept "...Z" or any RFC3339 variant.
-    DateTime::parse_from_rfc3339(&ts.replace('Z', "+00:00"))
+    // chrono accepts the "Z" suffix natively (RFC 3339 defines it as +00:00),
+    // so no normalization pass (and no per-call allocation) is needed.
+    DateTime::parse_from_rfc3339(ts)
         .ok()
         .map(|dt| dt.timestamp() as f64 + dt.timestamp_subsec_nanos() as f64 / 1e9)
 }
@@ -153,20 +159,30 @@ fn walk_group(paths: &[PathBuf], period_cutoff: f64, win_start_unix: f64) -> Gro
     let mut trailing = 0.0;
     let mut window = 0.0;
     let mut seen_ids: std::collections::HashSet<String> = Default::default();
+    // One line buffer reused across all lines and files: BufReader::lines()
+    // allocates a fresh String per line, which dominates allocator traffic on
+    // a multi-hundred-MB fleet. read_line() retains capacity across clear().
+    let mut line = String::with_capacity(8 * 1024);
     for path in paths {
         let file = match File::open(path) {
             Ok(f) => f,
             Err(_) => continue,
         };
-        for line in BufReader::new(file).lines() {
-            let line = match line {
-                Ok(l) => l,
+        let mut reader = BufReader::new(file);
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {}
+                // Same semantics as lines(): an invalid-UTF-8 line is consumed
+                // and skipped, iteration continues with the next line.
                 Err(_) => continue,
-            };
-            if line.trim().is_empty() {
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
                 continue;
             }
-            let entry: Entry = match serde_json::from_str(&line) {
+            let entry: Entry = match serde_json::from_str(trimmed) {
                 Ok(e) => e,
                 Err(_) => continue,
             };
@@ -206,7 +222,6 @@ fn walk_group(paths: &[PathBuf], period_cutoff: f64, win_start_unix: f64) -> Gro
     }
     GroupResult { trailing, window }
 }
-
 
 pub(crate) fn default_projects_root() -> PathBuf {
     match walker_roots::home_directory() {
@@ -277,11 +292,8 @@ fn run_cost(args: &[String]) {
     let period_cutoff = now_unix - parsed.period_seconds as f64;
     let earliest = period_cutoff.min(parsed.win_start_unix);
     let primary = parsed.projects_root.unwrap_or_else(default_projects_root);
-    let roots = walker_roots::resolve_roots(
-        primary,
-        &parsed.extra_projects_roots,
-        parsed.read_config,
-    );
+    let roots =
+        walker_roots::resolve_roots(primary, &parsed.extra_projects_roots, parsed.read_config);
 
     let groups = discover_groups(&roots, earliest);
     let total_files: usize = groups.values().map(|v| v.len()).sum();
@@ -290,25 +302,34 @@ fn run_cost(args: &[String]) {
     let group_paths: Vec<Vec<PathBuf>> = groups.into_values().collect();
 
     // Cap pool so the small-corpus case doesn't pay startup tax for nothing.
-    let workers = std::cmp::min(8, std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4));
+    let workers = std::cmp::min(
+        8,
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4),
+    );
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(workers)
         .build()
         .expect("rayon pool");
 
-    let (trailing, window) = pool.install(|| {
-        group_paths
-            .par_iter()
-            .map(|paths| walk_group(paths, period_cutoff, parsed.win_start_unix))
-            .reduce(
-                || GroupResult { trailing: 0.0, window: 0.0 },
-                |a, b| GroupResult {
-                    trailing: a.trailing + b.trailing,
-                    window: a.window + b.window,
-                },
-            )
-    })
-    .into();
+    let (trailing, window) = pool
+        .install(|| {
+            group_paths
+                .par_iter()
+                .map(|paths| walk_group(paths, period_cutoff, parsed.win_start_unix))
+                .reduce(
+                    || GroupResult {
+                        trailing: 0.0,
+                        window: 0.0,
+                    },
+                    |a, b| GroupResult {
+                        trailing: a.trailing + b.trailing,
+                        window: a.window + b.window,
+                    },
+                )
+        })
+        .into();
 
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let stdout = std::io::stdout();
@@ -336,7 +357,9 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_home_env<F, R>(home: Option<&str>, up: Option<&str>, body: F) -> R
-    where F: FnOnce() -> R {
+    where
+        F: FnOnce() -> R,
+    {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved_home = std::env::var_os("HOME");
         let saved_up = std::env::var_os("USERPROFILE");
@@ -372,7 +395,9 @@ mod tests {
         p
     }
 
-    fn s(x: &str) -> String { x.to_string() }
+    fn s(x: &str) -> String {
+        x.to_string()
+    }
 
     #[test]
     fn wants_help_no_args() {
@@ -406,11 +431,17 @@ mod tests {
 
     #[test]
     fn parse_cost_args_flag_value_errors() {
-        for flag in ["--period", "--win-start", "--now",
-                     "--projects-root", "--extra-projects-root"] {
+        for flag in [
+            "--period",
+            "--win-start",
+            "--now",
+            "--projects-root",
+            "--extra-projects-root",
+        ] {
             assert!(
                 parse_cost_args(&[s(flag)]).is_err(),
-                "{} should error when value missing", flag
+                "{} should error when value missing",
+                flag
             );
         }
         assert!(parse_cost_args(&[s("--period"), s("notnum")]).is_err());
@@ -421,13 +452,19 @@ mod tests {
     #[test]
     fn parse_cost_args_accepts_all_flags() {
         let a = parse_cost_args(&[
-            s("--period"), s("3600"),
-            s("--win-start"), s("100.5"),
-            s("--now"), s("200.0"),
-            s("--projects-root"), s("/tmp/p"),
-            s("--extra-projects-root"), s("/tmp/q"),
+            s("--period"),
+            s("3600"),
+            s("--win-start"),
+            s("100.5"),
+            s("--now"),
+            s("200.0"),
+            s("--projects-root"),
+            s("/tmp/p"),
+            s("--extra-projects-root"),
+            s("/tmp/q"),
             s("--no-config"),
-        ]).unwrap();
+        ])
+        .unwrap();
         assert_eq!(a.period_seconds, 3600);
         assert_eq!(a.win_start_unix, 100.5);
         assert_eq!(a.now_unix, Some(200.0));
@@ -455,9 +492,19 @@ mod tests {
         with_home_env(Some("/tmp/myhome"), Some("/tmp/profile"), || {
             let p = default_projects_root();
             if cfg!(windows) {
-                assert_eq!(p, PathBuf::from("/tmp/profile").join(".claude").join("projects"));
+                assert_eq!(
+                    p,
+                    PathBuf::from("/tmp/profile")
+                        .join(".claude")
+                        .join("projects")
+                );
             } else {
-                assert_eq!(p, PathBuf::from("/tmp/myhome").join(".claude").join("projects"));
+                assert_eq!(
+                    p,
+                    PathBuf::from("/tmp/myhome")
+                        .join(".claude")
+                        .join("projects")
+                );
             }
         });
     }
@@ -484,15 +531,21 @@ mod tests {
         let dir = tempdir_path("walk-group");
         let path = dir.join("session.jsonl");
         let body = concat!(
-            "\n",                  // blank line
-            "{garbage\n",          // malformed JSON
-            "{}\n",                // entry.message=None → continue
-            r#"{"timestamp":"2025-01-01T00:00:00Z","message":{"role":"user"}}"#, "\n", // not assistant
-            r#"{"timestamp":"2025-01-01T00:00:01Z","message":{"role":"assistant","id":"m1","model":"sonnet","usage":{"input_tokens":1000000,"output_tokens":1000000}}}"#, "\n", // valid
-            r#"{"timestamp":"2025-01-01T00:00:02Z","message":{"role":"assistant","id":"m1","model":"sonnet"}}"#, "\n", // dup id
-            r#"{"message":{"role":"assistant","id":"m2","model":"sonnet"}}"#, "\n",  // no timestamp
-            r#"{"timestamp":"garbage","message":{"role":"assistant","id":"m3","model":"sonnet"}}"#, "\n", // bad ts
-            r#"{"timestamp":"1970-01-01T00:00:00Z","message":{"role":"assistant","id":"m4","model":"sonnet","usage":{"input_tokens":1000000}}}"#, "\n", // before earliest
+            "\n",         // blank line
+            "{garbage\n", // malformed JSON
+            "{}\n",       // entry.message=None → continue
+            r#"{"timestamp":"2025-01-01T00:00:00Z","message":{"role":"user"}}"#,
+            "\n", // not assistant
+            r#"{"timestamp":"2025-01-01T00:00:01Z","message":{"role":"assistant","id":"m1","model":"sonnet","usage":{"input_tokens":1000000,"output_tokens":1000000}}}"#,
+            "\n", // valid
+            r#"{"timestamp":"2025-01-01T00:00:02Z","message":{"role":"assistant","id":"m1","model":"sonnet"}}"#,
+            "\n", // dup id
+            r#"{"message":{"role":"assistant","id":"m2","model":"sonnet"}}"#,
+            "\n", // no timestamp
+            r#"{"timestamp":"garbage","message":{"role":"assistant","id":"m3","model":"sonnet"}}"#,
+            "\n", // bad ts
+            r#"{"timestamp":"1970-01-01T00:00:00Z","message":{"role":"assistant","id":"m4","model":"sonnet","usage":{"input_tokens":1000000}}}"#,
+            "\n", // before earliest
         );
         fs::write(&path, body).unwrap();
         // period_cutoff far in the past, win_start_unix at 2025
@@ -511,7 +564,10 @@ mod tests {
 
     #[test]
     fn group_result_from_into_tuple() {
-        let g = GroupResult { trailing: 1.0, window: 2.0 };
+        let g = GroupResult {
+            trailing: 1.0,
+            window: 2.0,
+        };
         let t: (f64, f64) = g.into();
         assert_eq!(t, (1.0, 2.0));
     }
