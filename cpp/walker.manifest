@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <!-- Force the process ANSI codepage to UTF-8 (Windows 10 1903+) so
+       main(char**) argv and narrow-string Win32 path APIs are UTF-8.
+       Without this, a non-ASCII search pattern arrives transcoded to the
+       system codepage (e.g. cp1252) and can never byte-match UTF-8
+       transcript content. The value must be exactly "UTF-8", no
+       surrounding whitespace. -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+    </windowsSettings>
+  </application>
+</assembly>
