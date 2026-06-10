@@ -1296,10 +1296,9 @@ fn scanSlugJsonlLinux(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), roo
     const slug_z = try alloc.dupeZ(u8, slug_dir);
     defer alloc.free(slug_z);
     const slug_fd: i32 = @bitCast(@as(u32, @truncate(linux.openat(linux.AT.FDCWD, slug_z, .{ .DIRECTORY = true }, 0))));
-    if (slug_fd < 0) {
-        alloc.free(slug_dir);
-        return;
-    }
+    // Non-directory root entries (e.g. a stray file in the slug position)
+    // fail the openat; slug_dir is arena-backed, so just return.
+    if (slug_fd < 0) return;
     defer _ = linux.close(slug_fd);
 
     var dent_buf: [8192]u8 = undefined;

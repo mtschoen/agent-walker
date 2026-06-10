@@ -129,19 +129,6 @@ def find_kcov() -> str | None:
     return shutil.which("kcov")
 
 
-def _llvm_lines_from_export(export_json: str) -> tuple[int, int, list[tuple[str, int, int]]]:
-    """Parse line totals + per-file from an `llvm-cov export -summary-only` blob."""
-    data = json.loads(export_json)
-    block = data["data"][0]
-    totals = block["totals"]["lines"]
-    files = [
-        (Path(f["filename"]).name, f["summary"]["lines"]["covered"], f["summary"]["lines"]["count"])
-        for f in block["files"]
-    ]
-    files.sort()
-    return totals["covered"], totals["count"], files
-
-
 def _rust_test_module_starts() -> dict[str, int]:
     """Map of source file path -> first line of its `#[cfg(test)] mod tests {`
     block, or sys.maxsize when the file has no inline tests. Used to exclude
@@ -161,45 +148,56 @@ def _rust_test_module_starts() -> dict[str, int]:
     return starts
 
 
-def _llvm_lines_excluding_tests(export_json: str, test_starts: dict[str, int]) -> tuple[int, int, list[tuple[str, int, int]]]:
-    """Like _llvm_lines_from_export, but excludes line ranges at or beyond
-    each file's #[cfg(test)] marker. Walks the full per-function/region detail
-    rather than the file summary, so test-module instrumentation is removed
-    from both numerator and denominator.
-    """
+def _accumulate_region_lines(export_json: str,
+                             per_file_lines: dict[str, dict[int, bool]],
+                             exclude: str | None = None) -> None:
+    """Fold one `llvm-cov export` blob's per-function region detail into a
+    {filename -> {line -> covered}} map with OR semantics: if any region from
+    any export covers a line, the line is covered. Used to union coverage
+    across multiple binaries built from the same sources (llvm-cov's own
+    multi-object report treats each binary's copy of a function as a separate
+    instantiation, which misreports lines missed in only one copy)."""
+    import re as _re
+    exclude_re = _re.compile(exclude) if exclude else None
     data = json.loads(export_json)
     block = data["data"][0]
-    # Per file, build {line_no -> covered_bool}. A line is covered if any region
-    # touching it has count > 0. We iterate functions (which contain regions).
-    per_file_lines: dict[str, dict[int, bool]] = {}
     for fun in block.get("functions", []):
         filenames = fun.get("filenames", [])
         if not filenames:
             continue
         filename = filenames[0]
+        # -ignore-filename-regex only filters the export's `files` array;
+        # the `functions` detail still carries vendored/test sources.
+        if exclude_re and exclude_re.search(filename):
+            continue
         lines = per_file_lines.setdefault(filename, {})
         for region in fun.get("regions", []):
             # llvm-cov region tuple: [LineStart, ColStart, LineEnd, ColEnd,
             # ExecutionCount, FileID, ExpandedFileID, Kind]
             if len(region) < 5:
                 continue
-            line_start, _, line_end, _, count = region[0], region[1], region[2], region[3], region[4]
+            line_start, line_end, count = region[0], region[2], region[4]
             covered = count > 0
             for ln in range(line_start, line_end + 1):
-                # OR semantics — if any region covers a line, mark covered.
                 lines[ln] = lines.get(ln, False) or covered
+
+
+def _summarize_lines(per_file_lines: dict[str, dict[int, bool]],
+                     cutoffs: dict[str, int] | None = None) -> tuple[int, int, list[tuple[str, int, int]]]:
+    """Reduce a line map to (covered, total, per-file rows), optionally
+    dropping lines at/after a per-file cutoff (the rust #[cfg(test)] marker)."""
     total = 0
     covered_count = 0
     files: list[tuple[str, int, int]] = []
     for filename, lines in per_file_lines.items():
-        cutoff = test_starts.get(filename, sys.maxsize)
+        cutoff = (cutoffs or {}).get(filename, sys.maxsize)
         file_total = 0
         file_covered = 0
-        for ln, c in lines.items():
+        for ln, line_covered in lines.items():
             if ln >= cutoff:
                 continue
             file_total += 1
-            if c:
+            if line_covered:
                 file_covered += 1
         if file_total > 0:
             total += file_total
@@ -207,6 +205,15 @@ def _llvm_lines_excluding_tests(export_json: str, test_starts: dict[str, int]) -
             files.append((Path(filename).name, file_covered, file_total))
     files.sort()
     return covered_count, total, files
+
+
+def _llvm_lines_excluding_tests(export_json: str, test_starts: dict[str, int]) -> tuple[int, int, list[tuple[str, int, int]]]:
+    """Line summary from full region detail, excluding line ranges at or
+    beyond each file's #[cfg(test)] marker so test-module instrumentation is
+    removed from both numerator and denominator."""
+    per_file_lines: dict[str, dict[int, bool]] = {}
+    _accumulate_region_lines(export_json, per_file_lines)
+    return _summarize_lines(per_file_lines, test_starts)
 
 
 # --------------------------------------------------------------------------- #
@@ -243,8 +250,18 @@ def cov_rust() -> Result | None:
     ok, passed, failed = run_conformance("rust", env)
     # Also exercise #[cfg(test)] modules. `cargo test --release` produces
     # profraw files under the same LLVM_PROFILE_FILE pattern as the build,
-    # so the unit-test runs merge into the same coverage report.
-    run([_CARGO, "test", "--release", "--no-fail-fast"], cwd=RUST_DIR, env=env, check=False)
+    # so the unit-test runs merge into the same coverage report. A failing
+    # unit test MUST fail the gate (a silent check=False here once masked
+    # two broken tests).
+    test_proc = run([_CARGO, "test", "--release", "--no-fail-fast"],
+                    cwd=RUST_DIR, env=env, check=False)
+    if test_proc.returncode != 0:
+        ok = False
+        failed += 1
+        sys.stderr.write("[coverage] rust: cargo test FAILED:\n")
+        sys.stderr.write((test_proc.stdout or "")[-2000:] + "\n")
+    else:
+        passed += 1
     # Use the full export (with function/region detail) so we can filter out
     # inline #[cfg(test)] mod tests blocks from the denominator. Otherwise the
     # cargo-test binary's instrumentation inflates both covered and total with
@@ -303,13 +320,21 @@ def cov_cpp() -> Result | None:
     profdata = build / "cpp.profdata"
     raws = [str(p) for p in profraw_dir.glob("*.profraw")]
     run(["llvm-profdata", "merge", "-sparse", *raws, "-o", str(profdata)])
-    export_json = run([
-        "llvm-cov", "export", str(binary),
-        "-object", str(test_binary),
-        f"-instr-profile={profdata}", "-summary-only",
-        "-ignore-filename-regex=_deps/|tests/",
-    ]).stdout
-    covered, total, files = _llvm_lines_from_export(export_json)
+    # Export each binary separately and union per line. The two binaries
+    # compile the same production sources (the test TU #includes them), and
+    # llvm-cov's multi-object report counts each binary's copy of a function
+    # as its own instantiation: a line missed in just one copy reports as
+    # missed even when the other copy ran it.
+    per_file_lines: dict[str, dict[int, bool]] = {}
+    for obj in (binary, test_binary):
+        export_json = run([
+            "llvm-cov", "export", str(obj),
+            f"-instr-profile={profdata}",
+            "-ignore-filename-regex=_deps/|tests/",
+        ]).stdout
+        _accumulate_region_lines(export_json, per_file_lines,
+                                 exclude=r"_deps/|/tests/")
+    covered, total, files = _summarize_lines(per_file_lines)
     return Result("cpp", "lines", covered, total, files, ok, passed, failed)
 
 
@@ -334,11 +359,18 @@ def cov_go() -> Result | None:
     if unitdir.exists():
         shutil.rmtree(unitdir)
     unitdir.mkdir()
-    run(
+    test_proc = run(
         ["go", "test", "-count=1", "-cover", "./...",
          "-args", f"-test.gocoverdir={unitdir}"],
         cwd=GO_DIR, env=env, check=False,
     )
+    if test_proc.returncode != 0:
+        ok = False
+        failed += 1
+        sys.stderr.write("[coverage] go: go test FAILED:\n")
+        sys.stderr.write((test_proc.stdout or "")[-2000:] + "\n")
+    else:
+        passed += 1
     # Merge integration + unit coverage by passing both dirs to textfmt.
     txt = GO_DIR / "go-cov.txt"
     merged_input = f"{covdir},{unitdir}" if any(unitdir.iterdir()) else str(covdir)

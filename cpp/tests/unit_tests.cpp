@@ -10,6 +10,7 @@
 // WALKER_BUILD_TESTS) so no duplicate-symbol issues arise.
 
 #include "../beacons.cpp"
+#include "../cost_walk.hpp"
 #include "../events.cpp"
 #include "../search.cpp"
 
@@ -183,6 +184,11 @@ void test_unreadable_transcripts() {
   // search scanner: no messages.
   auto messages = walker::search::scanFile(locked, false, false, nullptr);
   expect(messages.empty(), "search scanner skips unreadable transcript");
+
+  // cost-mode walker: zero sums.
+  auto cost_result = walker::walk_group({locked}, -1e308, -1e308);
+  expect(cost_result.trailing == 0.0 && cost_result.window == 0.0,
+         "cost walker skips unreadable transcript");
 
   ::chmod(locked.c_str(), 0644);
   fs::remove_all(dir);

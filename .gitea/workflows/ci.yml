@@ -356,13 +356,12 @@ jobs:
           "$KCOV_SRC/build/src/kcov" --version
 
       - name: Run coverage gate
-        # Baseline thresholds match TEST-REPORT.md at branch head. Any
-        # impl dropping below its threshold fails CI. Raising the floor
-        # is the path to 100%: do the work in a PR, bump the threshold
-        # here in the same PR. The remaining COVERAGE-PLAN items (4 — SPEC
-        # under-specs, 6 — platform seam) close the gap to 100% from here.
+        # Strict 100% gate (COVERAGE-PLAN items 4 and 6 closed 2026-06-10):
+        # every measured impl must report 100% line/statement coverage or
+        # the job fails. The --baseline escape hatch still exists in
+        # coverage.py for local triage, but CI does not use it.
         run: |
-          python shared/coverage.py --baseline rust=98.00,cpp=98.70,go=97.89,zig=97.99
+          python shared/coverage.py
 
       - name: Post coverage status
         # Posts a Gitea commit status (context=pr-crew/coverage) with

@@ -745,9 +745,8 @@ func asciiScanFold(text string, lowerPat []byte) (asciiOnly, found bool) {
 			return false, false
 		}
 	}
-	if m == 0 {
-		return true, true
-	}
+	// m >= 1 always: parseSearchArgs rejects empty patterns, and the fold
+	// scan is only built for a non-empty literal.
 	if m > n {
 		return true, false
 	}

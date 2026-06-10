@@ -8,3 +8,4 @@
 {"type": "assistant", "timestamp": "2025-05-22T07:45:47.000Z", "message": {"role": "assistant", "id": "ev-wt-8", "model": "claude-sonnet-4-6", "usage": {"input_tokens": 99999999999999999999999, "output_tokens": 5}}}
 {"type": "assistant", "timestamp": "2025-05-22T07:45:48.000Z", "message": {"role": "assistant", "id": "ev-wt-9", "model": "claude-sonnet-4-6", "usage": {"server_tool_use": {"web_search_requests": 2.9}}}}
 {"type": "assistant", "timestamp": "2025-05-22T07:45:49.000Z", "message": {"role": "assistant", "model": "claude-haiku-4-5", "usage": {"input_tokens": 100, "output_tokens": 50}}}
+{"type": "assistant", "timestamp": "2025-05-22T07:45:50.000Z", "message": {"role": 99, "usage": {"\ud800": 1, "input_tokens": 5, "server_tool_use": {"\ud800": 2}}}}

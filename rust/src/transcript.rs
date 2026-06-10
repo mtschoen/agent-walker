@@ -130,14 +130,16 @@ pub(crate) fn cost_for(usage: &Usage, model: &str) -> f64 {
 /// path and C++'s mtimeAtOrAfter). Uses DirEntry::metadata so the stat comes
 /// from the directory scan's own data where the platform provides it.
 pub(crate) fn entry_mtime_before(entry: &DirEntry, earliest: f64) -> bool {
-    if let Ok(meta) = entry.metadata() {
-        if let Ok(mt) = meta.modified() {
-            if let Ok(d) = mt.duration_since(UNIX_EPOCH) {
-                return d.as_secs_f64() < earliest;
-            }
-        }
+    // and_then folds the unreadable-metadata and no-mtime failures into one
+    // arm (reachable when the entry is deleted after listing); a pre-epoch
+    // mtime fails duration_since. All failures err on the side of inclusion.
+    match entry.metadata().and_then(|meta| meta.modified()) {
+        Ok(mtime) => match mtime.duration_since(UNIX_EPOCH) {
+            Ok(d) => d.as_secs_f64() < earliest,
+            Err(_) => false,
+        },
+        Err(_) => false,
     }
-    false
 }
 
 /// Discover all `.jsonl` files under `roots`, grouped by `(slug, session_id)`.
@@ -169,11 +171,12 @@ pub(crate) fn discover_groups(
                 Ok(e) => e,
                 Err(_) => continue,
             };
-            for entry in entries.flatten() {
-                let file_type = match entry.file_type() {
-                    Ok(t) => t,
-                    Err(_) => continue,
-                };
+            // file_type() on a freshly-listed entry fails only on a
+            // filesystem race; fold that failure into the iterator filter.
+            for (entry, file_type) in entries
+                .flatten()
+                .filter_map(|entry| entry.file_type().ok().map(|t| (entry, t)))
+            {
                 if file_type.is_file() {
                     // Parent: <root>/<slug>/<session_id>.jsonl
                     let name = entry.file_name();
@@ -342,6 +345,23 @@ mod tests {
     /// epoch causes duration_since(UNIX_EPOCH) to fail, so the function falls
     /// through to `false` (err on inclusion).
     #[cfg(unix)]
+    #[test]
+    fn entry_mtime_before_deleted_entry_returns_false() {
+        // Deleting the file after listing makes DirEntry::metadata() fail
+        // (it stats lazily) -> the folded Err arm errs on inclusion.
+        let root = tempdir_path("mtime-deleted");
+        let file_path = root.join("gone.jsonl");
+        fs::write(&file_path, b"").unwrap();
+        let entry = std::fs::read_dir(&root)
+            .expect("read_dir")
+            .flatten()
+            .next()
+            .expect("one entry");
+        fs::remove_file(&file_path).unwrap();
+        assert!(!entry_mtime_before(&entry, f64::MAX));
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn entry_mtime_before_pre_epoch_mtime_returns_false() {
         use std::time::Duration;

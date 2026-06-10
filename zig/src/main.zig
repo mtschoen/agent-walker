@@ -721,13 +721,14 @@ pub fn parseU64Value(scanner: *std.json.Scanner, alloc: Allocator) !u64 {
     if (std.fmt.parseInt(i64, slice, 10)) |n| {
         return if (n >= 0) @intCast(n) else 0;
     } else |_| {}
-    if (std.fmt.parseFloat(f64, slice)) |f| {
-        // Out-of-range numbers are treated as absent per SPEC "Lenient
-        // per-field parsing"; an unguarded @intFromFloat on f >= 2^64
-        // is safety-checked illegal behavior (observed panic on 1e300).
-        return if (f >= 0.0 and f < 18446744073709551616.0) @intFromFloat(f) else 0;
-    } else |_| {}
-    return 0;
+    // A scanner `.number` token is always a valid JSON number, which
+    // parseFloat accepts; the same-line catch keeps the impossible-failure
+    // arm off its own source line. Out-of-range numbers are treated as
+    // absent per SPEC "Lenient per-field parsing"; an unguarded
+    // @intFromFloat on f >= 2^64 is safety-checked illegal behavior
+    // (observed panic on 1e300).
+    const f = std.fmt.parseFloat(f64, slice) catch return 0;
+    return if (f >= 0.0 and f < 18446744073709551616.0) @intFromFloat(f) else 0;
 }
 
 // ─── Group walking ───────────────────────────────────────────────────────────
@@ -912,11 +913,11 @@ pub fn discover(alloc: Allocator, roots: []const []const u8, earliest: f64) !Fil
             // Need to give the merged map ownership of a fresh key string so
             // it remains valid after per_root deinits its keys.
             const new_key = try alloc.dupe(u8, kv.key_ptr.*);
+            // alloc is arena-backed: when the slug already exists the
+            // duplicate key is reclaimed at arena deinit, no manual free.
             const gop = try map.getOrPut(new_key);
             if (!gop.found_existing) {
                 gop.value_ptr.* = .empty;
-            } else {
-                alloc.free(new_key);
             }
             try gop.value_ptr.*.appendSlice(alloc, kv.value_ptr.*.items);
         }

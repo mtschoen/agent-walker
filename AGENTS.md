@@ -101,21 +101,26 @@ is inherited), collects per-language line/statement coverage, and writes
 `TEST-REPORT.md` at the repo root. Exits non-zero until every measured
 impl hits 100%. Roadmap + phase status: `COVERAGE-PLAN.md`.
 
-`--baseline rust=98.00,cpp=98.70,go=97.89,zig=97.99` switches the gate
-from "must be 100%" to "must not regress vs documented thresholds" —
-this is the Phase 4 CI mode locked in until COVERAGE-PLAN items 4 and 6
-close the remaining gap. Raise the floors in the same PR that raises
-coverage.
+All four impls sit at **100%** (2026-06-10) and CI runs the strict
+default gate (non-zero exit below 100%). `--baseline rust=...,cpp=...`
+still exists for local triage of a mid-work tree, but ci.yml no longer
+uses it; new code must ship with the tests that keep its impl at 100%.
 
 Per-impl mechanism (see module docstring for detail):
 - **Rust** — cargo-llvm-cov "external test" show-env workflow; the
   release `strip`/`lto` settings that corrupt coverage mapping are
   overridden via `CARGO_PROFILE_RELEASE_*` env, not in `Cargo.toml`.
   Needs `cargo install cargo-llvm-cov` + `rustup component add llvm-tools-preview`.
-- **C++** — `-DWALKER_COVERAGE=ON` CMake option (instruments the `walker`
-  target only) into a separate `cpp/build-cov` tree; `llvm-profdata` +
-  `llvm-cov`, with `-ignore-filename-regex=_deps/` dropping vendored simdjson.
-- **Go** — `go build -cover` + `GOCOVERDIR` per run + `go tool covdata`.
+- **C++** — `-DWALKER_COVERAGE=ON -DWALKER_BUILD_TESTS=ON` CMake options
+  into a separate `cpp/build-cov` tree; conformance + the native
+  `walker_unit_tests` binary (tests/unit_tests.cpp, which #includes the
+  production TUs to reach their internal-linkage error arms) both emit
+  profraw. The two binaries are exported SEPARATELY and unioned per line
+  in coverage.py: llvm-cov's multi-object report treats each binary's
+  copy of a function as its own instantiation and misreports lines missed
+  in only one copy. Vendored simdjson and tests/ are excluded.
+- **Go** — `go build -cover` + `GOCOVERDIR` per run + `go test` unit
+  coverage, merged via `go tool covdata`.
 - **Zig** — `zig build -Dcoverage=true` forces the **LLVM backend**; the
   0.16 default self-hosted backend emits DWARF kcov can't parse (kcov sees
   `compiler_rt` but not our module → 0 lines). Runs under a **DWARF5-capable
@@ -123,7 +128,10 @@ Per-impl mechanism (see module docstring for detail):
   clang DWARF5, silent 0 lines on Zig); a build of **SimonKagstrom/kcov
   master** works. `coverage.py` looks for it at
   `~/.local/src/kcov-master/build/src/kcov` or `$KCOV`. Each conformance
-  invocation accumulates into one kcov outdir.
+  invocation collects into its OWN outdir (`--collect-only`) and a final
+  `kcov --merge` unions them — kcov's in-place accumulation into a shared
+  outdir silently drops lines hit only by earlier runs (verified
+  2026-06-10).
 
 `WALKER_BIN_<LANG>` env vars (honored by `conformance.find_binary`) point
 the harness at the instrumented builds without clobbering release binaries

@@ -497,6 +497,14 @@ def fixture_14_wrong_typed_usage():
          "message": {"role": "assistant",
                      "model": "claude-haiku-4-5",
                      "usage": {"input_tokens": 100, "output_tokens": 50}}},
+        # Lone-surrogate keys INSIDE usage and server_tool_use, on a line
+        # whose role is wrong-typed: every impl emits NO record (strict
+        # parsers reject the line, per-key parsers skip the bad keys and
+        # then drop the entry for the missing role), while per-key parsers
+        # exercise their key-unescape failure arms.
+        ('{"type": "assistant", "timestamp": "%s", "message": '
+         '{"role": 99, "usage": {"\\ud800": 1, "input_tokens": 5, '
+         '"server_tool_use": {"\\ud800": 2}}}}' % iso_z(t + 10)),
     ]
     write_fixture(name, slug, session_id, lines)
     son_in, son_out = RATES["sonnet"]

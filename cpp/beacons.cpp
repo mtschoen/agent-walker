@@ -987,9 +987,9 @@ int run_history(const std::vector<std::string> &args) {
             double wall = bt.second - pending_begin->second;
             double idle = compute_idle_in_window(events, pending_begin->second,
                                                  bt.second);
+            // idle sums gaps clipped to [begin, end], so it can never
+            // exceed wall (go parity: the negative clamp was dead code).
             double active = wall - idle;
-            if (active < 0.0)
-              active = 0.0;
             local.pairs.emplace_back(pending_begin->first.eta_seconds, active);
             local.pair_meta.emplace_back(wall, idle, active);
             pending_begin = nullptr;
