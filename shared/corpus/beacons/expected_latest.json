@@ -77,6 +77,36 @@
       "emitted_at": 1778414300.0,
       "age_seconds": 100.0
     },
+    "end_without_eta": {
+      "session_id": "session",
+      "beacon": {
+        "kind": "end",
+        "eta_seconds": 0,
+        "summary": "done, eta omitted"
+      },
+      "emitted_at": 1778414300.0,
+      "age_seconds": 100.0
+    },
+    "report_without_eta": {
+      "session_id": "session",
+      "beacon": {
+        "kind": "begin",
+        "eta_seconds": 400,
+        "summary": "valid begin"
+      },
+      "emitted_at": 1778413900.0,
+      "age_seconds": 500.0
+    },
+    "end_with_bad_eta": {
+      "session_id": "session",
+      "beacon": {
+        "kind": "begin",
+        "eta_seconds": 400,
+        "summary": "before bad-eta end"
+      },
+      "emitted_at": 1778413900.0,
+      "age_seconds": 500.0
+    },
     "subagent_latest": {
       "session_id": "myagent",
       "beacon": {

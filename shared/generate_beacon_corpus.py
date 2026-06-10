@@ -305,6 +305,75 @@ def scenario_optional_drift():
     return "optional_drift", sid, lines, expected
 
 
+def scenario_end_without_eta():
+    """begin -> end where the end omits `eta_seconds`. Per SPEC the field is
+    optional for kind=end (defaults to 0): agents routinely omit it on end
+    beacons, and rejecting them left lifecycles permanently open (the
+    recency-nudge hook then nagged forever). Walker must return the end
+    beacon with eta_seconds normalized to 0."""
+    sid = "session"
+    t1, t2 = NOW_UNIX - 500, NOW_UNIX - 100
+    end_no_eta = json.dumps({"kind": "end", "summary": "done, eta omitted"})
+    lines = [
+        assistant_with_text(t1, "msg_ene_001",
+            beacon_text(beacon_json("begin", 400, "lifecycle with eta-less end",
+                                    drift=None))),
+        assistant_with_text(t2, "msg_ene_002", beacon_text(end_no_eta)),
+    ]
+    expected = {
+        "session_id": sid,
+        "beacon": {"kind": "end", "eta_seconds": 0,
+                   "summary": "done, eta omitted"},
+        "emitted_at": t2,
+        "age_seconds": NOW_UNIX - t2,
+    }
+    return "end_without_eta", sid, lines, expected
+
+
+def scenario_report_without_eta():
+    """`eta_seconds` stays REQUIRED for non-end kinds: a report omitting it
+    must be rejected, leaving the earlier complete beacon as latest."""
+    sid = "session"
+    t1, t2 = NOW_UNIX - 500, NOW_UNIX - 100
+    report_no_eta = json.dumps({"kind": "report", "summary": "no eta report"})
+    lines = [
+        assistant_with_text(t1, "msg_rne_001",
+            beacon_text(beacon_json("begin", 400, "valid begin", drift=None))),
+        assistant_with_text(t2, "msg_rne_002", beacon_text(report_no_eta)),
+    ]
+    expected = {
+        "session_id": sid,
+        "beacon": {"kind": "begin", "eta_seconds": 400, "summary": "valid begin"},
+        "emitted_at": t1,
+        "age_seconds": NOW_UNIX - t1,
+    }
+    return "report_without_eta", sid, lines, expected
+
+
+def scenario_end_with_bad_eta():
+    """An end beacon whose `eta_seconds` is PRESENT but non-numeric must be
+    rejected (type mismatch is not the same as absence — only absence gets
+    the kind=end default). The earlier valid begin stays latest."""
+    sid = "session"
+    t1, t2 = NOW_UNIX - 500, NOW_UNIX - 100
+    bad_end = json.dumps({"kind": "end", "eta_seconds": "soon",
+                          "summary": "bad eta type"})
+    lines = [
+        assistant_with_text(t1, "msg_ebe_001",
+            beacon_text(beacon_json("begin", 400, "before bad-eta end",
+                                    drift=None))),
+        assistant_with_text(t2, "msg_ebe_002", beacon_text(bad_end)),
+    ]
+    expected = {
+        "session_id": sid,
+        "beacon": {"kind": "begin", "eta_seconds": 400,
+                   "summary": "before bad-eta end"},
+        "emitted_at": t1,
+        "age_seconds": NOW_UNIX - t1,
+    }
+    return "end_with_bad_eta", sid, lines, expected
+
+
 def scenario_multiple_in_turn():
     """Three valid beacons (begin, report, report). Walker returns latest."""
     sid = "session"
@@ -691,6 +760,22 @@ def scenario_usage_only_idle():
         [(500.0, 1000.0, 400.0)], session_count=1)
 
 
+def scenario_end_without_eta_history():
+    """A lifecycle closed by an eta-less end must still pair (the end's own
+    eta is never used in pairing; only its timestamp closes the span).
+    begin eta=300 at t0, end (no eta_seconds) at t0+450 -> pair (300, 450)."""
+    t0, t1 = NOW_UNIX - 1500, NOW_UNIX - 1050
+    end_no_eta = json.dumps({"kind": "end", "summary": "closing without eta"})
+    lines = [
+        assistant_with_text(t0, "msg_eneh_001",
+            beacon_text(beacon_json("begin", 300, "eta-less end pairing",
+                                    drift=None))),
+        assistant_with_text(t1, "msg_eneh_002", beacon_text(end_no_eta)),
+    ]
+    return "end_without_eta_history", {"slug/session.jsonl": lines}, history_expected(
+        [(300.0, 450.0)], session_count=1)
+
+
 def scenario_dirty_ladder_history():
     """A8 for history: a dirty-line ladder in a session group that also
     contains one valid begin/end lifecycle. Walker must skip every bad line
@@ -717,6 +802,10 @@ LATEST_SCENARIOS = (
     scenario_int_numeric_forms,
     scenario_matcher_edges,
     scenario_escape_chars_latest,
+    # Optional eta_seconds on end beacons (2026-06-10 nudge-bug fix):
+    scenario_end_without_eta,
+    scenario_report_without_eta,
+    scenario_end_with_bad_eta,
 )
 
 # scenario_subagent_latest is multi-file; scenario_dirty_ladder_latest needs
@@ -742,6 +831,8 @@ HISTORY_SCENARIOS = (
     scenario_dirty_ladder_history,
     # A16 (Zig bias_factor divergence repro):
     scenario_usage_only_idle,
+    # Optional eta_seconds on end beacons (2026-06-10 nudge-bug fix):
+    scenario_end_without_eta_history,
 )
 
 

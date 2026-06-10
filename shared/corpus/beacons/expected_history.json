@@ -142,6 +142,17 @@
       "session_count": 1,
       "n_pairs": 1,
       "bias_factor": 1.2
+    },
+    "end_without_eta_history": {
+      "pairs": [
+        {
+          "begin_eta": 300.0,
+          "actual_elapsed": 450.0
+        }
+      ],
+      "session_count": 1,
+      "n_pairs": 1,
+      "bias_factor": 1.5
     }
   }
 }

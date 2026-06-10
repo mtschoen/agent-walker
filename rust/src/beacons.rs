@@ -30,17 +30,49 @@ struct Message {
     content: Option<Value>,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug)]
 struct Beacon {
     kind: String,
     eta_seconds: f64,
     summary: String,
     /// Optional per SPEC: parses when absent, passed through when present, and
     /// omitted from beacons-latest output when the source beacon lacked it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     drift: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     beats_left: Option<i64>,
+}
+
+/// Deserialization shape: `eta_seconds` lands as an Option so `parse_beacon`
+/// can apply the kind-aware rule — required for begin/report, optional for
+/// end (defaults to 0). Agents routinely omit `eta_seconds` on end beacons,
+/// and rejecting those left lifecycles permanently open. SPEC beacons-latest.
+#[derive(Deserialize)]
+struct RawBeacon {
+    kind: String,
+    #[serde(default)]
+    eta_seconds: Option<f64>,
+    summary: String,
+    #[serde(default)]
+    drift: Option<String>,
+    #[serde(default)]
+    beats_left: Option<i64>,
+}
+
+fn parse_beacon(body: &str) -> Option<Beacon> {
+    let raw: RawBeacon = serde_json::from_str(body).ok()?;
+    let eta_seconds = match raw.eta_seconds {
+        Some(v) => v,
+        None if raw.kind == "end" => 0.0,
+        None => return None,
+    };
+    Some(Beacon {
+        kind: raw.kind,
+        eta_seconds,
+        summary: raw.summary,
+        drift: raw.drift,
+        beats_left: raw.beats_left,
+    })
 }
 
 fn beacon_re() -> Regex {
@@ -99,7 +131,7 @@ fn find_latest_in_path(path: &Path, re: &Regex) -> Option<(Beacon, f64)> {
         let mut entry_beacon: Option<Beacon> = None;
         for caps in re.captures_iter(&combined) {
             if let Some(m) = caps.get(1) {
-                if let Ok(b) = serde_json::from_str::<Beacon>(m.as_str()) {
+                if let Some(b) = parse_beacon(m.as_str()) {
                     entry_beacon = Some(b);
                 }
             }
@@ -182,7 +214,7 @@ fn collect_session_events_in_path(path: &Path, re: &Regex) -> SessionEvents {
         let combined = extract_text(&content, false);
         for caps in re.captures_iter(&combined) {
             if let Some(m) = caps.get(1) {
-                if let Ok(b) = serde_json::from_str::<Beacon>(m.as_str()) {
+                if let Some(b) = parse_beacon(m.as_str()) {
                     beacons.push((b, ts));
                 }
             }

@@ -6,8 +6,9 @@
 //     type=="text". Pattern: <progress-beacon>\s*({...})\s*</progress-beacon>.
 //     `[\s\S]` substitutes for Rust `(?s).` since std::regex's `.` does
 //     not match newlines.
-//   - Beacon must parse AND have the three required fields (kind,
-//     eta_seconds, summary); `drift` is optional. Otherwise silently skip.
+//   - Beacon must parse AND have the required fields (kind, summary;
+//     eta_seconds for begin/report — optional for end, defaulting to 0);
+//     `drift` is optional. Otherwise silently skip.
 //   - beacons-latest: pick the entry with the highest timestamp; if multiple
 //     beacons exist within one entry, pick the LAST regex match in that
 //     entry's text.
@@ -104,10 +105,13 @@ std::vector<BeaconMatch> find_beacon_envelopes(std::string_view text) {
   return out;
 }
 
-// Try to parse a JSON beacon body. The three required fields (kind,
-// eta_seconds, summary) must be present and well-typed; otherwise return
-// nullopt (silently skip, per spec). `drift` is optional (presence tracked
-// via b.has_drift so beacons-latest can omit it when the source lacked it).
+// Try to parse a JSON beacon body. `kind` and `summary` must be present and
+// well-typed; `eta_seconds` is likewise required for begin/report but
+// OPTIONAL for end beacons (defaults to 0) — agents routinely omit it on
+// end, and rejecting those left lifecycles permanently open (SPEC
+// beacons-latest). Otherwise return nullopt (silently skip, per spec).
+// `drift` is optional (presence tracked via b.has_drift so beacons-latest
+// can omit it when the source lacked it).
 std::optional<Beacon> parse_beacon_body(std::string_view body) {
   // Reuse one parser per worker thread instead of constructing a fresh
   // simdjson parser (and its internal buffers) for every beacon body. The
@@ -174,8 +178,13 @@ std::optional<Beacon> parse_beacon_body(std::string_view body) {
     }
   }
 
-  if (!has_kind || !has_eta || !has_summary)
+  if (!has_kind || !has_summary)
     return std::nullopt;
+  if (!has_eta) {
+    if (b.kind != "end")
+      return std::nullopt;
+    b.eta_seconds = 0.0;
+  }
   return b;
 }
 

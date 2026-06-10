@@ -64,12 +64,22 @@ type rawBeacon struct {
 }
 
 func (rb *rawBeacon) toBeacon() (*beacon, bool) {
-	if rb.Kind == nil || rb.EtaSeconds == nil || rb.Summary == nil {
+	if rb.Kind == nil || rb.Summary == nil {
+		return nil, false
+	}
+	// eta_seconds is required for begin/report but optional for end
+	// (defaults to 0): agents routinely omit it on end beacons, and
+	// rejecting those left lifecycles permanently open. SPEC beacons-latest.
+	eta := 0.0
+	switch {
+	case rb.EtaSeconds != nil:
+		eta = *rb.EtaSeconds
+	case *rb.Kind != "end":
 		return nil, false
 	}
 	return &beacon{
 		Kind:       *rb.Kind,
-		EtaSeconds: *rb.EtaSeconds,
+		EtaSeconds: eta,
 		Summary:    *rb.Summary,
 		Drift:      rb.Drift, // nil when absent -> omitted on output
 		BeatsLeft:  rb.BeatsLeft,

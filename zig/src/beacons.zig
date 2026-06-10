@@ -160,7 +160,10 @@ fn parseBeaconJson(alloc: Allocator, json_src: []const u8) ?Beacon {
         if (std.mem.eql(u8, key, "kind")) {
             kind = main.parseStringValue(&scanner, alloc) catch return null;
         } else if (std.mem.eql(u8, key, "eta_seconds")) {
-            eta = parseF64Value(&scanner, alloc) catch return null;
+            // Present-but-non-numeric rejects the beacon outright (matching
+            // rust/cpp/go, where a type mismatch fails the parse); absence is
+            // resolved kind-aware below.
+            eta = (parseF64Value(&scanner, alloc) catch return null) orelse return null;
         } else if (std.mem.eql(u8, key, "summary")) {
             summary = main.parseStringValue(&scanner, alloc) catch return null;
         } else if (std.mem.eql(u8, key, "drift")) {
@@ -172,9 +175,17 @@ fn parseBeaconJson(alloc: Allocator, json_src: []const u8) ?Beacon {
         }
     }
 
+    const kind_value = kind orelse return null;
+    // eta_seconds is required for begin/report but optional for end
+    // (defaults to 0): agents routinely omit it on end beacons, and
+    // rejecting those left lifecycles permanently open. SPEC beacons-latest.
+    const eta_value = eta orelse blk: {
+        if (!std.mem.eql(u8, kind_value, "end")) return null;
+        break :blk 0.0;
+    };
     return Beacon{
-        .kind = kind orelse return null,
-        .eta_seconds = eta orelse return null,
+        .kind = kind_value,
+        .eta_seconds = eta_value,
         .summary = summary orelse return null,
         .drift = drift,
         .beats_left = beats_left,

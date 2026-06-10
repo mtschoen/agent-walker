@@ -281,11 +281,17 @@ a known name; otherwise the bare-flag invocation is treated as `cost`.
 Walks the matching transcript (parent or `subagents/agent-<id>.jsonl`)
 backwards, finds the most recent assistant message containing a
 `<progress-beacon>...</progress-beacon>` block. The JSON inside must
-parse and contain the required fields `kind`, `eta_seconds`, and
-`summary`. `drift` is **optional** — accepted and passed through when
-present, but its absence no longer rejects the beacon (`beats_left` is
-likewise optional). When the source beacon omits `drift`, the returned
-`beacon` object omits it too.
+parse and contain the required fields `kind` and `summary`.
+`eta_seconds` is required for `begin`/`report` but **optional when
+`kind` is `"end"`**, defaulting to `0`: an end beacon carries no
+remaining-time estimate, agents routinely omit the field in practice,
+and rejecting those beacons left lifecycles permanently open (the
+status line and the recency-nudge hook then treat the session as
+forever mid-turn). `drift` is **optional** — accepted and passed
+through when present, but its absence no longer rejects the beacon
+(`beats_left` is likewise optional). When the source beacon omits
+`drift`, the returned `beacon` object omits it too; an omitted
+`eta_seconds` on an end beacon IS normalized to `0` in the output.
 
 Output:
 
