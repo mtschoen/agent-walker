@@ -101,10 +101,13 @@ is inherited), collects per-language line/statement coverage, and writes
 `TEST-REPORT.md` at the repo root. Exits non-zero until every measured
 impl hits 100%. Roadmap + phase status: `COVERAGE-PLAN.md`.
 
-All four impls sit at **100%** (2026-06-10) and CI runs the strict
-default gate (non-zero exit below 100%). `--baseline rust=...,cpp=...`
-still exists for local triage of a mid-work tree, but ci.yml no longer
-uses it; new code must ship with the tests that keep its impl at 100%.
+All four impls sit at **100%** measured on llamabox (2026-06-10). CI
+temporarily runs `--baseline rust=99.64,cpp=100.00,go=99.62,zig=100.00`:
+a handful of rust/go unit tests cover home-dir / walker-roots.json
+branches non-hermetically, so the CI container measures slightly below
+llamabox. Make those tests pin HOME/USERPROFILE to fixture dirs, then
+restore the strict no-flag gate in ci.yml; new code must ship with the
+tests that keep its impl at 100%.
 
 Per-impl mechanism (see module docstring for detail):
 - **Rust** — cargo-llvm-cov "external test" show-env workflow; the
