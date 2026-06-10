@@ -841,13 +841,14 @@ fn write_pretty(hits: &[Hit], summary: &SearchSummary, suppress_hits: bool) {
             for t in &h.context_before {
                 let _ = writeln!(out, "  before: {}", truncate(&t.text, 120));
             }
+            // match_offsets come from re-running the matcher on a snippet
+            // built around the first match, so they are always present and
+            // in-bounds; SPEC omits the snippet line otherwise.
             if let Some((mstart, mend)) = h.match_offsets.first() {
                 let pre = &h.snippet[..(*mstart).min(h.snippet.len())];
                 let mid = &h.snippet[*mstart..(*mend).min(h.snippet.len())];
                 let post = &h.snippet[(*mend).min(h.snippet.len())..];
                 let _ = writeln!(out, "  >>> {}[{}]{} <<<", pre, mid, post);
-            } else {
-                let _ = writeln!(out, "  {}", h.snippet);
             }
             for t in &h.context_after {
                 let _ = writeln!(out, "  after:  {}", truncate(&t.text, 120));

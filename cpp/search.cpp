@@ -60,10 +60,10 @@ static std::string extractText(const simdjson::dom::element &content,
       if (!input.error()) {
         if (!out.empty())
           out.push_back('\n');
-        std::string_view sv2;
-        if (input.get_string().get(sv2) == simdjson::SUCCESS) {
-          out.append(sv2);
-        }
+        // SPEC "Tool blocks": the input value is indexed as its compact
+        // JSON serialization (strings keep their JSON quotes, object key
+        // order follows the source). simdjson::to_string minifies.
+        out.append(simdjson::to_string(input.value()));
       }
     } else if (include_tools && btype == "tool_result") {
       auto tc = obj["content"];
@@ -1048,22 +1048,16 @@ int run(const std::vector<std::string> &argv) {
             std::cout << t.text;
           std::cout << "\n";
         }
+        // match_offsets come from re-running the matcher on a snippet built
+        // around the first match, so they are always present and in-bounds;
+        // SPEC "Pretty format" omits the snippet line otherwise.
         if (!h.match_offsets.empty()) {
           auto [ms, me] = h.match_offsets[0];
           size_t pm = std::min(ms, h.snippet.size());
           size_t pe = std::min(me, h.snippet.size());
-          std::cout << "  >>>";
-          if (pm < h.snippet.size())
-            std::cout << h.snippet.substr(0, pm);
-          std::cout << "[";
-          if (pm <= pe && pe <= h.snippet.size())
-            std::cout << h.snippet.substr(pm, pe - pm);
-          std::cout << "]";
-          if (pe < h.snippet.size())
-            std::cout << h.snippet.substr(pe);
-          std::cout << "<<<\n";
-        } else {
-          std::cout << "  " << h.snippet << "\n";
+          std::cout << "  >>> " << h.snippet.substr(0, pm) << "["
+                    << h.snippet.substr(pm, pe - pm) << "]"
+                    << h.snippet.substr(pe) << " <<<\n";
         }
         for (auto &t : h.context_after) {
           std::cout << "  after:  ";
@@ -1076,9 +1070,13 @@ int run(const std::vector<std::string> &argv) {
         std::cout << "\n";
       }
     }
-    writeSummary(std::cout, hits_output, sessions_matched, roots_walked,
-                 files_walked, truncated, elapsed);
-    std::cout << '\n';
+    // SPEC "Pretty format": the summary is one human-readable line, not a
+    // JSONL record (which belongs to --format jsonl only).
+    std::cout << hits_output << " hits in " << sessions_matched
+              << " sessions across " << roots_walked << " roots ("
+              << files_walked << " files). truncated="
+              << (truncated ? "true" : "false") << " elapsed " << elapsed
+              << "ms.\n";
   }
 
   if (truncated) {

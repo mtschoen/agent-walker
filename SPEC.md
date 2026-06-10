@@ -509,6 +509,45 @@ from, closing the "agent didn't think to check the other host" gap. Ordering
 is newest-first, tiebroken by `(timestamp DESC, session_id ASC, line_number
 ASC)`. `pretty` mode renders the same data human-readably.
 
+**Pretty format** (`--format pretty`, the default). Decided 2026-06-10
+(previously the highlight spacing, the summary shape, and go's dropped
+post-match suffix diverged per impl). Per hit, in order:
+
+```
+[<timestamp>] cwd=<slug> role=<role> session=<session_id>
+  <file_path>:<line_number>
+  before: <context text, truncated to 120 chars + ellipsis>
+  >>> <pre>[<match>]<post> <<<
+  after:  <context text>
+<blank line>
+```
+
+The highlight line brackets the FIRST `match_offsets` pair with the full
+snippet on both sides: exactly `  >>> `, `[`, `]`, ` <<<`. (Offsets are
+always produced by re-running the matcher on the snippet, which is built
+around the first match; in the never-expected empty case the snippet line
+is omitted.) After the hits comes ONE human-readable summary line — never
+a JSONL record:
+
+```
+<hits> hits in <sessions> sessions across <roots> roots (<files> files). truncated=<true|false> elapsed <N>ms.
+```
+
+`--count-only` suppresses hit rendering but keeps the summary line. The
+truncation warning on stderr is shared verbatim across impls:
+`walker: search: truncated to --limit=<N> (had <M> total); narrow with --since`.
+
+**Tool blocks.** With `--include-tool-blocks`, an entry's searchable text
+additionally includes, newline-joined in content order (decided
+2026-06-10; previously rust sorted dump keys while cpp dropped non-string
+inputs and unwrapped string inputs):
+
+- `tool_use.input` — the input value's compact JSON serialization (no
+  added whitespace), object key order preserved from the source. A bare
+  string input keeps its JSON quotes.
+- `tool_result.content` — a string contributes its raw text; an array
+  contributes each `{"type":"text"}` block's `text`.
+
 **Snippet boundaries.** `match_offsets` and the snippet window are byte
 offsets. The snippet is the byte range `[match_start − ⌊snippet_chars/2⌋,
 match_end + ⌊snippet_chars/2⌋)` clamped to the text, with each end then (1)
