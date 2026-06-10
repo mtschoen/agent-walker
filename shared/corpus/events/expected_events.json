@@ -94,7 +94,7 @@
       {
         "ts": 1747899940.0,
         "usd": 0.0045,
-        "model": "claude-sonnet-quote\"backslash\\newline\ntab\tctl\u0001",
+        "model": "claude-sonnet-quote\"backslash\\newline\ntab\tbs\bff\fcr\rctl\u0001",
         "session_id": "sess-010-escape-chars",
         "slug": "project-kappa"
       }
@@ -113,6 +113,73 @@
         "model": "claude-sonnet-4-6",
         "session_id": "sess-011",
         "slug": "project-lambda"
+      }
+    ],
+    "12-many-sessions": [
+      {
+        "ts": 1747899940.0,
+        "usd": 0.00225,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-012-0",
+        "slug": "project-mu"
+      },
+      {
+        "ts": 1747899939.0,
+        "usd": 0.002253,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-012-1",
+        "slug": "project-mu"
+      },
+      {
+        "ts": 1747899938.0,
+        "usd": 0.002256,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-012-2",
+        "slug": "project-mu"
+      },
+      {
+        "ts": 1747899937.0,
+        "usd": 0.002259,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-012-3",
+        "slug": "project-mu"
+      },
+      {
+        "ts": 1747899936.0,
+        "usd": 0.002262,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-012-4",
+        "slug": "project-mu"
+      },
+      {
+        "ts": 1747899935.0,
+        "usd": 0.002265,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-012-5",
+        "slug": "project-mu"
+      },
+      {
+        "ts": 1747899934.0,
+        "usd": 0.002268,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-012-6",
+        "slug": "project-mu"
+      },
+      {
+        "ts": 1747899933.0,
+        "usd": 0.002271,
+        "model": "claude-sonnet-4-6",
+        "session_id": "sess-012-7",
+        "slug": "project-mu"
+      }
+    ],
+    "13-byte-edges": [
+      {
+        "ts": 1747899940.0,
+        "usd": 0.006,
+        "model": "claude-opus-4-7",
+        "session_id": "sess-013",
+        "slug": "project-nu"
       }
     ]
   }

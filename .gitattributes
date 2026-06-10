@@ -1,0 +1,3 @@
+# Corpus fixtures carry exact bytes (CRLF rungs, invalid-UTF-8 rungs).
+# Never let git text-convert them on checkout.
+shared/corpus/** -text

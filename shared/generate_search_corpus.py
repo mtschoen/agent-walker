@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Sequence
 
 ROOT = Path(__file__).resolve().parent
 CORPUS_SEARCH = ROOT / "corpus" / "search"
@@ -198,12 +199,19 @@ def queue_operation(unix_ts, operation, content=None) -> dict:
     return entry
 
 
-def write_jsonl(path: Path, lines: list[dict]) -> None:
+def write_jsonl(path: Path, lines: "Sequence[dict | str | bytes]") -> None:
+    """Dicts are json-dumped; raw strings written verbatim (malformed-line
+    rungs); raw bytes as-is. Binary mode keeps byte rungs exact. An empty
+    list produces an empty (zero-byte) file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
+    with path.open("wb") as f:
         for line in lines:
-            f.write(json.dumps(line))
-            f.write("\n")
+            if isinstance(line, bytes):
+                f.write(line)
+            else:
+                text = line if isinstance(line, str) else json.dumps(line)
+                f.write(text.encode("utf-8"))
+            f.write(b"\n")
 
 
 # Hit-record helpers --------------------------------------------------------
@@ -1212,6 +1220,12 @@ REGEX_CLASS_SPECS = [
     ("class-escape-in-class",
      "[\\n\\t\\r] — escape-in-class arm; matches a tab between letters",
      "left\tright", r"[\n\t\r]", [[4, 5]]),
+    ("escape-atoms",
+     "\\t/\\r/\\n - control-escape atoms OUTSIDE a class",
+     "a\tb\rc\nd tail", r"a\tb\rc\nd", [[0, 7]]),
+    ("class-escaped-range-end",
+     "[%-\\\\]+ - class range whose END is an escaped char",
+     "see + or . mark", r"[%-\\]+", [[4, 5], [9, 10]]),
 ]
 
 
@@ -1556,6 +1570,312 @@ def scenario_18_subagent_traversal():
     return scenario, files, expected
 
 
+def scenario_19_prefilter_edges():
+    """Literal-prefilter edge shapes (raw-byte skip before JSON parsing):
+    a file with no occurrence of the pattern's first byte, a file whose only
+    first-byte occurrence sits in the final bytes (too close to EOF to fit
+    the pattern), an empty file (shorter than any pattern), a file carrying
+    fold-hazard lead bytes (0xC5/0xE2 from LONG S / KELVIN-adjacent chars)
+    that must defeat the skip when the pattern contains k/s, and a pattern
+    starting with a non-letter byte."""
+    scenario = "19-prefilter-edges"
+    t1, t2, t3, t4 = (NOW_UNIX - 4000, NOW_UNIX - 3000,
+                      NOW_UNIX - 2000, NOW_UNIX - 1000)
+    text_hit = "report: zebra count five"
+    text_digits = "code 7zulu engaged"
+    text_miss = "nothing interesting here at all"
+    text_tail = "tail one lacks the pattern"
+    text_tail2 = "tail two lacks the pattern as well"
+    text_hazard = "Łukasz noted … in the margin"
+    files = {
+        "hit.jsonl": [assistant_text(t4, "msg_19_hit", text_hit)],
+        # CRLF-terminated entry: the scanner must strip the trailing CR and
+        # still index the line (the digit-lead combo depends on this hit).
+        "digits.jsonl": [
+            json.dumps(assistant_text(t3, "msg_19_dig", text_digits)) + "\r",
+        ],
+        "miss.jsonl": [assistant_text(t2, "msg_19_miss", text_miss)],
+        # Junk shapes the scanner must skip: blank line, invalid UTF-8,
+        # message as a bare string, role-less / empty-role / content-less
+        # messages. The trailing malformed line ends the FILE with the byte
+        # 'z' -- the only 'z' in the file, too close to EOF for "zebra" to
+        # fit (candidate found beyond the last viable start).
+        "tail.jsonl": [assistant_text(t1, "msg_19_tail", text_tail),
+                       "",
+                       b'\xff\xfe not utf-8',
+                       '{"message": "bare", "timestamp": "x"}',
+                       '{"message": {"content": [{"type": "text", '
+                       '"text": "no role"}]}}',
+                       '{"message": {"role": "", "content": []}}',
+                       '{"message": {"role": "user"}}',
+                       "garbagez"],
+        # Variant where the final 'z' sits EXACTLY at the last viable match
+        # start -- the candidate is window-compared, fails, and the scan
+        # advances past the end (the loop-exhausted return).
+        "tail2.jsonl": [assistant_text(t1, "msg_19_tail2", text_tail2),
+                        "zqqq"],
+        "hazard.jsonl": [assistant_text(t1, "msg_19_haz", text_hazard)],
+        "tiny.jsonl": [],
+    }
+    o_hit = find_offset(text_hit, "zebra")
+    o_dig = find_offset(text_digits, "7zulu")
+    combos = {
+        "insensitive-one-hit": {
+            "description": "Pattern present in one file; the rest are "
+                           "prefilter-skipped or parsed without a match.",
+            "pattern": "zebra",
+            "flags": [],
+            "hits": [hit(
+                session_id="hit", cwd_slug=scenario, line_number=1,
+                timestamp=iso(t4), role="assistant", snippet=text_hit,
+                match_offsets=[[o_hit[0], o_hit[1]]],
+            )],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+        "fold-hazard-zero": {
+            "description": "k/s pattern absent everywhere; the hazard file's "
+                           "0xC5/0xE2 lead bytes force a full parse anyway.",
+            "pattern": "kelvins",
+            "flags": [],
+            "hits": [],
+            "summary": summary(hits=0, sessions_matched=0),
+        },
+        "digit-lead": {
+            "description": "Pattern starting with a non-letter byte.",
+            "pattern": "7zulu",
+            "flags": [],
+            "hits": [hit(
+                session_id="digits", cwd_slug=scenario, line_number=1,
+                timestamp=iso(t3), role="assistant", snippet=text_digits,
+                match_offsets=[[o_dig[0], o_dig[1]]],
+            )],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+        "sensitive-miss": {
+            "description": "Case-sensitive pattern that only differs by case "
+                           "-> zero hits via the sensitive prefilter path.",
+            "pattern": "Zebra",
+            "flags": ["--case-sensitive"],
+            "hits": [],
+            "summary": summary(hits=0, sessions_matched=0),
+        },
+    }
+    return scenario, files, combos
+
+
+def scenario_20_nonascii_pattern():
+    """A multibyte (non-ASCII) pattern: ineligible for the raw-byte prefilter
+    and, in cpp, routed through the std::search tolower fallback instead of
+    the ASCII memchr fast path. The match itself only case-folds the ASCII
+    'c' (the accented byte pair is identical), so every impl agrees."""
+    scenario = "20-nonascii-pattern"
+    t1 = NOW_UNIX - 1000
+    text = "Latte order: Café con leche, por favor"
+    files = {"sid1.jsonl": [assistant_text(t1, "msg_20_a1", text)]}
+    snip, offsets = snippet_and_offsets(text, "café", 240)
+    combos = {
+        "default": {
+            "description": "Case-insensitive multibyte literal pattern.",
+            "pattern": "café",
+            "flags": [],
+            "hits": [hit(
+                session_id="sid1", cwd_slug=scenario, line_number=1,
+                timestamp=iso(t1), role="assistant", snippet=snip,
+                match_offsets=offsets,
+            )],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+    }
+    return scenario, files, combos
+
+
+def scenario_21_snippet_escape_chars():
+    """Matched text packed with characters the JSONL hit writer must escape:
+    quote, backslash, backspace, formfeed, carriage return, tab, and a raw
+    control byte. Comparison happens on PARSED output, so this asserts the
+    escapes are correct, not their textual form."""
+    scenario = "21-snippet-escape-chars"
+    t1 = NOW_UNIX - 1000
+    text = ('alert "quoted" back\\slash bs\bspot form\ffeed '
+            'carriage\rreturn tab\there ctl\x01dot needle end')
+    files = {"sid1.jsonl": [assistant_text(t1, "msg_21_a1", text)]}
+    o = find_offset(text, "needle")
+    combos = {
+        "default": {
+            "description": "Control/escape characters in the snippet "
+                           "round-trip through the JSON writer.",
+            "pattern": "needle",
+            "flags": [],
+            "hits": [hit(
+                session_id="sid1", cwd_slug=scenario, line_number=1,
+                timestamp=iso(t1), role="assistant", snippet=text,
+                match_offsets=[[o[0], o[1]]],
+            )],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+    }
+    return scenario, files, combos
+
+
+def scenario_22_regex_fold_range():
+    """Case-INSENSITIVE regex char class with a range: [a-d]+ must fold both
+    cases in every engine (zig expands the class to both cases; the others
+    compile with their icase flag)."""
+    scenario = "22-regex-fold-range"
+    t1 = NOW_UNIX - 1000
+    text = "abCD over"
+    files = {"sid1.jsonl": [assistant_text(t1, "msg_22_a1", text)]}
+    combos = {
+        "default": {
+            "description": "Insensitive class range matches mixed case.",
+            "pattern": "[a-d]+",
+            "flags": ["--regex"],
+            "hits": [hit(
+                session_id="sid1", cwd_slug=scenario, line_number=1,
+                timestamp=iso(t1), role="assistant", snippet=text,
+                match_offsets=[[0, 4]],
+            )],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+    }
+    return scenario, files, combos
+
+
+def scenario_23_regex_fold_single():
+    """Case-INSENSITIVE regex char class with plain members: [xy]+ folds
+    single (non-range) class members in every engine."""
+    scenario = "23-regex-fold-single"
+    t1 = NOW_UNIX - 1000
+    text = "yX marks"
+    files = {"sid1.jsonl": [assistant_text(t1, "msg_23_a1", text)]}
+    combos = {
+        "default": {
+            "description": "Insensitive class members match both cases.",
+            "pattern": "[xy]+",
+            "flags": ["--regex"],
+            "hits": [hit(
+                session_id="sid1", cwd_slug=scenario, line_number=1,
+                timestamp=iso(t1), role="assistant", snippet=text,
+                match_offsets=[[0, 2]],
+            )],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+    }
+    return scenario, files, combos
+
+
+def scenario_24_snippet_no_whitespace():
+    """Snippet cuts inside long unbroken character runs: the whitespace nudge
+    scans 20 bytes in each direction, finds none, and must keep the raw cut
+    (the nudge helper's fall-through return)."""
+    scenario = "24-snippet-no-whitespace"
+    t1 = NOW_UNIX - 1000
+    text = "a" * 150 + " needle " + "b" * 150
+    files = {"sid1.jsonl": [assistant_text(t1, "msg_24_a1", text)]}
+    snip, offsets = snippet_and_offsets(text, "needle", 240)
+    combos = {
+        "default": {
+            "description": "Cuts land mid-run; no whitespace within the "
+                           "20-byte nudge window on either side.",
+            "pattern": "needle",
+            "flags": [],
+            "hits": [hit(
+                session_id="sid1", cwd_slug=scenario, line_number=1,
+                timestamp=iso(t1), role="assistant", snippet=snip,
+                match_offsets=offsets,
+            )],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+    }
+    return scenario, files, combos
+
+
+def scenario_25_context_rich():
+    """--context 2 around a single hit, with context-turn texts longer than
+    120 chars: exercises multi-entry context arrays (the JSONL comma arm) and
+    the pretty renderer's long-context ellipsis truncation."""
+    scenario = "25-context-rich"
+    t1, t2, t3, t4, t5 = (NOW_UNIX - 5000, NOW_UNIX - 4000, NOW_UNIX - 3000,
+                          NOW_UNIX - 2000, NOW_UNIX - 1000)
+    ctx1 = "context turn one " + "alpha " * 25   # > 120 chars
+    ctx2 = "context turn two " + "bravo " * 25
+    ctx4 = "context turn four " + "delta " * 25
+    ctx5 = "context turn five " + "echo " * 30
+    text_hit = "the needle sits in the middle turn"
+    files = {
+        "sid1.jsonl": [
+            assistant_text(t1, "msg_25_a1", ctx1),
+            assistant_text(t2, "msg_25_a2", ctx2),
+            assistant_text(t3, "msg_25_a3", text_hit),
+            assistant_text(t4, "msg_25_a4", ctx4),
+            assistant_text(t5, "msg_25_a5", ctx5),
+        ],
+    }
+    o = find_offset(text_hit, "needle")
+    combos = {
+        "default": {
+            "description": "Two long context turns on each side of one hit.",
+            "pattern": "needle",
+            "flags": ["--context", "2"],
+            "hits": [hit(
+                session_id="sid1", cwd_slug=scenario, line_number=3,
+                timestamp=iso(t3), role="assistant", snippet=text_hit,
+                match_offsets=[[o[0], o[1]]],
+                context_before=[ctx("assistant", ctx1, iso(t1)),
+                                ctx("assistant", ctx2, iso(t2))],
+                context_after=[ctx("assistant", ctx4, iso(t4)),
+                               ctx("assistant", ctx5, iso(t5))],
+            )],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+    }
+    return scenario, files, combos
+
+
+def multi_root_scenario_02_cwd_filter():
+    """--cwd over a primary root holding TWO slug dirs: the filter must skip
+    the non-matching slug during discovery (the single-slug scenarios never
+    exercise the mismatch arm). Returns the multi-root layout with no extra
+    roots."""
+    scenario = "02-cwd-filter"
+    t_one, t_two = NOW_UNIX - 2000, NOW_UNIX - 1000
+    text_one = "needle in slug one"
+    text_two = "needle in slug two"
+    files = {
+        "primary/slug-one/sid1.jsonl": [assistant_text(t_one, "msg_cwd_1", text_one)],
+        "primary/slug-two/sid2.jsonl": [assistant_text(t_two, "msg_cwd_2", text_two)],
+    }
+    o1 = find_offset(text_one, "needle")
+    o2 = find_offset(text_two, "needle")
+    hit_one = hit(
+        session_id="sid1", cwd_slug="slug-one", line_number=1,
+        timestamp=iso(t_one), role="assistant", snippet=text_one,
+        match_offsets=[[o1[0], o1[1]]],
+    )
+    hit_two = hit(
+        session_id="sid2", cwd_slug="slug-two", line_number=1,
+        timestamp=iso(t_two), role="assistant", snippet=text_two,
+        match_offsets=[[o2[0], o2[1]]],
+    )
+    combos = {
+        "no-filter": {
+            "description": "Both slugs match without --cwd.",
+            "pattern": "needle",
+            "flags": [],
+            "hits": [hit_two, hit_one],
+            "summary": summary(hits=2, sessions_matched=2),
+        },
+        "cwd-one": {
+            "description": "--cwd slug-one drops the other slug at discovery.",
+            "pattern": "needle",
+            "flags": ["--cwd", "slug-one"],
+            "hits": [hit_one],
+            "summary": summary(hits=1, sessions_matched=1),
+        },
+    }
+    return scenario, "primary", [], files, combos
+
+
 SCENARIOS = [
     scenario_01_basic,
     scenario_02_multi_match_per_session,
@@ -1575,10 +1895,18 @@ SCENARIOS = [
     scenario_16_same_timestamp,
     scenario_17_queue_operation,
     scenario_18_subagent_traversal,
+    scenario_19_prefilter_edges,
+    scenario_20_nonascii_pattern,
+    scenario_21_snippet_escape_chars,
+    scenario_22_regex_fold_range,
+    scenario_23_regex_fold_single,
+    scenario_24_snippet_no_whitespace,
+    scenario_25_context_rich,
 ]
 
 MULTI_ROOT_SCENARIOS = [
     multi_root_scenario_01_two_roots,
+    multi_root_scenario_02_cwd_filter,
 ]
 
 
