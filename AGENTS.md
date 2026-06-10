@@ -74,7 +74,10 @@ No lint gate in CI yet (planned testing/coverage work is in
 warning-clean:
 
 - **C++** — `clang-tidy` against the compile DB, scoped to our TUs with
-  simdjson headers filtered out:
+  simdjson headers filtered out. **Windows caveat:** the Visual Studio CMake
+  generator ignores `CMAKE_EXPORT_COMPILE_COMMANDS` (no compile DB is
+  written), so this command spews bogus C++14 errors on chonkers - run tidy
+  on Linux, or configure a separate `-G Ninja` build dir for it:
   ```
   cmake -S cpp -B cpp/build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
   clang-tidy -p cpp/build --header-filter='\.hpp$' \
