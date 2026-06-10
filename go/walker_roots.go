@@ -121,7 +121,11 @@ func ResolveRoots(primary string, cliExtras []string, readConfig bool) []string 
 			}
 			continue
 		}
-		result = append(result, canonical)
+		// Canonical is the dedup key ONLY; walk the original path (SPEC
+		// "Roots": canonicalizing a mapped network drive can yield a
+		// \\?\UNC form some walkers cannot enumerate, and it leaks into
+		// host_root output).
+		result = append(result, c.path)
 	}
 	return result
 }
