@@ -122,10 +122,11 @@ std::optional<Beacon> parse_beacon_body(std::string_view body) {
   thread_local sj::ondemand::parser parser;
   sj::padded_string padded(body);
   sj::ondemand::document doc;
-  if (parser.iterate(padded).get(doc) != sj::SUCCESS)
-    return std::nullopt;
   sj::ondemand::object obj;
-  if (doc.get_object().get(obj) != sj::SUCCESS)
+  // The extractor only hands us `{...}` bodies, so any text that survives
+  // iterate() is an object; fold both failure modes into one branch.
+  if (parser.iterate(padded).get(doc) != sj::SUCCESS ||
+      doc.get_object().get(obj) != sj::SUCCESS)
     return std::nullopt;
 
   Beacon b;
@@ -164,10 +165,12 @@ std::optional<Beacon> parse_beacon_body(std::string_view body) {
       b.drift.assign(v.data(), v.size());
       b.has_drift = true;
     } else if (key == "beats_left") {
+      // Present-but-not-an-i64-integer rejects the beacon, matching the
+      // strict typing of every other beacon field (rust/go parity).
       int64_t iv;
-      if (field.value().get_int64().get(iv) == sj::SUCCESS) {
-        b.beats_left = iv;
-      }
+      if (field.value().get_int64().get(iv) != sj::SUCCESS)
+        return std::nullopt;
+      b.beats_left = iv;
     }
   }
 

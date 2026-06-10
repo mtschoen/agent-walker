@@ -130,10 +130,9 @@ fn find_latest_in_path(path: &Path, re: &Regex) -> Option<(Beacon, f64)> {
         // `latest` if this entry's timestamp is the highest seen.
         let mut entry_beacon: Option<Beacon> = None;
         for caps in re.captures_iter(&combined) {
-            if let Some(m) = caps.get(1) {
-                if let Some(b) = parse_beacon(m.as_str()) {
-                    entry_beacon = Some(b);
-                }
+            // Group 1 is non-optional in the beacon regex, so index directly.
+            if let Some(b) = parse_beacon(&caps[1]) {
+                entry_beacon = Some(b);
             }
         }
         if let Some(b) = entry_beacon {
@@ -213,10 +212,9 @@ fn collect_session_events_in_path(path: &Path, re: &Regex) -> SessionEvents {
         events.push((ts, false));
         let combined = extract_text(&content, false);
         for caps in re.captures_iter(&combined) {
-            if let Some(m) = caps.get(1) {
-                if let Some(b) = parse_beacon(m.as_str()) {
-                    beacons.push((b, ts));
-                }
+            // Group 1 is non-optional in the beacon regex, so index directly.
+            if let Some(b) = parse_beacon(&caps[1]) {
+                beacons.push((b, ts));
             }
         }
     }

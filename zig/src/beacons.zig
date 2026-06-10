@@ -171,7 +171,9 @@ fn parseBeaconJson(alloc: Allocator, json_src: []const u8) ?Beacon {
             // rust/cpp/go type checks); absence stays null.
             drift = (main.parseStringValue(&scanner, alloc) catch return null) orelse return null;
         } else if (std.mem.eql(u8, key, "beats_left")) {
-            beats_left = parseI64Value(&scanner, alloc) catch return null;
+            // Present-but-not-an-i64-integer rejects the beacon, matching
+            // the strict typing of every other beacon field (rust/cpp/go).
+            beats_left = (parseI64Value(&scanner, alloc) catch return null) orelse return null;
         } else {
             scanner.skipValue() catch return null;
         }
@@ -209,8 +211,9 @@ fn parseF64Value(scanner: *std.json.Scanner, alloc: Allocator) !?f64 {
     return std.fmt.parseFloat(f64, slice) catch null;
 }
 
-/// Read a numeric value as i64. Falls back to truncating-from-float when
-/// the source is a JSON float (matches the prior `.float => |f| @intFromFloat(f)` path).
+/// Read a numeric value as i64. Returns null for any non-number token and
+/// for numbers that are not i64 integers (floats, exponents, out-of-range);
+/// the beats_left call site rejects the beacon on null-when-present.
 fn parseI64Value(scanner: *std.json.Scanner, alloc: Allocator) !?i64 {
     const peek = try scanner.peekNextTokenType();
     if (peek != .number) {
@@ -222,9 +225,7 @@ fn parseI64Value(scanner: *std.json.Scanner, alloc: Allocator) !?i64 {
         .number, .allocated_number => |s| s,
         else => return null,
     };
-    if (std.fmt.parseInt(i64, slice, 10)) |n| return n else |_| {}
-    if (std.fmt.parseFloat(f64, slice)) |f| return @intFromFloat(f) else |_| {}
-    return null;
+    return std.fmt.parseInt(i64, slice, 10) catch null;
 }
 
 // --- transcript scanning ---------------------------------------------------
