@@ -343,33 +343,27 @@ pub fn run(gpa: Allocator, argv: [][]const u8) !void {
     // Parallel walk, capped at 8 workers (matching cost mode). Events was
     // previously a serial loop here, which left it ~9x slower than the other
     // impls on a full fleet — the walk, not the emit, was the bottleneck.
+    // Always uses the queue+thread shape (a single worker thread when
+    // ncpu==1), matching cost/search/beacons-history; the old serial
+    // special-case was a second, divergent code path for the same work.
     const ncpu = std.Thread.getCpuCount() catch 4;
-    var nw: usize = @min(@as(usize, 8), ncpu);
+    var nw: usize = @min(@as(usize, 8), @max(@as(usize, 1), ncpu));
     if (nw > work.items.len) nw = work.items.len;
+    if (nw == 0) nw = 1; // empty work list: one worker drains immediately
 
     // The worker arenas own the EventRecord.model strings, so they must outlive
-    // the emit below. Declare the cleanup at function scope (not inside the
-    // parallel block) — a block-scoped defer would free them before emit reads
-    // rec.model, a use-after-free.
-    var slots: []WorkerSlot = &.{};
+    // the emit below. Declare the cleanup at function scope - a block-scoped
+    // defer would free them before emit reads rec.model, a use-after-free.
+    var queue = EventsQueue.init(work.items);
+    const slots = try alloc.alloc(WorkerSlot, nw);
+    for (slots) |*s| s.* = .{ .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator) };
     defer for (slots) |*s| s.arena.deinit();
 
-    if (nw <= 1) {
-        // Single group (or empty): skip the thread machinery entirely.
-        for (work.items) |gw| {
-            walkGroupEvents(alloc, gw.paths, gw.slug, gw.session_id, cutoff, &records);
-        }
-    } else {
-        var queue = EventsQueue.init(work.items);
-        slots = try alloc.alloc(WorkerSlot, nw);
-        for (slots) |*s| s.* = .{ .arena = std.heap.ArenaAllocator.init(std.heap.page_allocator) };
+    var threads: std.ArrayList(std.Thread) = .empty;
+    for (slots) |*s| try threads.append(alloc, try std.Thread.spawn(.{}, worker, .{ &queue, s, cutoff }));
+    for (threads.items) |t| t.join();
 
-        var threads: std.ArrayList(std.Thread) = .empty;
-        for (slots) |*s| try threads.append(alloc, try std.Thread.spawn(.{}, worker, .{ &queue, s, cutoff }));
-        for (threads.items) |t| t.join();
-
-        for (slots) |*s| try records.appendSlice(alloc, s.records.items);
-    }
+    for (slots) |*s| try records.appendSlice(alloc, s.records.items);
 
     // Sort for deterministic output: (ts, session_id, model).
     std.mem.sort(EventRecord, records.items, {}, recordLessThan);

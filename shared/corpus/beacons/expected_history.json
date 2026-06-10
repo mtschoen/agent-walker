@@ -153,6 +153,12 @@
       "session_count": 1,
       "n_pairs": 1,
       "bias_factor": 1.5
+    },
+    "pre_window_begin": {
+      "pairs": [],
+      "session_count": 1,
+      "n_pairs": 0,
+      "bias_factor": null
     }
   }
 }

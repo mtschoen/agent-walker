@@ -7,4 +7,18 @@ this is not JSON at all
 {"type": "assistant", "message": {"role": "assistant", "id": "no-ts", "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}}
 {"type": "assistant", "timestamp": "definitely-not-iso", "message": {"role": "assistant", "id": "bad-ts", "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}}
 {"type": "assistant", "timestamp": "2026-05-10T11:51:40.000Z", "message": {"role": "user", "id": "role-mismatch", "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}}
+ÿþ invalid utf-8 line
+{"\ud800": "lone surrogate key"}
+{"type": "assistant", "timestamp": "2026-05-10T11:52:00.000Z", "message": "not an object"}
+{"type": "assistant", "timestamp": "2026-05-10T11:52:10.000Z", "message": null}
+{"type": "assistant", "timestamp": "", "message": {"role": "assistant", "content": [{"type": "text", "text": "empty ts"}]}}
+{"type": "assistant", "timestamp": 12345, "message": {"role": "assistant", "content": [{"type": "text", "text": "numeric ts"}]}}
+{"type": "assistant", "timestamp": "2026-XX-09TZZ:00:00Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "long bad iso"}]}}
+{"type": "assistant", "timestamp": "2026-05-10T11:52:20.000Z", "message": {"role": "assistant", "content": "bare string content"}}
+{"type": "assistant", "timestamp": "2026-05-10T11:52:30.000Z", "message": {"role": "assistant", "content": ["bare block", 5, {"type": 7, "text": "type not a string"}, {"type": "text", "text": 9}, {"text": "typeless block"}]}}
+{"type": "assistant", "timestamp": "2026-05-10T11:52:40.000Z", "message": {"role": 5, "content": [{"type": "text", "text": "numeric role"}]}}
+{"type": "assistant", "timestamp": "2026-05-10T11:52:50.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "crlf line, no beacon"}]}}
+{"type": "assistant", "timestamp": "2026-05-10T11:52:55.000Z", "message": {"\ud800": 1, "role": "assistant", "content": [{"type": "text", "text": "no beacon, bad msg key"}]}}
+{"type": "assistant", "timestamp": "2026-05-10T11:53:00.000Z", "message": {"role": "assistant", "content": [{"\ud800": 2, "type": "text", "text": "no beacon, bad block key"}]}}
+{"type": "assistant", "timestamp": "2026-05-10T11:53:05.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "block one"}, {"type": "text", "text": "block two"}]}}
 {"type": "assistant", "timestamp": "2026-05-10T11:58:20.000Z", "message": {"id": "msg_dl_good", "role": "assistant", "model": "claude-opus-4-7", "content": [{"type": "text", "text": "Working on it.\n\n<progress-beacon>\n{\"kind\": \"report\", \"eta_seconds\": 99, \"summary\": \"after the ladder\", \"drift\": \"nominal\"}\n</progress-beacon>"}], "usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}

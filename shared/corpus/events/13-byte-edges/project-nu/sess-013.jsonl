@@ -1,0 +1,7 @@
+{"type": "assistant", "timestamp": "2025-05-22T07:45:40.000Z", "message": {"id": "msg-013-good", "role": "assistant", "model": "claude-opus-4-7", "usage": {"input_tokens": 800, "output_tokens": 80, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}
+ÿş invalid utf-8 line
+{"\ud800": "lone surrogate key"}
+{"type": "assistant", "timestamp": "2025-05-22T07:45:40.000Z", "message": "bare string"}
+{"type": "assistant", "timestamp": 12345, "message": {"role": "assistant", "id": "ev-num-ts", "model": "claude-opus-4-7", "usage": {"input_tokens": 5}}}
+{"type": "assistant", "timestamp": "2026-XX-09TZZ:00:00Z", "message": {"role": "assistant", "id": "ev-long-bad-ts", "model": "claude-opus-4-7", "usage": {"input_tokens": 5}}}
+{"type": "assistant", "timestamp": "2025-05-22T07:45:40.000Z", "message": {"\ud800": 1, "model": "claude-opus-4-7", "usage": {"input_tokens": 5}}}

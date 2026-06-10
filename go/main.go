@@ -381,6 +381,11 @@ func discoverGroups(roots []string, earliest float64) map[groupKey][]string {
 				if err != nil {
 					continue
 				}
+				// Glob matches directories named *.jsonl too; parents must
+				// be regular files (SPEC Discovery).
+				if !info.Mode().IsRegular() {
+					continue
+				}
 				if info.ModTime().Before(earliestTime) {
 					continue
 				}

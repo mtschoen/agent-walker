@@ -449,6 +449,7 @@ const Cli = struct {
 fn parseCli(alloc: Allocator, argv: [][]const u8) !Cli {
     var cli = Cli{};
     var extras: std.ArrayList([]const u8) = .empty;
+    var win_start_set = false;
     var i: usize = 0;
     while (i < argv.len) {
         const flag = argv[i];
@@ -457,6 +458,7 @@ fn parseCli(alloc: Allocator, argv: [][]const u8) !Cli {
             cli.period = std.fmt.parseInt(u64, grab(argv, &i, "--period"), 10) catch die("--period: invalid");
         } else if (std.mem.eql(u8, flag, "--win-start")) {
             cli.win_start = std.fmt.parseFloat(f64, grab(argv, &i, "--win-start")) catch die("--win-start: invalid");
+            win_start_set = true;
         } else if (std.mem.eql(u8, flag, "--now")) {
             cli.now = std.fmt.parseFloat(f64, grab(argv, &i, "--now")) catch die("--now: invalid");
         } else if (std.mem.eql(u8, flag, "--projects-root")) {
@@ -475,6 +477,7 @@ fn parseCli(alloc: Allocator, argv: [][]const u8) !Cli {
         }
     }
     if (cli.period == 0) die("--period is required");
+    if (!win_start_set) die("--win-start is required");
     cli.extra_roots = try extras.toOwnedSlice(alloc);
     return cli;
 }

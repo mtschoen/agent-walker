@@ -107,6 +107,7 @@ static bool wants_help(const std::vector<std::string> &raw) {
 
 static Args parse_args(const std::vector<std::string> &argv) {
   Args args;
+  bool win_start_set = false;
   for (size_t i = 0; i < argv.size(); ++i) {
     const std::string &flag = argv[i];
     auto next = [&]() -> const std::string & {
@@ -123,6 +124,7 @@ static Args parse_args(const std::vector<std::string> &argv) {
     } else if (flag == "--win-start") {
       try {
         args.win_start_unix = std::stod(next());
+        win_start_set = true;
       } catch (...) {
         die("--win-start: invalid number");
       }
@@ -147,6 +149,9 @@ static Args parse_args(const std::vector<std::string> &argv) {
   }
   if (args.period_seconds == 0) {
     die("--period is required");
+  }
+  if (!win_start_set) {
+    die("--win-start is required");
   }
   return args;
 }

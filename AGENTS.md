@@ -101,7 +101,7 @@ is inherited), collects per-language line/statement coverage, and writes
 `TEST-REPORT.md` at the repo root. Exits non-zero until every measured
 impl hits 100%. Roadmap + phase status: `COVERAGE-PLAN.md`.
 
-`--baseline rust=97.47,cpp=98.40,go=96.73,zig=93.63` switches the gate
+`--baseline rust=98.00,cpp=98.70,go=97.89,zig=97.99` switches the gate
 from "must be 100%" to "must not regress vs documented thresholds" —
 this is the Phase 4 CI mode locked in until COVERAGE-PLAN items 4 and 6
 close the remaining gap. Raise the floors in the same PR that raises

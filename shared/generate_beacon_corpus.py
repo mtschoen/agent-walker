@@ -78,14 +78,19 @@ def write_jsonl(path: Path, lines: list[dict]) -> None:
 
 
 def write_jsonl_mixed(path: Path, entries: list) -> None:
-    """Like write_jsonl but accepts a mix of dicts (json-dumped) and raw
-    strings (written verbatim). Used by the A8 dirty-ladder fixtures so we
-    can inject genuinely malformed / blank lines around valid entries."""
+    """Like write_jsonl but accepts a mix of dicts (json-dumped), raw strings
+    (written verbatim), and raw bytes (for invalid-UTF-8 lines). Used by the
+    A8 dirty-ladder fixtures so we can inject genuinely malformed / blank
+    lines around valid entries. Binary mode keeps the bytes exact."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
+    with path.open("wb") as f:
         for entry in entries:
-            f.write(entry if isinstance(entry, str) else json.dumps(entry))
-            f.write("\n")
+            if isinstance(entry, bytes):
+                f.write(entry)
+            else:
+                text = entry if isinstance(entry, str) else json.dumps(entry)
+                f.write(text.encode("utf-8"))
+            f.write(b"\n")
 
 
 def dirty_ladder_lines(good_entry: dict) -> list:
@@ -103,6 +108,21 @@ def dirty_ladder_lines(good_entry: dict) -> list:
     Note: an assistant with empty content but valid metadata IS counted as a
     zero-cost turn per SPEC §Filters (no content-emptiness check), so it
     doesn't belong in the skip-ladder — handled separately if needed.
+
+    Extended rungs (10+): per-field malformed shapes. None of them carries a
+    beacon, so impls that reject the whole line (serde) and impls that skip
+    only the bad field (simdjson on-demand) observe the same output.
+     10. invalid UTF-8 bytes (line-level parse/read failure)
+     11. lone-surrogate escape in a root key (key-unescape failure)
+     12. message is a bare string, not an object
+     13. message is null
+     14. timestamp is an empty string
+     15. timestamp is a number, not a string
+     16. timestamp is a >=19-char string with non-digit date fields
+     17. assistant whose content is a bare string (not an array)
+     18. content array with non-object / wrong-typed blocks
+     19. role is a number
+     20. CRLF-terminated but otherwise valid beacon-free assistant turn
     """
     return [
         "",
@@ -121,6 +141,52 @@ def dirty_ladder_lines(good_entry: dict) -> list:
         {"type": "assistant", "timestamp": iso(NOW_UNIX - 500),
          "message": {"role": "user", "id": "role-mismatch",
                      "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}},
+        b'\xff\xfe invalid utf-8 line',
+        '{"\\ud800": "lone surrogate key"}',
+        {"type": "assistant", "timestamp": iso(NOW_UNIX - 480),
+         "message": "not an object"},
+        {"type": "assistant", "timestamp": iso(NOW_UNIX - 470),
+         "message": None},
+        {"type": "assistant", "timestamp": "",
+         "message": {"role": "assistant",
+                     "content": [{"type": "text", "text": "empty ts"}]}},
+        {"type": "assistant", "timestamp": 12345,
+         "message": {"role": "assistant",
+                     "content": [{"type": "text", "text": "numeric ts"}]}},
+        {"type": "assistant", "timestamp": "2026-XX-09TZZ:00:00Z",
+         "message": {"role": "assistant",
+                     "content": [{"type": "text", "text": "long bad iso"}]}},
+        {"type": "assistant", "timestamp": iso(NOW_UNIX - 460),
+         "message": {"role": "assistant", "content": "bare string content"}},
+        {"type": "assistant", "timestamp": iso(NOW_UNIX - 450),
+         "message": {"role": "assistant",
+                     "content": ["bare block", 5,
+                                 {"type": 7, "text": "type not a string"},
+                                 {"type": "text", "text": 9},
+                                 {"text": "typeless block"}]}},
+        {"type": "assistant", "timestamp": iso(NOW_UNIX - 440),
+         "message": {"role": 5,
+                     "content": [{"type": "text", "text": "numeric role"}]}},
+        json.dumps({"type": "assistant", "timestamp": iso(NOW_UNIX - 430),
+                    "message": {"role": "assistant",
+                                "content": [{"type": "text",
+                                             "text": "crlf line, no beacon"}]}}
+                   ) + "\r",
+        # Lone-surrogate keys at message and block depth. Strict parsers
+        # reject the line; per-key parsers skip the key and find no beacon.
+        ('{"type": "assistant", "timestamp": "%s", "message": '
+         '{"\\ud800": 1, "role": "assistant", "content": '
+         '[{"type": "text", "text": "no beacon, bad msg key"}]}}'
+         % iso(NOW_UNIX - 425)),
+        ('{"type": "assistant", "timestamp": "%s", "message": '
+         '{"role": "assistant", "content": '
+         '[{"\\ud800": 2, "type": "text", "text": "no beacon, bad block key"}]}}'
+         % iso(NOW_UNIX - 420)),
+        # Two text blocks, both beacon-free: exercises the newline-join arm.
+        {"type": "assistant", "timestamp": iso(NOW_UNIX - 415),
+         "message": {"role": "assistant",
+                     "content": [{"type": "text", "text": "block one"},
+                                 {"type": "text", "text": "block two"}]}},
         good_entry,
     ]
 
@@ -396,6 +462,109 @@ def scenario_multiple_in_turn():
     return "multiple_in_turn", sid, lines, expected
 
 
+def scenario_two_text_blocks():
+    """An assistant turn whose content has TWO text blocks; the beacon sits in
+    the second. Impls must join text blocks with a newline before matching,
+    so the beacon is still found (exercises the multi-block join branch)."""
+    sid = "session"
+    t1 = NOW_UNIX - 150
+    entry = {
+        "type": "assistant",
+        "timestamp": iso(t1),
+        "message": {
+            "id": "msg_ttb_001",
+            "role": "assistant",
+            "model": "claude-opus-4-7",
+            "content": [
+                {"type": "text", "text": "First block narration."},
+                {"type": "text", "text": beacon_text(
+                    beacon_json("report", 120, "beacon in second block"))},
+            ],
+            "usage": {"input_tokens": 100, "output_tokens": 50},
+        },
+    }
+    expected = {
+        "session_id": sid,
+        "beacon": {"kind": "report", "eta_seconds": 120,
+                   "summary": "beacon in second block", "drift": "nominal"},
+        "emitted_at": t1,
+        "age_seconds": NOW_UNIX - t1,
+    }
+    return "two_text_blocks", sid, [entry], expected
+
+
+def scenario_wrong_typed_fields():
+    """Beacon bodies that parse as JSON but carry wrong-typed fields: kind as
+    a number, summary as an array, drift as a number, and a begin whose
+    eta_seconds is a string. Every impl must reject all four (silently skip),
+    leaving beacon null."""
+    sid = "session"
+    t = NOW_UNIX - 400
+    bodies = [
+        json.dumps({"kind": 5, "eta_seconds": 60, "summary": "kind not str"}),
+        json.dumps({"kind": "begin", "eta_seconds": 60, "summary": ["arr"]}),
+        json.dumps({"kind": "begin", "eta_seconds": 60, "summary": "x",
+                    "drift": 9}),
+        json.dumps({"kind": "begin", "eta_seconds": "soon", "summary": "x"}),
+    ]
+    lines = [
+        assistant_with_text(t + 10 * i, f"msg_wt_{i:03d}", beacon_text(body))
+        for i, body in enumerate(bodies)
+    ]
+    expected = {"session_id": sid, "beacon": None,
+                "emitted_at": None, "age_seconds": None}
+    return "wrong_typed_fields", sid, lines, expected
+
+
+def scenario_malformed_bodies():
+    """Beacon bodies that fail at JSON tokenization or carry structural
+    surprises: an unterminated string, two concatenated objects (the first a
+    non-beacon, so impls that tolerate trailing content still find nothing),
+    a bare-key object, and a lone-surrogate key alongside a begin that lacks
+    eta_seconds. Every impl must skip them all: beacon null."""
+    sid = "session"
+    t = NOW_UNIX - 400
+    bodies = [
+        '{"kind": "x", "summary": "oops}',
+        '{"a":1}{"b":2}',
+        '{"a"}',
+        '{"\\ud800": 1, "kind": "begin", "summary": "x"}',
+        '{"eta_seconds": 5, "summary": "no kind"}',
+        '{"kind": "begin", "eta_seconds": 5}',
+    ]
+    lines = [
+        assistant_with_text(t + 10 * i, f"msg_mb_{i:03d}", beacon_text(body))
+        for i, body in enumerate(bodies)
+    ]
+    expected = {"session_id": sid, "beacon": None,
+                "emitted_at": None, "age_seconds": None}
+    return "malformed_bodies", sid, lines, expected
+
+
+def scenario_end_int_eta():
+    """A lifecycle closed by an end beacon whose eta_seconds is present as a
+    JSON integer (regression guard around the d905408 optional-eta fix: the
+    present-int form must parse, not fall into the absent-or-rejected arms)."""
+    sid = "session"
+    t1, t2 = NOW_UNIX - 500, NOW_UNIX - 100
+    end_int = json.dumps({"kind": "end", "eta_seconds": 7,
+                          "summary": "int eta on end"})
+    lines = [
+        assistant_with_text(t1, "msg_eie_001",
+            beacon_text(beacon_json("begin", 400, "before int-eta end",
+                                    drift=None))),
+        assistant_with_text(t2, "msg_eie_002", beacon_text(end_int)),
+    ]
+    expected = {
+        "session_id": sid,
+        "beacon": {"kind": "end", "eta_seconds": 7,
+                   "summary": "int eta on end"},
+        "emitted_at": t2,
+        "age_seconds": NOW_UNIX - t2,
+    }
+    return "end_int_eta", sid, lines, expected
+
+
 # === Scenarios for `beacons-history` ===
 
 def scenario_cross_session_pairs():
@@ -576,7 +745,7 @@ def scenario_escape_chars_latest():
     t1 = NOW_UNIX - 100
     # Summary with quotes, backslash, and control bytes. Build via dict so
     # json.dumps does the escaping for us (matches what walker will emit).
-    nasty = "quote\"slash\\back\nnewline\ttab\rret\bbs\x01ctl"
+    nasty = "quote\"slash\\back\nnewline\ttab\rret\bbs\fff\x01ctl"
     raw = json.dumps({
         "kind": "report",
         "eta_seconds": 42,
@@ -776,6 +945,24 @@ def scenario_end_without_eta_history():
         [(300.0, 450.0)], session_count=1)
 
 
+def scenario_pre_window_begin():
+    """A begin beacon OLDER than window_lo (= max(now - period, win_start);
+    the conformance runner pins period to 7 days) followed by an in-window
+    end: the begin is window-filtered out, so the end is an orphan and no
+    pair forms."""
+    t0 = NOW_UNIX - 700000  # ~8.1 days ago, before the 7-day window
+    t1 = NOW_UNIX - 600
+    lines = [
+        assistant_with_text(t0, "msg_pwb_001",
+            beacon_text(beacon_json("begin", 300, "pre-window begin",
+                                    drift=None))),
+        assistant_with_text(t1, "msg_pwb_002",
+            beacon_text(beacon_json("end", 0, "in-window end", drift=None))),
+    ]
+    return "pre_window_begin", {"slug/session.jsonl": lines}, history_expected(
+        [], session_count=1)
+
+
 def scenario_dirty_ladder_history():
     """A8 for history: a dirty-line ladder in a session group that also
     contains one valid begin/end lifecycle. Walker must skip every bad line
@@ -806,6 +993,11 @@ LATEST_SCENARIOS = (
     scenario_end_without_eta,
     scenario_report_without_eta,
     scenario_end_with_bad_eta,
+    # Coverage-regression batch (2026-06-10):
+    scenario_two_text_blocks,
+    scenario_wrong_typed_fields,
+    scenario_end_int_eta,
+    scenario_malformed_bodies,
 )
 
 # scenario_subagent_latest is multi-file; scenario_dirty_ladder_latest needs
@@ -833,6 +1025,8 @@ HISTORY_SCENARIOS = (
     scenario_usage_only_idle,
     # Optional eta_seconds on end beacons (2026-06-10 nudge-bug fix):
     scenario_end_without_eta_history,
+    # Coverage-regression batch (2026-06-10):
+    scenario_pre_window_begin,
 )
 
 

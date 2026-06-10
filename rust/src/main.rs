@@ -91,6 +91,7 @@ fn parse_cost_args(args: &[String]) -> Result<Args, String> {
         ..Args::default()
     };
     let mut iter = args.iter();
+    let mut win_start_set = false;
     while let Some(flag) = iter.next() {
         match flag.as_str() {
             "--period" => {
@@ -105,7 +106,8 @@ fn parse_cost_args(args: &[String]) -> Result<Args, String> {
                     .next()
                     .ok_or("--win-start needs a value")?
                     .parse()
-                    .map_err(|e| format!("--win-start: {e}"))?
+                    .map_err(|e| format!("--win-start: {e}"))?;
+                win_start_set = true;
             }
             "--now" => {
                 result.now_unix = Some(
@@ -137,6 +139,9 @@ fn parse_cost_args(args: &[String]) -> Result<Args, String> {
     }
     if result.period_seconds == 0 {
         return Err("--period is required".into());
+    }
+    if !win_start_set {
+        return Err("--win-start is required".into());
     }
     Ok(result)
 }

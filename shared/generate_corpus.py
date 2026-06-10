@@ -44,11 +44,19 @@ def rates_for(model_id: str) -> tuple[float, float]:
 
 def cost_for(usage: dict, model_id: str) -> float:
     inp, out = rates_for(model_id)
-    i = int(usage.get("input_tokens", 0) or 0)
-    r = int(usage.get("cache_read_input_tokens", 0) or 0)
-    w = int(usage.get("cache_creation_input_tokens", 0) or 0)
-    o = int(usage.get("output_tokens", 0) or 0)
-    web = int((usage.get("server_tool_use") or {}).get("web_search_requests", 0) or 0)
+
+    def as_int(value) -> int:
+        # Wrong-typed token fields price as zero (mirrors every impl's
+        # observable behavior, whether it zeroes the field or drops the line).
+        return value if isinstance(value, int) else 0
+
+    i = as_int(usage.get("input_tokens", 0))
+    r = as_int(usage.get("cache_read_input_tokens", 0))
+    w = as_int(usage.get("cache_creation_input_tokens", 0))
+    o = as_int(usage.get("output_tokens", 0))
+    server_tool_use = usage.get("server_tool_use")
+    web = as_int(server_tool_use.get("web_search_requests", 0)
+                 if isinstance(server_tool_use, dict) else 0)
     token_cost = (i * inp + r * inp * 0.10 + w * inp * 1.25 + o * out) / 1_000_000
     return token_cost + web * WEB_SEARCH_COST_USD
 
@@ -85,12 +93,20 @@ def turn(model: str, ts_unix: float, *, msg_id: str | None,
     }
 
 
-def write_jsonl(path: Path, entries: list[dict | str]) -> None:
+def write_jsonl(path: Path, entries: list[dict | str | bytes]) -> None:
+    """Write one entry per line. Dicts are json-dumped; raw strings are
+    written verbatim (malformed-line rungs); raw bytes are written as-is
+    (invalid-UTF-8 rungs). Binary mode keeps byte rungs and embedded CR
+    exact on every platform."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, "wb") as f:
         for entry in entries:
-            f.write(entry if isinstance(entry, str) else json.dumps(entry))
-            f.write("\n")
+            if isinstance(entry, bytes):
+                f.write(entry)
+            else:
+                text = entry if isinstance(entry, str) else json.dumps(entry)
+                f.write(text.encode("utf-8"))
+            f.write(b"\n")
 
 
 # Build fixtures and walk them inline to compute expected outputs.
@@ -350,6 +366,77 @@ def fixture_10_iso_variants():
     return slug, {f"{sid}.jsonl": entries}
 
 
+def fixture_11_byte_edges():
+    """Byte-level and per-field edge shapes the line filter must survive:
+    CRLF line endings, an invalid-UTF-8 line, duplicate message ids inside
+    one file, wrong-typed usage fields (parse to zero everywhere), message
+    as a bare string / null, a lone-surrogate root key, non-string and
+    >=19-char-malformed timestamps, and a pre-1970 timestamp (skipped as
+    out-of-range, but the date math must not blow up)."""
+    slug = "11-byte-edges"
+    sid = "kappa"
+    good = turn("claude-opus-4-7", FRESH, msg_id="be-good",
+                input_tokens=1000, output_tokens=500)
+    dup = turn("claude-sonnet-4-6", FRESH, msg_id="be-dup",
+               input_tokens=400, output_tokens=200)
+    pre_epoch = dict(turn("claude-opus-4-7", FRESH, msg_id="be-1965",
+                          input_tokens=777777, output_tokens=777777))
+    pre_epoch["timestamp"] = "1965-03-01T00:00:00Z"
+    entries: list[dict | str | bytes] = [
+        # CRLF-terminated good turn (the \r must be stripped, then counted).
+        json.dumps(good) + "\r",
+        b'\xff\xfe invalid utf-8 line',
+        '{"\\ud800": "lone surrogate key"}',
+        dup,
+        dup,  # same message id -> second occurrence deduped
+        {"type": "assistant", "timestamp": iso(FRESH), "message": "bare"},
+        {"type": "assistant", "timestamp": iso(FRESH), "message": None},
+        {"type": "assistant", "timestamp": 12345,
+         "message": {"role": "assistant", "id": "be-num-ts",
+                     "model": "claude-opus-4-7", "usage": {"input_tokens": 5}}},
+        {"type": "assistant", "timestamp": "2026-XX-09TZZ:00:00Z",
+         "message": {"role": "assistant", "id": "be-long-bad-ts",
+                     "model": "claude-opus-4-7", "usage": {"input_tokens": 5}}},
+        # Wrong-typed usage values: every impl prices them as zero (whether
+        # it rejects the line or zeroes the fields), so totals agree.
+        {"type": "assistant", "timestamp": iso(FRESH),
+         "message": {"role": "assistant", "id": "be-bad-usage",
+                     "model": "claude-opus-4-7",
+                     "usage": {"input_tokens": "many", "output_tokens": None,
+                               "cache_read_input_tokens": [],
+                               "cache_creation_input_tokens": {}}}},
+        # Lone-surrogate keys at message / usage / server_tool_use depth:
+        # strict parsers reject the line, per-key parsers skip the key; all
+        # carried costs are zero, so totals agree either way.
+        ('{"type": "assistant", "timestamp": "%s", "message": '
+         '{"\\ud800": 1, "role": "assistant", "id": "be-msg-badkey", '
+         '"model": "claude-opus-4-7", "usage": {}}}' % iso(FRESH)),
+        ('{"type": "assistant", "timestamp": "%s", "message": '
+         '{"role": "assistant", "id": "be-usage-badkey", '
+         '"model": "claude-opus-4-7", "usage": {"\\ud800": 1}}}' % iso(FRESH)),
+        ('{"type": "assistant", "timestamp": "%s", "message": '
+         '{"role": "assistant", "id": "be-stu-badkey", '
+         '"model": "claude-opus-4-7", '
+         '"usage": {"server_tool_use": {"\\ud800": 1}}}}' % iso(FRESH)),
+        # Wrong-shaped usage / server_tool_use containers and a wrong-typed
+        # web_search_requests: all price to zero in every impl.
+        {"type": "assistant", "timestamp": iso(FRESH),
+         "message": {"role": "assistant", "id": "be-usage-str",
+                     "model": "claude-opus-4-7", "usage": "notanobject"}},
+        {"type": "assistant", "timestamp": iso(FRESH),
+         "message": {"role": "assistant", "id": "be-stu-scalar",
+                     "model": "claude-opus-4-7",
+                     "usage": {"server_tool_use": 5}}},
+        {"type": "assistant", "timestamp": iso(FRESH),
+         "message": {"role": "assistant", "id": "be-stu-wrong-typed",
+                     "model": "claude-opus-4-7",
+                     "usage": {"server_tool_use":
+                               {"web_search_requests": "five"}}}},
+        pre_epoch,
+    ]
+    return slug, {f"{sid}.jsonl": entries}
+
+
 FIXTURES = [
     fixture_01_single_parent,
     fixture_02_parent_acompact,
@@ -361,6 +448,7 @@ FIXTURES = [
     fixture_08_web_search,
     fixture_09_dirty_ladder,
     fixture_10_iso_variants,
+    fixture_11_byte_edges,
 ]
 
 
@@ -370,6 +458,8 @@ def walk_group(files: dict[str, list]) -> tuple[float, float]:
     seen_ids: set[str] = set()
     for entries in files.values():
         for entry in entries:
+            if isinstance(entry, bytes):
+                continue  # invalid-UTF-8 rung: skipped by every impl
             if isinstance(entry, str):
                 stripped = entry.strip()
                 if not stripped:
@@ -381,6 +471,8 @@ def walk_group(files: dict[str, list]) -> tuple[float, float]:
             if not isinstance(entry, dict):
                 continue  # non-object root (e.g., JSON array)
             msg = entry.get("message") or {}
+            if not isinstance(msg, dict):
+                continue  # message is a bare string / wrong type
             if msg.get("role") != "assistant":
                 continue
             mid = msg.get("id")
@@ -389,7 +481,7 @@ def walk_group(files: dict[str, list]) -> tuple[float, float]:
                     continue
                 seen_ids.add(mid)
             ts_str = entry.get("timestamp")
-            if not ts_str:
+            if not ts_str or not isinstance(ts_str, str):
                 continue
             try:
                 ts = datetime.fromisoformat(
@@ -400,7 +492,10 @@ def walk_group(files: dict[str, list]) -> tuple[float, float]:
             earliest = min(period_cutoff, WIN_START_UNIX)
             if ts < earliest:
                 continue
-            c = cost_for(msg.get("usage") or {}, msg.get("model") or "")
+            usage = msg.get("usage")
+            if not isinstance(usage, dict):
+                usage = {}  # wrong-shaped usage prices as zero everywhere
+            c = cost_for(usage, msg.get("model") or "")
             if ts >= period_cutoff:
                 trailing += c
             if ts >= WIN_START_UNIX:

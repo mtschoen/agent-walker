@@ -12,9 +12,9 @@ Languages must reproduce these values to within $0.01 per turn.
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Sequence
 
 ROOT = Path(__file__).resolve().parent
 EVENTS_CORPUS = ROOT / "corpus" / "events"
@@ -98,14 +98,21 @@ def turn(message_id: str, ts: float, model: str,
 
 
 def write_fixture(name: str, slug: str, session_id: str,
-                  lines: list[dict | str]) -> None:
-    """Write a fixture JSONL file at corpus/events/<name>/<slug>/<session_id>.jsonl."""
+                  lines: "Sequence[dict | str | bytes]") -> None:
+    """Write a fixture JSONL file at corpus/events/<name>/<slug>/<session_id>.jsonl.
+
+    Dicts are json-dumped, raw strings written verbatim, raw bytes as-is
+    (invalid-UTF-8 rungs). Binary mode keeps byte rungs and embedded CR exact."""
     target = EVENTS_CORPUS / name / slug / f"{session_id}.jsonl"
     target.parent.mkdir(parents=True, exist_ok=True)
-    with open(target, "w", encoding="utf-8") as f:
+    with open(target, "wb") as f:
         for line in lines:
-            f.write(line if isinstance(line, str) else json.dumps(line))
-            f.write("\n")
+            if isinstance(line, bytes):
+                f.write(line)
+            else:
+                text = line if isinstance(line, str) else json.dumps(line)
+                f.write(text.encode("utf-8"))
+            f.write(b"\n")
 
 
 def expected_record(turn_dict: dict, slug: str, session_id: str) -> dict:
@@ -319,7 +326,8 @@ def fixture_10_escape_chars():
     # `\ " : < > | ? *`). The escape-output code path is exercised by the
     # `nasty_model` field below, which sees the same JSON writer.
     session_id = "sess-010-escape-chars"
-    nasty_model = "claude-sonnet-quote\"backslash\\newline\ntab\tctl\x01"
+    nasty_model = ("claude-sonnet-quote\"backslash\\newline\ntab\t"
+                   "bs\bff\fcr\rctl\x01")
     t = turn("msg-010", _IN_WINDOW, nasty_model, 1000, 100)
     write_fixture(name, slug, session_id, [t])
     return name, [expected_record(t, slug, session_id)]
@@ -371,6 +379,57 @@ def fixture_11_iso_variants():
     ]
 
 
+def fixture_12_many_sessions():
+    """Eight session groups under one slug. Forces the parallel-walk path in
+    every impl (worker pools spawn only when the group count exceeds one),
+    including the Zig events thread pool that a 1-2 group corpus never hit.
+    """
+    name = "12-many-sessions"
+    slug = "project-mu"
+    expected = []
+    for n in range(8):
+        session_id = f"sess-012-{n}"
+        t = turn(f"msg-012-{n}", _IN_WINDOW - n, "claude-sonnet-4-6",
+                 500 + n, 50)
+        write_fixture(name, slug, session_id, [t])
+        expected.append(expected_record(t, slug, session_id))
+    return name, expected
+
+
+def fixture_13_byte_edges():
+    """Byte-level edge shapes for the events scanner: a CRLF-terminated good
+    turn, an invalid-UTF-8 line, a lone-surrogate root key, message as a bare
+    string, and non-string / >=19-char-malformed timestamps. Only the CRLF
+    turn emits a record."""
+    name = "13-byte-edges"
+    slug = "project-nu"
+    session_id = "sess-013"
+    good = turn("msg-013-good", _IN_WINDOW, "claude-opus-4-7", 800, 80)
+    lines: list[dict | str | bytes] = [
+        json.dumps(good) + "\r",
+        b'\xff\xfe invalid utf-8 line',
+        '{"\\ud800": "lone surrogate key"}',
+        json.dumps({"type": "assistant", "timestamp": iso_z(_IN_WINDOW),
+                    "message": "bare string"}),
+        json.dumps({"type": "assistant", "timestamp": 12345,
+                    "message": {"role": "assistant", "id": "ev-num-ts",
+                                "model": "claude-opus-4-7",
+                                "usage": {"input_tokens": 5}}}),
+        json.dumps({"type": "assistant", "timestamp": "2026-XX-09TZZ:00:00Z",
+                    "message": {"role": "assistant", "id": "ev-long-bad-ts",
+                                "model": "claude-opus-4-7",
+                                "usage": {"input_tokens": 5}}}),
+        # Lone-surrogate key inside message, and NO role: strict parsers
+        # reject the line, per-key parsers skip the key and then drop the
+        # entry for missing role. Either way no record.
+        ('{"type": "assistant", "timestamp": "%s", "message": '
+         '{"\\ud800": 1, "model": "claude-opus-4-7", '
+         '"usage": {"input_tokens": 5}}}' % iso_z(_IN_WINDOW)),
+    ]
+    write_fixture(name, slug, session_id, lines)
+    return name, [expected_record(good, slug, session_id)]
+
+
 FIXTURES = [
     fixture_01_empty,
     fixture_02_single,
@@ -383,6 +442,8 @@ FIXTURES = [
     fixture_09_subagent,
     fixture_10_escape_chars,
     fixture_11_iso_variants,
+    fixture_12_many_sessions,
+    fixture_13_byte_edges,
 ]
 
 
