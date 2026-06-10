@@ -538,8 +538,15 @@ const Buf = struct {
     }
     fn appendFmt(self: *Buf, comptime fmt: []const u8, args: anytype) !void {
         var tmp: [128]u8 = undefined;
-        const n = try std.fmt.bufPrint(&tmp, fmt, args);
-        try self.list.appendSlice(self.alloc, n);
+        if (std.fmt.bufPrint(&tmp, fmt, args)) |n| {
+            try self.list.appendSlice(self.alloc, n);
+        } else |_| {
+            // Line exceeds the stack buffer (long pretty context/snippet
+            // lines): format on the heap instead of silently dropping it.
+            const heap = try std.fmt.allocPrint(self.alloc, fmt, args);
+            defer self.alloc.free(heap);
+            try self.list.appendSlice(self.alloc, heap);
+        }
     }
     fn items(self: *const Buf) []const u8 {
         return self.list.items;

@@ -167,7 +167,9 @@ fn parseBeaconJson(alloc: Allocator, json_src: []const u8) ?Beacon {
         } else if (std.mem.eql(u8, key, "summary")) {
             summary = main.parseStringValue(&scanner, alloc) catch return null;
         } else if (std.mem.eql(u8, key, "drift")) {
-            drift = main.parseStringValue(&scanner, alloc) catch return null;
+            // Present-but-non-string drift rejects the beacon (parity with
+            // rust/cpp/go type checks); absence stays null.
+            drift = (main.parseStringValue(&scanner, alloc) catch return null) orelse return null;
         } else if (std.mem.eql(u8, key, "beats_left")) {
             beats_left = parseI64Value(&scanner, alloc) catch return null;
         } else {

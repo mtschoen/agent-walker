@@ -562,6 +562,12 @@ func discoverHistoryGroups(roots []string) map[groupKey][]string {
 		parentMatches, err := filepath.Glob(parentGlob)
 		if err == nil {
 			for _, path := range parentMatches {
+				// Glob matches directories named *.jsonl too; parents must
+				// be regular files (SPEC Discovery).
+				info, statErr := os.Stat(path)
+				if statErr != nil || !info.Mode().IsRegular() {
+					continue
+				}
 				slug := filepath.Base(filepath.Dir(path))
 				sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 				key := groupKey{slug: slug, sessionID: sessionID}

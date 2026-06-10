@@ -587,11 +587,19 @@ static Args parseArgs(const std::vector<std::string> &raw) {
     else if (s == "--context") {
       if (++i >= raw.size())
         throw std::runtime_error("--context needs a value");
-      args.context = (uint32_t)std::stoul(raw[i]);
+      try {
+        args.context = (uint32_t)std::stoul(raw[i]);
+      } catch (...) {
+        throw std::runtime_error("--context: invalid value");
+      }
     } else if (s == "--limit") {
       if (++i >= raw.size())
         throw std::runtime_error("--limit needs a value");
-      args.limit = (uint32_t)std::stoul(raw[i]);
+      try {
+        args.limit = (uint32_t)std::stoul(raw[i]);
+      } catch (...) {
+        throw std::runtime_error("--limit: invalid value");
+      }
     } else if (s == "--count-only")
       args.count_only = true;
     else if (s == "--include-tool-blocks")
@@ -608,7 +616,11 @@ static Args parseArgs(const std::vector<std::string> &raw) {
     } else if (s == "--snippet-chars") {
       if (++i >= raw.size())
         throw std::runtime_error("--snippet-chars needs a value");
-      args.snippet_chars = (uint32_t)std::stoul(raw[i]);
+      try {
+        args.snippet_chars = (uint32_t)std::stoul(raw[i]);
+      } catch (...) {
+        throw std::runtime_error("--snippet-chars: invalid value");
+      }
     } else if (s == "--projects-root") {
       if (++i >= raw.size())
         throw std::runtime_error("--projects-root needs a value");
@@ -616,7 +628,11 @@ static Args parseArgs(const std::vector<std::string> &raw) {
     } else if (s == "--now") {
       if (++i >= raw.size())
         throw std::runtime_error("--now needs a value");
-      now_override = std::stod(raw[i]);
+      try {
+        now_override = std::stod(raw[i]);
+      } catch (...) {
+        throw std::runtime_error("--now: invalid value");
+      }
     } else if (s == "--extra-projects-root") {
       if (++i >= raw.size())
         throw std::runtime_error("--extra-projects-root needs a value");
