@@ -1,7 +1,12 @@
-# claude-walker - agent instructions
+# agent-walker - agent instructions
+
+Renamed from claude-walker when it moved into schoen-lab/satellites
+(2026-06-11). The installed binary, `CLAUDE_WALKER_BINARY` env var, and CLI
+help text keep the `claude-walker` name; only the repo and the MCP server
+registration are `agent-walker`.
 
 A native walker over Claude Code transcript JSONLs. Used by the
-schoen-claude-status status line to answer two questions fast:
+agent-statusline status line to answer two questions fast:
 
 1. **Cost mode** (the bare-flag invocation, default): `walker --period N
    --win-start T [--projects-root P] [--now T]` → trailing + window USD.
@@ -13,7 +18,7 @@ schoen-claude-status status line to answer two questions fast:
 Two auxiliary subcommands round out the tool (not used by the status
 line): `events` (one NDJSON line per assistant turn, feeds the `/spend`
 dashboard) and `search` (full-text transcript search, backs the
-`claude-walker` MCP server).
+`agent-walker` MCP server).
 
 Authoritative contract: `SPEC.md`. Every implementation must match.
 
@@ -208,7 +213,7 @@ act_runner` on llamabox. The runner config option line lives in
 `shared/coverage.py` alongside `TEST-REPORT.md`) and POSTs a Gitea
 commit status. The context MUST be **`pr-crew/coverage`** — that's the
 fleet-wide convention projdash's `pr_crew/coverage_gate.py` strict-
-equals on. Do not rename it to `claude-walker/coverage` or similar —
+equals on. Do not rename it to `agent-walker/coverage` or similar —
 projdash silently filters non-matching contexts and the dashboard
 shows no coverage for the repo. The workflow opts into TLS-skip via
 `GITEA_TLS_INSECURE=1` because Python's urllib doesn't honor the
@@ -264,10 +269,10 @@ removed first, and an existing venv is reused.
 
 ## Remotes
 
-`origin` → GitHub (`git@github.com:mtschoen/claude-walker.git`);
-`gitea` → Gitea (`gitea@llamabox.internal:schoen/claude-walker.git`).
-This is **opposite** of skills-dev's convention. Always `git remote -v`
-before pushing if you arrived here from a skills-dev session — see
+`origin` → Gitea (`gitea@llamabox.sticktoitive.net:schoen/agent-walker.git`)
+is the only configured remote since the move into schoen-lab/satellites.
+The old GitHub mirror (`mtschoen/claude-walker`) is not configured in this
+clone. Always `git remote -v` before pushing - see
 `~/.claude/notes/reference_repo_remote_names.md`.
 
 ## Quality gate: aislop

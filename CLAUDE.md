@@ -1,3 +1,3 @@
-# claude-walker
+# agent-walker
 
 @AGENTS.md

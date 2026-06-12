@@ -589,7 +589,7 @@ cross-machine miss is exactly what an always-present tool closes.
   `error`) at `~/.claude-walker-mcp.log`, mirroring projdash — tail it to trace
   a hang.
 - **Registration:** user-scope via
-  `claude mcp add --scope user claude-walker -- python <repo>/mcp/server.py`,
+  `claude mcp add --scope user agent-walker -- python <repo>/mcp/server.py`,
   so it's available from every cwd. Launched by absolute script path, not
   `python -m mcp`, to avoid colliding with the `mcp` SDK package name.
 

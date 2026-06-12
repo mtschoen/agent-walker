@@ -87,7 +87,7 @@ if errorlevel 1 (
     echo.
     echo Note: 'claude' CLI not on PATH; skipped MCP server registration.
     echo Register later with:
-    echo   claude mcp add claude-walker -s user -- "%VENV_PY%" "%SERVER_PATH%"
+    echo   claude mcp add agent-walker -s user -- "%VENV_PY%" "%SERVER_PATH%"
     goto :eof
 )
 
@@ -110,21 +110,23 @@ if not "!VENV_READY!"=="0" (
 if /I "%MCP_SCOPE%"=="local" (
     pushd "%PROJECT_DIR%"
     claude mcp remove claude-walker -s local >nul 2>&1
-    claude mcp add claude-walker -s local -- "%VENV_PY%" "%SERVER_PATH%"
+    claude mcp remove agent-walker -s local >nul 2>&1
+    claude mcp add agent-walker -s local -- "%VENV_PY%" "%SERVER_PATH%"
     set "MCP_RC=!errorlevel!"
     popd
     if not "!MCP_RC!"=="0" (
         echo warning: MCP registration ^(local scope^) failed for %PROJECT_DIR%
     ) else (
-        echo registered claude-walker MCP server ^(local scope^) for %PROJECT_DIR%
+        echo registered agent-walker MCP server ^(local scope^) for %PROJECT_DIR%
     )
 ) else (
     claude mcp remove claude-walker -s user >nul 2>&1
-    claude mcp add claude-walker -s user -- "%VENV_PY%" "%SERVER_PATH%"
+    claude mcp remove agent-walker -s user >nul 2>&1
+    claude mcp add agent-walker -s user -- "%VENV_PY%" "%SERVER_PATH%"
     if errorlevel 1 (
         echo warning: MCP registration ^(user scope^) failed
     ) else (
-        echo registered claude-walker MCP server ^(user/global scope^)
+        echo registered agent-walker MCP server ^(user/global scope^)
     )
 )
 goto :eof

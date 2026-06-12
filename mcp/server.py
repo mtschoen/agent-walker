@@ -200,9 +200,9 @@ def _run_search(arguments: list[str]) -> dict[str, Any]:
 
 
 def create_mcp_server() -> FastMCP:
-    """Create and return the configured claude-walker MCP server."""
+    """Create and return the configured agent-walker MCP server."""
     server = FastMCP(
-        "claude-walker",
+        "agent-walker",
         instructions=(
             "Search past Claude Code session transcripts across all configured roots, "
             "including cross-machine mounted roots. Use claude_walker_search when the user "

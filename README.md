@@ -1,4 +1,4 @@
-# claude-walker
+# agent-walker (formerly claude-walker)
 
 Native pace-walker for Claude Code session JSONLs, implemented side-by-side
 in **Rust**, **C++**, **Zig**, and **Go** as a language comparison.

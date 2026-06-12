@@ -129,7 +129,7 @@ if ! command -v claude >/dev/null 2>&1; then
     echo
     echo "Note: 'claude' CLI not on PATH; skipped MCP server registration."
     echo "Register later with:"
-    echo "  claude mcp add claude-walker -s user -- \"$venv_py\" \"$server_path\""
+    echo "  claude mcp add agent-walker -s user -- \"$venv_py\" \"$server_path\""
 else
     venv_ready=0
     if ensure_venv; then
@@ -150,15 +150,17 @@ else
     if [[ "$MCP_SCOPE" == "local" ]]; then
         if ( cd "$PROJECT_DIR" \
                 && { claude mcp remove claude-walker -s local >/dev/null 2>&1 || true; } \
-                && claude mcp add claude-walker -s local -- "$venv_py" "$server_path" ); then
-            echo "registered claude-walker MCP server (local scope) for $PROJECT_DIR"
+                && { claude mcp remove agent-walker -s local >/dev/null 2>&1 || true; } \
+                && claude mcp add agent-walker -s local -- "$venv_py" "$server_path" ); then
+            echo "registered agent-walker MCP server (local scope) for $PROJECT_DIR"
         else
             echo "warning: MCP registration (local scope) failed for $PROJECT_DIR" >&2
         fi
     else
         { claude mcp remove claude-walker -s user >/dev/null 2>&1 || true; }
-        if claude mcp add claude-walker -s user -- "$venv_py" "$server_path"; then
-            echo "registered claude-walker MCP server (user/global scope)"
+        { claude mcp remove agent-walker -s user >/dev/null 2>&1 || true; }
+        if claude mcp add agent-walker -s user -- "$venv_py" "$server_path"; then
+            echo "registered agent-walker MCP server (user/global scope)"
         else
             echo "warning: MCP registration (user scope) failed" >&2
         fi
