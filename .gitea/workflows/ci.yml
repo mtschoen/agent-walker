@@ -110,11 +110,6 @@ jobs:
     name: Build + Conformance (Windows)
     runs-on: windows-latest
     timeout-minutes: 45
-    env:
-      # Node-based actions (upload-artifact, cache, etc.) on the
-      # Windows runner can't verify the mkcert root; bypass per
-      # project-ci-setup.md "Self-signed cert" gotcha.
-      NODE_TLS_REJECT_UNAUTHORIZED: '0'
     steps:
       - uses: actions/checkout@v4
 
@@ -375,16 +370,10 @@ jobs:
         # even when the gate fails (state then reflects the read, not the
         # gate verdict — the gate's own status line still goes red).
         #
-        # GITEA_TLS_INSECURE=1: opt into skipping TLS verification on the
-        # POST. The llamabox runner container already runs with
-        # GIT_SSL_NO_VERIFY=true and NODE_TLS_REJECT_UNAUTHORIZED=0 (see
-        # reference_act_runner_llamabox.md) because the mkcert root isn't
-        # in the runner's trust store. Same trade-off, same trusted network.
-        # To do this properly, install the mkcert CA into the runner image
-        # and drop this env var (and the SSL-skip branch in post-coverage-
-        # status.py would become dead code).
+        # The llamabox Gitea instance serves a publicly-trusted Let's Encrypt
+        # cert, so urllib's default verification validates it natively — no
+        # custom CA or TLS-skip env vars needed.
         if: always()
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          GITEA_TLS_INSECURE: "1"
         run: python3 ci/post-coverage-status.py

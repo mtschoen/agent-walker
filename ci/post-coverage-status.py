@@ -9,6 +9,9 @@ Modeled on projdash/ci/post-coverage-status.py — same status-post shape so
 the percent shows up as its own check line on the PR (the workflow job's
 own status line cannot be re-described per-run).
 
+The llamabox Gitea instance serves a publicly-trusted Let's Encrypt cert,
+so urllib's default verification validates it with no custom CA handling.
+
 On any read/parse failure it posts state=error and exits 0 so an
 `if: always()` step does not double-fail the job. A POST/network failure
 DOES raise. Outside CI (no GITHUB_* env), it prints and skips cleanly.
@@ -18,49 +21,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import ssl
 import sys
 import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SUMMARY = ROOT / "coverage" / "summary.json"
-
-
-def _ssl_context() -> ssl.SSLContext:
-    """Build the SSL context for the status POST.
-
-    Default: full verification against the system trust store (the secure
-    path). The bearer token MUST NOT cross an unverified TLS channel —
-    that's exactly the surface a MITM would exploit.
-
-    Two explicit opt-outs for self-signed deployments (e.g. the llamabox
-    Gitea instance with its mkcert cert):
-      - GITEA_CA_BUNDLE=/path/to/root.pem : pin the self-signed root
-      - GITEA_TLS_INSECURE=1              : disable verification entirely
-        (loud warning; only set this if you've already accepted the
-        token-leak risk on a fully-trusted network)
-
-    On the local-ci Linux runner the mounted mkcert CA is exposed via
-    CURL_CA_BUNDLE / NODE_EXTRA_CA_CERTS (#33); those are honored as
-    fallbacks after GITEA_CA_BUNDLE, so the poster verifies in CI with no
-    extra config and never needs GITEA_TLS_INSECURE there.
-    """
-    if os.environ.get("GITEA_TLS_INSECURE") == "1":
-        print("post-coverage-status: WARNING — TLS verification disabled "
-              "(GITEA_TLS_INSECURE=1). Bearer token is being sent over an "
-              "unverified channel.", file=sys.stderr)
-        context = ssl.create_default_context()
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-        return context
-    cafile = (
-        os.environ.get("GITEA_CA_BUNDLE")
-        or os.environ.get("CURL_CA_BUNDLE")
-        or os.environ.get("NODE_EXTRA_CA_CERTS")
-        or None
-    )
-    return ssl.create_default_context(cafile=cafile)
 
 
 def _post(state: str, description: str) -> None:
@@ -83,7 +49,7 @@ def _post(state: str, description: str) -> None:
             "Content-Type": "application/json",
         },
     )
-    urllib.request.urlopen(request, context=_ssl_context()).read()
+    urllib.request.urlopen(request).read()
 
 
 def _description(summary: dict) -> str:
