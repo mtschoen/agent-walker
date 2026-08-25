@@ -246,8 +246,6 @@ fn compute_idle_in_window(events: &[(f64, bool)], lo: f64, hi: f64) -> f64 {
     idle
 }
 
-// === beacons-latest ===
-
 struct LatestArgs {
     session_id: String,
     projects_root: Option<PathBuf>,
@@ -390,8 +388,6 @@ pub fn run_latest(args: &[String]) {
     });
     println!("{}", out);
 }
-
-// === beacons-history ===
 
 struct HistoryArgs {
     period_seconds: u64,

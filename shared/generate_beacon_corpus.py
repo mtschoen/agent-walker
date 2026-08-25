@@ -14,6 +14,7 @@ projects-root with slug subdirs).
 
 Anchored to the same NOW_UNIX as cost mode so test runs are deterministic.
 """
+
 from __future__ import annotations
 
 import json
@@ -55,13 +56,12 @@ def assistant_with_text(unix_ts: float, msg_id: str, text: str) -> dict:
 
 def beacon_text(beacon_json_str: str) -> str:
     """Wrap a JSON string in a fenced beacon block embedded in narration."""
-    return (
-        "Working on it.\n\n"
-        f"<progress-beacon>\n{beacon_json_str}\n</progress-beacon>"
-    )
+    return f"Working on it.\n\n<progress-beacon>\n{beacon_json_str}\n</progress-beacon>"
 
 
-def beacon_json(kind: str, eta: int, summary: str, drift: str | None = "nominal") -> str:
+def beacon_json(
+    kind: str, eta: int, summary: str, drift: str | None = "nominal"
+) -> str:
     """Serialize a beacon. `drift=None` omits the field (post-fix optional form)."""
     obj = {"kind": kind, "eta_seconds": eta, "summary": summary}
     if drift is not None:
@@ -130,66 +130,146 @@ def dirty_ladder_lines(good_entry: dict) -> list:
         '{"type":"assistant","timestamp":',
         "this is not JSON at all",
         json.dumps([1, 2, 3]),
-        {"type": "user", "timestamp": iso(NOW_UNIX - 800),
-         "message": {"role": "user", "content": "hi"}},
-        {"type": "assistant",
-         "message": {"role": "assistant", "id": "no-ts",
-                     "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}},
-        {"type": "assistant", "timestamp": "definitely-not-iso",
-         "message": {"role": "assistant", "id": "bad-ts",
-                     "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}},
-        {"type": "assistant", "timestamp": "2026-05-09 11:00:00.000Z",
-         "message": {"role": "assistant", "id": "space-sep-ts",
-                     "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}},
-        {"type": "assistant", "timestamp": iso(NOW_UNIX - 500),
-         "message": {"role": "user", "id": "role-mismatch",
-                     "model": "claude-opus-4-7", "usage": {"input_tokens": 99}}},
-        b'\xff\xfe invalid utf-8 line',
+        {
+            "type": "user",
+            "timestamp": iso(NOW_UNIX - 800),
+            "message": {"role": "user", "content": "hi"},
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "id": "no-ts",
+                "model": "claude-opus-4-7",
+                "usage": {"input_tokens": 99},
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": "definitely-not-iso",
+            "message": {
+                "role": "assistant",
+                "id": "bad-ts",
+                "model": "claude-opus-4-7",
+                "usage": {"input_tokens": 99},
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-05-09 11:00:00.000Z",
+            "message": {
+                "role": "assistant",
+                "id": "space-sep-ts",
+                "model": "claude-opus-4-7",
+                "usage": {"input_tokens": 99},
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": iso(NOW_UNIX - 500),
+            "message": {
+                "role": "user",
+                "id": "role-mismatch",
+                "model": "claude-opus-4-7",
+                "usage": {"input_tokens": 99},
+            },
+        },
+        b"\xff\xfe invalid utf-8 line",
         '{"\\ud800": "lone surrogate key"}',
-        {"type": "assistant", "timestamp": iso(NOW_UNIX - 480),
-         "message": "not an object"},
-        {"type": "assistant", "timestamp": iso(NOW_UNIX - 470),
-         "message": None},
-        {"type": "assistant", "timestamp": "",
-         "message": {"role": "assistant",
-                     "content": [{"type": "text", "text": "empty ts"}]}},
-        {"type": "assistant", "timestamp": 12345,
-         "message": {"role": "assistant",
-                     "content": [{"type": "text", "text": "numeric ts"}]}},
-        {"type": "assistant", "timestamp": "2026-XX-09TZZ:00:00Z",
-         "message": {"role": "assistant",
-                     "content": [{"type": "text", "text": "long bad iso"}]}},
-        {"type": "assistant", "timestamp": iso(NOW_UNIX - 460),
-         "message": {"role": "assistant", "content": "bare string content"}},
-        {"type": "assistant", "timestamp": iso(NOW_UNIX - 450),
-         "message": {"role": "assistant",
-                     "content": ["bare block", 5,
-                                 {"type": 7, "text": "type not a string"},
-                                 {"type": "text", "text": 9},
-                                 {"text": "typeless block"}]}},
-        {"type": "assistant", "timestamp": iso(NOW_UNIX - 440),
-         "message": {"role": 5,
-                     "content": [{"type": "text", "text": "numeric role"}]}},
-        json.dumps({"type": "assistant", "timestamp": iso(NOW_UNIX - 430),
-                    "message": {"role": "assistant",
-                                "content": [{"type": "text",
-                                             "text": "crlf line, no beacon"}]}}
-                   ) + "\r",
+        {
+            "type": "assistant",
+            "timestamp": iso(NOW_UNIX - 480),
+            "message": "not an object",
+        },
+        {"type": "assistant", "timestamp": iso(NOW_UNIX - 470), "message": None},
+        {
+            "type": "assistant",
+            "timestamp": "",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "empty ts"}],
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": 12345,
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "numeric ts"}],
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-XX-09TZZ:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "long bad iso"}],
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": iso(NOW_UNIX - 460),
+            "message": {"role": "assistant", "content": "bare string content"},
+        },
+        {
+            "type": "assistant",
+            "timestamp": iso(NOW_UNIX - 450),
+            "message": {
+                "role": "assistant",
+                "content": [
+                    "bare block",
+                    5,
+                    {"type": 7, "text": "type not a string"},
+                    {"type": "text", "text": 9},
+                    {"text": "typeless block"},
+                ],
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": iso(NOW_UNIX - 440),
+            "message": {
+                "role": 5,
+                "content": [{"type": "text", "text": "numeric role"}],
+            },
+        },
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": iso(NOW_UNIX - 430),
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "crlf line, no beacon"}],
+                },
+            }
+        )
+        + "\r",
         # Lone-surrogate keys at message and block depth. Strict parsers
         # reject the line; per-key parsers skip the key and find no beacon.
-        ('{"type": "assistant", "timestamp": "%s", "message": '
-         '{"\\ud800": 1, "role": "assistant", "content": '
-         '[{"type": "text", "text": "no beacon, bad msg key"}]}}'
-         % iso(NOW_UNIX - 425)),
-        ('{"type": "assistant", "timestamp": "%s", "message": '
-         '{"role": "assistant", "content": '
-         '[{"\\ud800": 2, "type": "text", "text": "no beacon, bad block key"}]}}'
-         % iso(NOW_UNIX - 420)),
+        (
+            '{"type": "assistant", "timestamp": "%s", "message": '
+            '{"\\ud800": 1, "role": "assistant", "content": '
+            '[{"type": "text", "text": "no beacon, bad msg key"}]}}'
+            % iso(NOW_UNIX - 425)
+        ),
+        (
+            '{"type": "assistant", "timestamp": "%s", "message": '
+            '{"role": "assistant", "content": '
+            '[{"\\ud800": 2, "type": "text", "text": "no beacon, bad block key"}]}}'
+            % iso(NOW_UNIX - 420)
+        ),
         # Two text blocks, both beacon-free: exercises the newline-join arm.
-        {"type": "assistant", "timestamp": iso(NOW_UNIX - 415),
-         "message": {"role": "assistant",
-                     "content": [{"type": "text", "text": "block one"},
-                                 {"type": "text", "text": "block two"}]}},
+        {
+            "type": "assistant",
+            "timestamp": iso(NOW_UNIX - 415),
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "block one"},
+                    {"type": "text", "text": "block two"},
+                ],
+            },
+        },
         good_entry,
     ]
 
@@ -275,8 +355,12 @@ def assistant_tool_use_only(unix_ts: float, msg_id: str) -> dict:
     idle-detection event (the criterion is content presence, not text)."""
     entry = assistant_usage_only(unix_ts, msg_id)
     entry["message"]["content"] = [
-        {"type": "tool_use", "id": "toolu_fixture", "name": "Bash",
-         "input": {"command": "echo hi"}}
+        {
+            "type": "tool_use",
+            "id": "toolu_fixture",
+            "name": "Bash",
+            "input": {"command": "echo hi"},
+        }
     ]
     return entry
 
@@ -296,24 +380,35 @@ def user_entry(unix_ts: float, msg_id: str, content) -> dict:
     }
 
 
-# === Scenarios for `beacons-latest` ===
-
 def scenario_clean_lifecycle():
     """begin -> report -> end. Walker returns the end beacon."""
     sid = "session"
     t1, t2, t3 = NOW_UNIX - 600, NOW_UNIX - 350, NOW_UNIX - 100
     lines = [
-        assistant_with_text(t1, "msg_clean_001",
-            beacon_text(beacon_json("begin", 600, "running tests then committing"))),
-        assistant_with_text(t2, "msg_clean_002",
-            beacon_text(beacon_json("report", 350, "tests in progress"))),
-        assistant_with_text(t3, "msg_clean_003",
-            beacon_text(beacon_json("end", 0, "complete, all green"))),
+        assistant_with_text(
+            t1,
+            "msg_clean_001",
+            beacon_text(beacon_json("begin", 600, "running tests then committing")),
+        ),
+        assistant_with_text(
+            t2,
+            "msg_clean_002",
+            beacon_text(beacon_json("report", 350, "tests in progress")),
+        ),
+        assistant_with_text(
+            t3,
+            "msg_clean_003",
+            beacon_text(beacon_json("end", 0, "complete, all green")),
+        ),
     ]
     expected = {
         "session_id": sid,
-        "beacon": {"kind": "end", "eta_seconds": 0,
-                   "summary": "complete, all green", "drift": "nominal"},
+        "beacon": {
+            "kind": "end",
+            "eta_seconds": 0,
+            "summary": "complete, all green",
+            "drift": "nominal",
+        },
         "emitted_at": t3,
         "age_seconds": NOW_UNIX - t3,
     }
@@ -334,8 +429,12 @@ def scenario_malformed():
     t1 = NOW_UNIX - 300
     bad = '{"kind": "begin", "eta_seconds": 180, "summary": broken}'
     lines = [assistant_with_text(t1, "msg_mal_001", beacon_text(bad))]
-    expected = {"session_id": sid, "beacon": None,
-                "emitted_at": None, "age_seconds": None}
+    expected = {
+        "session_id": sid,
+        "beacon": None,
+        "emitted_at": None,
+        "age_seconds": None,
+    }
     return "malformed", sid, lines, expected
 
 
@@ -348,11 +447,16 @@ def scenario_missing_fields():
     """
     sid = "session"
     t1 = NOW_UNIX - 300
-    incomplete = json.dumps({"kind": "begin", "summary": "no eta field",
-                             "drift": "nominal"})
+    incomplete = json.dumps(
+        {"kind": "begin", "summary": "no eta field", "drift": "nominal"}
+    )
     lines = [assistant_with_text(t1, "msg_miss_001", beacon_text(incomplete))]
-    expected = {"session_id": sid, "beacon": None,
-                "emitted_at": None, "age_seconds": None}
+    expected = {
+        "session_id": sid,
+        "beacon": None,
+        "emitted_at": None,
+        "age_seconds": None,
+    }
     return "missing_fields", sid, lines, expected
 
 
@@ -362,8 +466,11 @@ def scenario_optional_drift():
     sid = "session"
     t1 = NOW_UNIX - 300
     lines = [
-        assistant_with_text(t1, "msg_opt_001",
-            beacon_text(beacon_json("begin", 180, "no drift field", drift=None))),
+        assistant_with_text(
+            t1,
+            "msg_opt_001",
+            beacon_text(beacon_json("begin", 180, "no drift field", drift=None)),
+        ),
     ]
     expected = {
         "session_id": sid,
@@ -384,15 +491,18 @@ def scenario_end_without_eta():
     t1, t2 = NOW_UNIX - 500, NOW_UNIX - 100
     end_no_eta = json.dumps({"kind": "end", "summary": "done, eta omitted"})
     lines = [
-        assistant_with_text(t1, "msg_ene_001",
-            beacon_text(beacon_json("begin", 400, "lifecycle with eta-less end",
-                                    drift=None))),
+        assistant_with_text(
+            t1,
+            "msg_ene_001",
+            beacon_text(
+                beacon_json("begin", 400, "lifecycle with eta-less end", drift=None)
+            ),
+        ),
         assistant_with_text(t2, "msg_ene_002", beacon_text(end_no_eta)),
     ]
     expected = {
         "session_id": sid,
-        "beacon": {"kind": "end", "eta_seconds": 0,
-                   "summary": "done, eta omitted"},
+        "beacon": {"kind": "end", "eta_seconds": 0, "summary": "done, eta omitted"},
         "emitted_at": t2,
         "age_seconds": NOW_UNIX - t2,
     }
@@ -406,8 +516,11 @@ def scenario_report_without_eta():
     t1, t2 = NOW_UNIX - 500, NOW_UNIX - 100
     report_no_eta = json.dumps({"kind": "report", "summary": "no eta report"})
     lines = [
-        assistant_with_text(t1, "msg_rne_001",
-            beacon_text(beacon_json("begin", 400, "valid begin", drift=None))),
+        assistant_with_text(
+            t1,
+            "msg_rne_001",
+            beacon_text(beacon_json("begin", 400, "valid begin", drift=None)),
+        ),
         assistant_with_text(t2, "msg_rne_002", beacon_text(report_no_eta)),
     ]
     expected = {
@@ -425,18 +538,24 @@ def scenario_end_with_bad_eta():
     the kind=end default). The earlier valid begin stays latest."""
     sid = "session"
     t1, t2 = NOW_UNIX - 500, NOW_UNIX - 100
-    bad_end = json.dumps({"kind": "end", "eta_seconds": "soon",
-                          "summary": "bad eta type"})
+    bad_end = json.dumps(
+        {"kind": "end", "eta_seconds": "soon", "summary": "bad eta type"}
+    )
     lines = [
-        assistant_with_text(t1, "msg_ebe_001",
-            beacon_text(beacon_json("begin", 400, "before bad-eta end",
-                                    drift=None))),
+        assistant_with_text(
+            t1,
+            "msg_ebe_001",
+            beacon_text(beacon_json("begin", 400, "before bad-eta end", drift=None)),
+        ),
         assistant_with_text(t2, "msg_ebe_002", beacon_text(bad_end)),
     ]
     expected = {
         "session_id": sid,
-        "beacon": {"kind": "begin", "eta_seconds": 400,
-                   "summary": "before bad-eta end"},
+        "beacon": {
+            "kind": "begin",
+            "eta_seconds": 400,
+            "summary": "before bad-eta end",
+        },
         "emitted_at": t1,
         "age_seconds": NOW_UNIX - t1,
     }
@@ -448,17 +567,24 @@ def scenario_multiple_in_turn():
     sid = "session"
     t1, t2, t3 = NOW_UNIX - 600, NOW_UNIX - 400, NOW_UNIX - 200
     lines = [
-        assistant_with_text(t1, "msg_multi_001",
-            beacon_text(beacon_json("begin", 800, "starting up"))),
-        assistant_with_text(t2, "msg_multi_002",
-            beacon_text(beacon_json("report", 400, "midway"))),
-        assistant_with_text(t3, "msg_multi_003",
-            beacon_text(beacon_json("report", 200, "almost there"))),
+        assistant_with_text(
+            t1, "msg_multi_001", beacon_text(beacon_json("begin", 800, "starting up"))
+        ),
+        assistant_with_text(
+            t2, "msg_multi_002", beacon_text(beacon_json("report", 400, "midway"))
+        ),
+        assistant_with_text(
+            t3, "msg_multi_003", beacon_text(beacon_json("report", 200, "almost there"))
+        ),
     ]
     expected = {
         "session_id": sid,
-        "beacon": {"kind": "report", "eta_seconds": 200,
-                   "summary": "almost there", "drift": "nominal"},
+        "beacon": {
+            "kind": "report",
+            "eta_seconds": 200,
+            "summary": "almost there",
+            "drift": "nominal",
+        },
         "emitted_at": t3,
         "age_seconds": NOW_UNIX - t3,
     }
@@ -480,16 +606,24 @@ def scenario_two_text_blocks():
             "model": "claude-opus-4-7",
             "content": [
                 {"type": "text", "text": "First block narration."},
-                {"type": "text", "text": beacon_text(
-                    beacon_json("report", 120, "beacon in second block"))},
+                {
+                    "type": "text",
+                    "text": beacon_text(
+                        beacon_json("report", 120, "beacon in second block")
+                    ),
+                },
             ],
             "usage": {"input_tokens": 100, "output_tokens": 50},
         },
     }
     expected = {
         "session_id": sid,
-        "beacon": {"kind": "report", "eta_seconds": 120,
-                   "summary": "beacon in second block", "drift": "nominal"},
+        "beacon": {
+            "kind": "report",
+            "eta_seconds": 120,
+            "summary": "beacon in second block",
+            "drift": "nominal",
+        },
         "emitted_at": t1,
         "age_seconds": NOW_UNIX - t1,
     }
@@ -506,25 +640,31 @@ def scenario_wrong_typed_fields():
     bodies = [
         json.dumps({"kind": 5, "eta_seconds": 60, "summary": "kind not str"}),
         json.dumps({"kind": "begin", "eta_seconds": 60, "summary": ["arr"]}),
-        json.dumps({"kind": "begin", "eta_seconds": 60, "summary": "x",
-                    "drift": 9}),
+        json.dumps({"kind": "begin", "eta_seconds": 60, "summary": "x", "drift": 9}),
         json.dumps({"kind": "begin", "eta_seconds": "soon", "summary": "x"}),
         # beats_left, when present, must be an i64 integer: floats, strings,
         # and out-of-range numbers all reject the beacon (decided 2026-06-10,
         # aligning cpp/zig to the rust/go strictness).
-        json.dumps({"kind": "begin", "eta_seconds": 60, "summary": "x",
-                    "beats_left": 5.5}),
-        json.dumps({"kind": "begin", "eta_seconds": 60, "summary": "x",
-                    "beats_left": "soon"}),
-        json.dumps({"kind": "begin", "eta_seconds": 60, "summary": "x",
-                    "beats_left": 1e30}),
+        json.dumps(
+            {"kind": "begin", "eta_seconds": 60, "summary": "x", "beats_left": 5.5}
+        ),
+        json.dumps(
+            {"kind": "begin", "eta_seconds": 60, "summary": "x", "beats_left": "soon"}
+        ),
+        json.dumps(
+            {"kind": "begin", "eta_seconds": 60, "summary": "x", "beats_left": 1e30}
+        ),
     ]
     lines = [
         assistant_with_text(t + 10 * i, f"msg_wt_{i:03d}", beacon_text(body))
         for i, body in enumerate(bodies)
     ]
-    expected = {"session_id": sid, "beacon": None,
-                "emitted_at": None, "age_seconds": None}
+    expected = {
+        "session_id": sid,
+        "beacon": None,
+        "emitted_at": None,
+        "age_seconds": None,
+    }
     return "wrong_typed_fields", sid, lines, expected
 
 
@@ -548,8 +688,12 @@ def scenario_malformed_bodies():
         assistant_with_text(t + 10 * i, f"msg_mb_{i:03d}", beacon_text(body))
         for i, body in enumerate(bodies)
     ]
-    expected = {"session_id": sid, "beacon": None,
-                "emitted_at": None, "age_seconds": None}
+    expected = {
+        "session_id": sid,
+        "beacon": None,
+        "emitted_at": None,
+        "age_seconds": None,
+    }
     return "malformed_bodies", sid, lines, expected
 
 
@@ -559,50 +703,59 @@ def scenario_end_int_eta():
     present-int form must parse, not fall into the absent-or-rejected arms)."""
     sid = "session"
     t1, t2 = NOW_UNIX - 500, NOW_UNIX - 100
-    end_int = json.dumps({"kind": "end", "eta_seconds": 7,
-                          "summary": "int eta on end"})
+    end_int = json.dumps({"kind": "end", "eta_seconds": 7, "summary": "int eta on end"})
     lines = [
-        assistant_with_text(t1, "msg_eie_001",
-            beacon_text(beacon_json("begin", 400, "before int-eta end",
-                                    drift=None))),
+        assistant_with_text(
+            t1,
+            "msg_eie_001",
+            beacon_text(beacon_json("begin", 400, "before int-eta end", drift=None)),
+        ),
         assistant_with_text(t2, "msg_eie_002", beacon_text(end_int)),
     ]
     expected = {
         "session_id": sid,
-        "beacon": {"kind": "end", "eta_seconds": 7,
-                   "summary": "int eta on end"},
+        "beacon": {"kind": "end", "eta_seconds": 7, "summary": "int eta on end"},
         "emitted_at": t2,
         "age_seconds": NOW_UNIX - t2,
     }
     return "end_int_eta", sid, lines, expected
 
 
-# === Scenarios for `beacons-history` ===
-
 def scenario_cross_session_pairs():
     """Two sessions, each one begin+end lifecycle (drift present -> back-compat)."""
     # A: eta=500s, actual=1000s -> ratio 2.0
     a_begin, a_end = NOW_UNIX - 1800, NOW_UNIX - 800
     a_lines = [
-        assistant_with_text(a_begin, "msg_a_001",
-            beacon_text(beacon_json("begin", 500, "session A start"))),
-        assistant_with_text(a_end, "msg_a_002",
-            beacon_text(beacon_json("end", 0, "session A done"))),
+        assistant_with_text(
+            a_begin,
+            "msg_a_001",
+            beacon_text(beacon_json("begin", 500, "session A start")),
+        ),
+        assistant_with_text(
+            a_end, "msg_a_002", beacon_text(beacon_json("end", 0, "session A done"))
+        ),
     ]
     # B: eta=400s, actual=200s -> ratio 0.5
     b_begin, b_end = NOW_UNIX - 600, NOW_UNIX - 400
     b_lines = [
-        assistant_with_text(b_begin, "msg_b_001",
-            beacon_text(beacon_json("begin", 400, "session B start"))),
-        assistant_with_text(b_end, "msg_b_002",
-            beacon_text(beacon_json("end", 0, "session B done"))),
+        assistant_with_text(
+            b_begin,
+            "msg_b_001",
+            beacon_text(beacon_json("begin", 400, "session B start")),
+        ),
+        assistant_with_text(
+            b_end, "msg_b_002", beacon_text(beacon_json("end", 0, "session B done"))
+        ),
     ]
     files = {
         "slug_a/session_a.jsonl": a_lines,
         "slug_b/session_b.jsonl": b_lines,
     }
-    return "cross_session_pairs", files, history_expected(
-        [(500.0, 1000.0), (400.0, 200.0)], session_count=2)
+    return (
+        "cross_session_pairs",
+        files,
+        history_expected([(500.0, 1000.0), (400.0, 200.0)], session_count=2),
+    )
 
 
 def scenario_multi_lifecycle():
@@ -614,50 +767,110 @@ def scenario_multi_lifecycle():
     a0, a1, a2 = NOW_UNIX - 3000, NOW_UNIX - 2940, NOW_UNIX - 2800
     b0, b1, b2 = NOW_UNIX - 1200, NOW_UNIX - 900, NOW_UNIX - 600
     lines = [
-        assistant_with_text(a0, "msg_ml_001", beacon_text(beacon_json("begin", 300, "lifecycle A", drift=None))),
-        assistant_with_text(a1, "msg_ml_002", beacon_text(beacon_json("report", 240, "A midway", drift=None))),
-        assistant_with_text(a2, "msg_ml_003", beacon_text(beacon_json("end", 0, "A done", drift=None))),
-        assistant_with_text(b0, "msg_ml_004", beacon_text(beacon_json("begin", 600, "lifecycle B", drift=None))),
-        assistant_with_text(b1, "msg_ml_005", beacon_text(beacon_json("report", 300, "B midway", drift=None))),
-        assistant_with_text(b2, "msg_ml_006", beacon_text(beacon_json("end", 0, "B done", drift=None))),
+        assistant_with_text(
+            a0,
+            "msg_ml_001",
+            beacon_text(beacon_json("begin", 300, "lifecycle A", drift=None)),
+        ),
+        assistant_with_text(
+            a1,
+            "msg_ml_002",
+            beacon_text(beacon_json("report", 240, "A midway", drift=None)),
+        ),
+        assistant_with_text(
+            a2, "msg_ml_003", beacon_text(beacon_json("end", 0, "A done", drift=None))
+        ),
+        assistant_with_text(
+            b0,
+            "msg_ml_004",
+            beacon_text(beacon_json("begin", 600, "lifecycle B", drift=None)),
+        ),
+        assistant_with_text(
+            b1,
+            "msg_ml_005",
+            beacon_text(beacon_json("report", 300, "B midway", drift=None)),
+        ),
+        assistant_with_text(
+            b2, "msg_ml_006", beacon_text(beacon_json("end", 0, "B done", drift=None))
+        ),
     ]
-    return "multi_lifecycle", {"slug/session.jsonl": lines}, history_expected(
-        [(300.0, 200.0), (600.0, 600.0)], session_count=1)
+    return (
+        "multi_lifecycle",
+        {"slug/session.jsonl": lines},
+        history_expected([(300.0, 200.0), (600.0, 600.0)], session_count=1),
+    )
 
 
 def scenario_orphan_begin():
     """One session with a begin (and report) but no end. No pair emitted."""
     t0, t1 = NOW_UNIX - 1000, NOW_UNIX - 900
     lines = [
-        assistant_with_text(t0, "msg_ob_001", beacon_text(beacon_json("begin", 300, "started, never ended", drift=None))),
-        assistant_with_text(t1, "msg_ob_002", beacon_text(beacon_json("report", 200, "still going", drift=None))),
+        assistant_with_text(
+            t0,
+            "msg_ob_001",
+            beacon_text(beacon_json("begin", 300, "started, never ended", drift=None)),
+        ),
+        assistant_with_text(
+            t1,
+            "msg_ob_002",
+            beacon_text(beacon_json("report", 200, "still going", drift=None)),
+        ),
     ]
-    return "orphan_begin", {"slug/session.jsonl": lines}, history_expected([], session_count=1)
+    return (
+        "orphan_begin",
+        {"slug/session.jsonl": lines},
+        history_expected([], session_count=1),
+    )
 
 
 def scenario_orphan_end():
     """One session with an end but no preceding begin. No pair emitted."""
     t0 = NOW_UNIX - 1000
     lines = [
-        assistant_with_text(t0, "msg_oe_001", beacon_text(beacon_json("end", 0, "ended with no begin", drift=None))),
+        assistant_with_text(
+            t0,
+            "msg_oe_001",
+            beacon_text(beacon_json("end", 0, "ended with no begin", drift=None)),
+        ),
     ]
-    return "orphan_end", {"slug/session.jsonl": lines}, history_expected([], session_count=1)
+    return (
+        "orphan_end",
+        {"slug/session.jsonl": lines},
+        history_expected([], session_count=1),
+    )
 
 
 def scenario_back_to_back():
     """One session: begin, end, begin, end -> two pairs from one group."""
     t0, t1, t2, t3 = NOW_UNIX - 2000, NOW_UNIX - 1900, NOW_UNIX - 1800, NOW_UNIX - 1500
     lines = [
-        assistant_with_text(t0, "msg_bb_001", beacon_text(beacon_json("begin", 100, "first", drift=None))),
-        assistant_with_text(t1, "msg_bb_002", beacon_text(beacon_json("end", 0, "first done", drift=None))),
-        assistant_with_text(t2, "msg_bb_003", beacon_text(beacon_json("begin", 200, "second", drift=None))),
-        assistant_with_text(t3, "msg_bb_004", beacon_text(beacon_json("end", 0, "second done", drift=None))),
+        assistant_with_text(
+            t0,
+            "msg_bb_001",
+            beacon_text(beacon_json("begin", 100, "first", drift=None)),
+        ),
+        assistant_with_text(
+            t1,
+            "msg_bb_002",
+            beacon_text(beacon_json("end", 0, "first done", drift=None)),
+        ),
+        assistant_with_text(
+            t2,
+            "msg_bb_003",
+            beacon_text(beacon_json("begin", 200, "second", drift=None)),
+        ),
+        assistant_with_text(
+            t3,
+            "msg_bb_004",
+            beacon_text(beacon_json("end", 0, "second done", drift=None)),
+        ),
     ]
-    return "back_to_back", {"slug/session.jsonl": lines}, history_expected(
-        [(100.0, 100.0), (200.0, 300.0)], session_count=1)
+    return (
+        "back_to_back",
+        {"slug/session.jsonl": lines},
+        history_expected([(100.0, 100.0), (200.0, 300.0)], session_count=1),
+    )
 
-
-# --- A9 / A10 / A12 / A13 / A14 scenarios for beacons-latest ---------------
 
 def scenario_subagent_latest():
     """A9: walker queries a session_id whose transcript lives in a subagent
@@ -677,8 +890,9 @@ def scenario_subagent_latest():
         assistant_with_text(t1, "msg_sub_p001", "no beacon in the parent"),
     ]
     subagent_lines = [
-        assistant_with_text(t2, "msg_sub_a001",
-            beacon_text(beacon_json("end", 0, "subagent finished"))),
+        assistant_with_text(
+            t2, "msg_sub_a001", beacon_text(beacon_json("end", 0, "subagent finished"))
+        ),
     ]
     files = {
         f"{parent_session}.jsonl": parent_lines,
@@ -686,8 +900,12 @@ def scenario_subagent_latest():
     }
     expected = {
         "session_id": sid,
-        "beacon": {"kind": "end", "eta_seconds": 0,
-                   "summary": "subagent finished", "drift": "nominal"},
+        "beacon": {
+            "kind": "end",
+            "eta_seconds": 0,
+            "summary": "subagent finished",
+            "drift": "nominal",
+        },
         "emitted_at": t2,
         "age_seconds": NOW_UNIX - t2,
     }
@@ -701,19 +919,25 @@ def scenario_int_numeric_forms():
     """
     sid = "session"
     t1 = NOW_UNIX - 200
-    raw_int = json.dumps({
-        "kind": "begin",
-        "eta_seconds": 30,           # int, not float
-        "summary": "int eta",
-        "drift": "nominal",
-        "beats_left": 5,             # int
-    })
+    raw_int = json.dumps(
+        {
+            "kind": "begin",
+            "eta_seconds": 30,  # int, not float
+            "summary": "int eta",
+            "drift": "nominal",
+            "beats_left": 5,  # int
+        }
+    )
     lines = [assistant_with_text(t1, "msg_int_001", beacon_text(raw_int))]
     expected = {
         "session_id": sid,
-        "beacon": {"kind": "begin", "eta_seconds": 30,
-                   "summary": "int eta", "drift": "nominal",
-                   "beats_left": 5},
+        "beacon": {
+            "kind": "begin",
+            "eta_seconds": 30,
+            "summary": "int eta",
+            "drift": "nominal",
+            "beats_left": 5,
+        },
         "emitted_at": t1,
         "age_seconds": NOW_UNIX - t1,
     }
@@ -733,12 +957,18 @@ def scenario_matcher_edges():
     t1, t2 = NOW_UNIX - 300, NOW_UNIX - 200
     # Open tag not followed by `{`: tag present, body is plain text.
     lines = [
-        assistant_with_text(t1, "msg_me_001",
-            "Working... <progress-beacon>oops not JSON</progress-beacon> end"),
+        assistant_with_text(
+            t1,
+            "msg_me_001",
+            "Working... <progress-beacon>oops not JSON</progress-beacon> end",
+        ),
         # `{...}` present with trailing junk before close tag — should not match.
-        assistant_with_text(t2, "msg_me_002",
-            "Working... <progress-beacon>{\"kind\":\"begin\","
-            "\"eta_seconds\":60,\"summary\":\"unterminated\"} <other> end"),
+        assistant_with_text(
+            t2,
+            "msg_me_002",
+            'Working... <progress-beacon>{"kind":"begin",'
+            '"eta_seconds":60,"summary":"unterminated"} <other> end',
+        ),
     ]
     expected = {
         "session_id": sid,
@@ -757,18 +987,24 @@ def scenario_escape_chars_latest():
     t1 = NOW_UNIX - 100
     # Summary with quotes, backslash, and control bytes. Build via dict so
     # json.dumps does the escaping for us (matches what walker will emit).
-    nasty = "quote\"slash\\back\nnewline\ttab\rret\bbs\fff\x01ctl"
-    raw = json.dumps({
-        "kind": "report",
-        "eta_seconds": 42,
-        "summary": nasty,
-        "drift": "nominal",
-    })
+    nasty = 'quote"slash\\back\nnewline\ttab\rret\bbs\fff\x01ctl'
+    raw = json.dumps(
+        {
+            "kind": "report",
+            "eta_seconds": 42,
+            "summary": nasty,
+            "drift": "nominal",
+        }
+    )
     lines = [assistant_with_text(t1, "msg_esc_001", beacon_text(raw))]
     expected = {
         "session_id": sid,
-        "beacon": {"kind": "report", "eta_seconds": 42,
-                   "summary": nasty, "drift": "nominal"},
+        "beacon": {
+            "kind": "report",
+            "eta_seconds": 42,
+            "summary": nasty,
+            "drift": "nominal",
+        },
         "emitted_at": t1,
         "age_seconds": NOW_UNIX - t1,
     }
@@ -789,16 +1025,23 @@ def scenario_dirty_ladder_latest():
     # filtered out by the line filter — except we DO want to exercise the
     # malformed-JSON / blank-line / role-mismatch ladder. Tactic: write the
     # mixed file manually below in main(), keyed by scenario name.
-    return "dirty_ladder_latest", sid, valid_line, {
-        "session_id": sid,
-        "beacon": {"kind": "report", "eta_seconds": 99,
-                   "summary": "after the ladder", "drift": "nominal"},
-        "emitted_at": t1,
-        "age_seconds": NOW_UNIX - t1,
-    }
+    return (
+        "dirty_ladder_latest",
+        sid,
+        valid_line,
+        {
+            "session_id": sid,
+            "beacon": {
+                "kind": "report",
+                "eta_seconds": 99,
+                "summary": "after the ladder",
+                "drift": "nominal",
+            },
+            "emitted_at": t1,
+            "age_seconds": NOW_UNIX - t1,
+        },
+    )
 
-
-# --- A9 / A11 / A13 / A15 scenarios for beacons-history --------------------
 
 def scenario_subagent_history():
     """A9: history mode walks subagent transcripts. Layout (per conformance
@@ -807,16 +1050,25 @@ def scenario_subagent_history():
     """
     begin_ts, end_ts = NOW_UNIX - 1000, NOW_UNIX - 700  # 300s actual; eta=200 → 1.5
     sub_lines = [
-        assistant_with_text(begin_ts, "msg_sah_001",
-            beacon_text(beacon_json("begin", 200, "subagent A start", drift=None))),
-        assistant_with_text(end_ts, "msg_sah_002",
-            beacon_text(beacon_json("end", 0, "subagent A done", drift=None))),
+        assistant_with_text(
+            begin_ts,
+            "msg_sah_001",
+            beacon_text(beacon_json("begin", 200, "subagent A start", drift=None)),
+        ),
+        assistant_with_text(
+            end_ts,
+            "msg_sah_002",
+            beacon_text(beacon_json("end", 0, "subagent A done", drift=None)),
+        ),
     ]
     files = {
         "slug/session/subagents/agent-acompact-x.jsonl": sub_lines,
     }
-    return "subagent_history", files, history_expected(
-        [(200.0, 300.0)], session_count=1)
+    return (
+        "subagent_history",
+        files,
+        history_expected([(200.0, 300.0)], session_count=1),
+    )
 
 
 def scenario_even_pair_count():
@@ -832,18 +1084,39 @@ def scenario_even_pair_count():
     # Pair 4: eta=100, actual=400 → 4.0
     d0, d1 = NOW_UNIX - 2300, NOW_UNIX - 1900
     lines = [
-        assistant_with_text(a0, "msg_ev_a0", beacon_text(beacon_json("begin", 200, "p1", drift=None))),
-        assistant_with_text(a1, "msg_ev_a1", beacon_text(beacon_json("end", 0, "p1 done", drift=None))),
-        assistant_with_text(b0, "msg_ev_b0", beacon_text(beacon_json("begin", 100, "p2", drift=None))),
-        assistant_with_text(b1, "msg_ev_b1", beacon_text(beacon_json("end", 0, "p2 done", drift=None))),
-        assistant_with_text(c0, "msg_ev_c0", beacon_text(beacon_json("begin", 100, "p3", drift=None))),
-        assistant_with_text(c1, "msg_ev_c1", beacon_text(beacon_json("end", 0, "p3 done", drift=None))),
-        assistant_with_text(d0, "msg_ev_d0", beacon_text(beacon_json("begin", 100, "p4", drift=None))),
-        assistant_with_text(d1, "msg_ev_d1", beacon_text(beacon_json("end", 0, "p4 done", drift=None))),
+        assistant_with_text(
+            a0, "msg_ev_a0", beacon_text(beacon_json("begin", 200, "p1", drift=None))
+        ),
+        assistant_with_text(
+            a1, "msg_ev_a1", beacon_text(beacon_json("end", 0, "p1 done", drift=None))
+        ),
+        assistant_with_text(
+            b0, "msg_ev_b0", beacon_text(beacon_json("begin", 100, "p2", drift=None))
+        ),
+        assistant_with_text(
+            b1, "msg_ev_b1", beacon_text(beacon_json("end", 0, "p2 done", drift=None))
+        ),
+        assistant_with_text(
+            c0, "msg_ev_c0", beacon_text(beacon_json("begin", 100, "p3", drift=None))
+        ),
+        assistant_with_text(
+            c1, "msg_ev_c1", beacon_text(beacon_json("end", 0, "p3 done", drift=None))
+        ),
+        assistant_with_text(
+            d0, "msg_ev_d0", beacon_text(beacon_json("begin", 100, "p4", drift=None))
+        ),
+        assistant_with_text(
+            d1, "msg_ev_d1", beacon_text(beacon_json("end", 0, "p4 done", drift=None))
+        ),
     ]
-    return "even_pair_count", {"slug/session.jsonl": lines}, history_expected(
-        [(200.0, 100.0), (100.0, 100.0), (100.0, 200.0), (100.0, 400.0)],
-        session_count=1)
+    return (
+        "even_pair_count",
+        {"slug/session.jsonl": lines},
+        history_expected(
+            [(200.0, 100.0), (100.0, 100.0), (100.0, 200.0), (100.0, 400.0)],
+            session_count=1,
+        ),
+    )
 
 
 def scenario_all_zero_eta():
@@ -854,13 +1127,28 @@ def scenario_all_zero_eta():
     a0, a1 = NOW_UNIX - 2000, NOW_UNIX - 1900
     b0, b1 = NOW_UNIX - 1800, NOW_UNIX - 1700
     lines = [
-        assistant_with_text(a0, "msg_az_a0", beacon_text(beacon_json("begin", 0, "zero-eta a", drift=None))),
-        assistant_with_text(a1, "msg_az_a1", beacon_text(beacon_json("end", 0, "a done", drift=None))),
-        assistant_with_text(b0, "msg_az_b0", beacon_text(beacon_json("begin", 0, "zero-eta b", drift=None))),
-        assistant_with_text(b1, "msg_az_b1", beacon_text(beacon_json("end", 0, "b done", drift=None))),
+        assistant_with_text(
+            a0,
+            "msg_az_a0",
+            beacon_text(beacon_json("begin", 0, "zero-eta a", drift=None)),
+        ),
+        assistant_with_text(
+            a1, "msg_az_a1", beacon_text(beacon_json("end", 0, "a done", drift=None))
+        ),
+        assistant_with_text(
+            b0,
+            "msg_az_b0",
+            beacon_text(beacon_json("begin", 0, "zero-eta b", drift=None)),
+        ),
+        assistant_with_text(
+            b1, "msg_az_b1", beacon_text(beacon_json("end", 0, "b done", drift=None))
+        ),
     ]
-    return "all_zero_eta", {"slug/session.jsonl": lines}, history_expected(
-        [(0.0, 100.0), (0.0, 100.0)], session_count=1)
+    return (
+        "all_zero_eta",
+        {"slug/session.jsonl": lines},
+        history_expected([(0.0, 100.0), (0.0, 100.0)], session_count=1),
+    )
 
 
 def scenario_idle_gap_history():
@@ -891,21 +1179,32 @@ def scenario_idle_gap_history():
     t_mid_3 = NOW_UNIX - 1400
     t1 = NOW_UNIX - 1000
     lines = [
-        assistant_with_text(t0, "msg_idle_begin",
-            beacon_text(beacon_json("begin", 500, "idle gap test", drift=None))),
+        assistant_with_text(
+            t0,
+            "msg_idle_begin",
+            beacon_text(beacon_json("begin", 500, "idle gap test", drift=None)),
+        ),
         assistant_with_text(t_mid_1, "msg_idle_m1", "agent working"),
-        user_entry(t_tool_result, "msg_idle_tool", [
-            {"type": "tool_result", "tool_use_id": "x", "content": "ok"}
-        ]),
+        user_entry(
+            t_tool_result,
+            "msg_idle_tool",
+            [{"type": "tool_result", "tool_use_id": "x", "content": "ok"}],
+        ),
         assistant_with_text(t_mid_2, "msg_idle_m2", "agent continuing after tool"),
         # Real user prompt — gap (t_user - t_mid_2) = 100s should be excluded.
         user_entry(t_user, "msg_idle_user", "real user follow-up"),
         assistant_with_text(t_mid_3, "msg_idle_m3", "agent resuming"),
-        assistant_with_text(t1, "msg_idle_end",
-            beacon_text(beacon_json("end", 0, "idle gap done", drift=None))),
+        assistant_with_text(
+            t1,
+            "msg_idle_end",
+            beacon_text(beacon_json("end", 0, "idle gap done", drift=None)),
+        ),
     ]
-    return "idle_gap_history", {"slug/session.jsonl": lines}, history_expected_with_idle(
-        [(500.0, 1000.0, 100.0)], session_count=1)
+    return (
+        "idle_gap_history",
+        {"slug/session.jsonl": lines},
+        history_expected_with_idle([(500.0, 1000.0, 100.0)], session_count=1),
+    )
 
 
 def scenario_usage_only_idle():
@@ -928,17 +1227,26 @@ def scenario_usage_only_idle():
     t_resume = NOW_UNIX - 2200
     t_end = NOW_UNIX - 2000
     lines = [
-        assistant_with_text(t_begin, "msg_uo_begin",
-            beacon_text(beacon_json("begin", 500, "usage-only idle test", drift=None))),
+        assistant_with_text(
+            t_begin,
+            "msg_uo_begin",
+            beacon_text(beacon_json("begin", 500, "usage-only idle test", drift=None)),
+        ),
         assistant_tool_use_only(t_tool_use, "msg_uo_tool"),
         assistant_usage_only(t_usage, "msg_uo_usage"),
         user_entry(t_user, "msg_uo_user", "real user follow-up"),
         assistant_with_text(t_resume, "msg_uo_resume", "agent resuming"),
-        assistant_with_text(t_end, "msg_uo_end",
-            beacon_text(beacon_json("end", 0, "usage-only idle done", drift=None))),
+        assistant_with_text(
+            t_end,
+            "msg_uo_end",
+            beacon_text(beacon_json("end", 0, "usage-only idle done", drift=None)),
+        ),
     ]
-    return "usage_only_idle", {"slug/session.jsonl": lines}, history_expected_with_idle(
-        [(500.0, 1000.0, 400.0)], session_count=1)
+    return (
+        "usage_only_idle",
+        {"slug/session.jsonl": lines},
+        history_expected_with_idle([(500.0, 1000.0, 400.0)], session_count=1),
+    )
 
 
 def scenario_end_without_eta_history():
@@ -948,13 +1256,18 @@ def scenario_end_without_eta_history():
     t0, t1 = NOW_UNIX - 1500, NOW_UNIX - 1050
     end_no_eta = json.dumps({"kind": "end", "summary": "closing without eta"})
     lines = [
-        assistant_with_text(t0, "msg_eneh_001",
-            beacon_text(beacon_json("begin", 300, "eta-less end pairing",
-                                    drift=None))),
+        assistant_with_text(
+            t0,
+            "msg_eneh_001",
+            beacon_text(beacon_json("begin", 300, "eta-less end pairing", drift=None)),
+        ),
         assistant_with_text(t1, "msg_eneh_002", beacon_text(end_no_eta)),
     ]
-    return "end_without_eta_history", {"slug/session.jsonl": lines}, history_expected(
-        [(300.0, 450.0)], session_count=1)
+    return (
+        "end_without_eta_history",
+        {"slug/session.jsonl": lines},
+        history_expected([(300.0, 450.0)], session_count=1),
+    )
 
 
 def scenario_pre_window_begin():
@@ -965,14 +1278,22 @@ def scenario_pre_window_begin():
     t0 = NOW_UNIX - 700000  # ~8.1 days ago, before the 7-day window
     t1 = NOW_UNIX - 600
     lines = [
-        assistant_with_text(t0, "msg_pwb_001",
-            beacon_text(beacon_json("begin", 300, "pre-window begin",
-                                    drift=None))),
-        assistant_with_text(t1, "msg_pwb_002",
-            beacon_text(beacon_json("end", 0, "in-window end", drift=None))),
+        assistant_with_text(
+            t0,
+            "msg_pwb_001",
+            beacon_text(beacon_json("begin", 300, "pre-window begin", drift=None)),
+        ),
+        assistant_with_text(
+            t1,
+            "msg_pwb_002",
+            beacon_text(beacon_json("end", 0, "in-window end", drift=None)),
+        ),
     ]
-    return "pre_window_begin", {"slug/session.jsonl": lines}, history_expected(
-        [], session_count=1)
+    return (
+        "pre_window_begin",
+        {"slug/session.jsonl": lines},
+        history_expected([], session_count=1),
+    )
 
 
 def scenario_dirty_ladder_history():
@@ -980,22 +1301,29 @@ def scenario_dirty_ladder_history():
     contains one valid begin/end lifecycle. Walker must skip every bad line
     without crashing and emit exactly one pair.
     """
-    t0, t1 = NOW_UNIX - 1200, NOW_UNIX - 900   # eta=300, actual=300 → 1.0
+    t0, t1 = NOW_UNIX - 1200, NOW_UNIX - 900  # eta=300, actual=300 → 1.0
     valid = [
-        assistant_with_text(t0, "msg_dlh_begin",
-            beacon_text(beacon_json("begin", 300, "dirty history begin", drift=None))),
+        assistant_with_text(
+            t0,
+            "msg_dlh_begin",
+            beacon_text(beacon_json("begin", 300, "dirty history begin", drift=None)),
+        ),
         # Tag-matched bodies the history beacon parser must reject
         # mid-lifecycle: invalid JSON inside the braces, and a valid but
         # fieldless object. Neither may disturb the surrounding pair.
-        assistant_with_text(t0 + 10, "msg_dlh_badjson",
-            beacon_text('{"kind": }')),
-        assistant_with_text(t0 + 20, "msg_dlh_empty",
-            beacon_text('{}')),
-        assistant_with_text(t1, "msg_dlh_end",
-            beacon_text(beacon_json("end", 0, "dirty history end", drift=None))),
+        assistant_with_text(t0 + 10, "msg_dlh_badjson", beacon_text('{"kind": }')),
+        assistant_with_text(t0 + 20, "msg_dlh_empty", beacon_text("{}")),
+        assistant_with_text(
+            t1,
+            "msg_dlh_end",
+            beacon_text(beacon_json("end", 0, "dirty history end", drift=None)),
+        ),
     ]
-    return "dirty_ladder_history", {"slug/session.jsonl": valid}, history_expected(
-        [(300.0, 300.0)], session_count=1)
+    return (
+        "dirty_ladder_history",
+        {"slug/session.jsonl": valid},
+        history_expected([(300.0, 300.0)], session_count=1),
+    )
 
 
 LATEST_SCENARIOS = (
@@ -1021,12 +1349,8 @@ LATEST_SCENARIOS = (
 
 # scenario_subagent_latest is multi-file; scenario_dirty_ladder_latest needs
 # raw-line injection. Both are handled out-of-band in main().
-LATEST_SCENARIOS_MULTIFILE = (
-    scenario_subagent_latest,
-)
-LATEST_SCENARIOS_WITH_DIRTY = (
-    scenario_dirty_ladder_latest,
-)
+LATEST_SCENARIOS_MULTIFILE = (scenario_subagent_latest,)
+LATEST_SCENARIOS_WITH_DIRTY = (scenario_dirty_ladder_latest,)
 
 HISTORY_SCENARIOS = (
     scenario_cross_session_pairs,

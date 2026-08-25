@@ -143,8 +143,6 @@ func searchExtractQueueOpText(content json.RawMessage) (string, bool) {
 	return s, true
 }
 
-// === Scan ===
-
 type searchMsg struct {
 	LineNumber       uint32
 	Timestamp        float64
@@ -310,8 +308,6 @@ func searchScanFile(path string, format transcriptFormat, includeQueueOps, inclu
 	}
 	return out
 }
-
-// === Discovery ===
 
 type searchFileInfo struct {
 	Path      string
@@ -513,8 +509,6 @@ func searchReadDirectoryEntries(path string) []os.DirEntry {
 	return entries
 }
 
-// === Snippet ===
-
 func searchNudgeWS(text string, cut int, direction int, maxNudge int) int {
 	if cut <= 0 || cut >= len(text) {
 		return cut
@@ -580,8 +574,6 @@ func searchMakeSnippet(text string, firstMatch [2]uint32, snippetChars uint32) s
 	return text[lo:hi]
 }
 
-// === Context ===
-
 type searchCtx struct {
 	Role      string `json:"role"`
 	Text      string `json:"text"`
@@ -611,8 +603,6 @@ func searchBuildCtx(msgs []searchMsg, hitIdx int, ctxN uint32) ([]searchCtx, []s
 	return before, after
 }
 
-// === Hit ===
-
 type searchHit struct {
 	Timestamp     float64     `json:"-"`
 	TimestampStr  string      `json:"timestamp"`
@@ -627,8 +617,6 @@ type searchHit struct {
 	ContextBefore []searchCtx `json:"context_before"`
 	ContextAfter  []searchCtx `json:"context_after"`
 }
-
-// === Args ===
 
 type searchArgs struct {
 	Pattern              string
@@ -845,8 +833,6 @@ func isSearchNumeric(s string) bool {
 	return true
 }
 
-// === Matching ===
-
 // searchMatcher wraps the compiled regex with an optional fast pre-filter for
 // plain ASCII literal patterns. Go's regexp runs its backtracking engine (with
 // per-rune unicode.SimpleFold for the default case-insensitive search) at every
@@ -947,8 +933,6 @@ func asciiScanFold(text string, lowerPat []byte) (asciiOnly, found bool) {
 	return true, false
 }
 
-// === File processing ===
-
 func searchProcessFile(f searchFileInfo, args searchArgs, matcher searchMatcher) []searchHit {
 	msgs := searchScanFile(f.Path, f.Format, args.IncludeQueueOps, args.IncludeToolBlocks)
 	var hits []searchHit
@@ -1023,8 +1007,6 @@ func searchRoleMatches(filter, role string) bool {
 	return filter == "both" || filter == role
 }
 
-// === Output ===
-
 type searchHitJSON struct {
 	Type          string      `json:"type"`
 	SessionID     string      `json:"session_id"`
@@ -1070,8 +1052,6 @@ func searchTruncateStr(s string, max int) string {
 	}
 	return s[:max] + "…"
 }
-
-// === Top-level ===
 
 func runSearch(argv []string) {
 	started := time.Now()

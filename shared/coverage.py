@@ -27,6 +27,7 @@ Per-language mechanism:
 Usage:
     python shared/coverage.py [rust cpp go zig]   # default: all available
 """
+
 from __future__ import annotations
 
 import json
@@ -56,10 +57,12 @@ ALL_LANGS = ["rust", "cpp", "go", "zig"]
 @dataclass
 class Result:
     lang: str
-    metric: str                       # "lines" | "statements"
+    metric: str  # "lines" | "statements"
     covered: int
     total: int
-    files: list[tuple[str, int, int]] = field(default_factory=list)  # (name, covered, total)
+    files: list[tuple[str, int, int]] = field(
+        default_factory=list
+    )  # (name, covered, total)
     conformance_ok: bool = False
     conformance_passed: int = 0
     conformance_failed: int = 0
@@ -85,11 +88,23 @@ class Result:
 DEFAULT_RUN_TIMEOUT_SECONDS = 1800
 
 
-def run(cmd, *, cwd=None, env=None, check=True, capture=True,
-        timeout=DEFAULT_RUN_TIMEOUT_SECONDS) -> ProcessResult:
+def run(
+    cmd,
+    *,
+    cwd=None,
+    env=None,
+    check=True,
+    capture=True,
+    timeout=DEFAULT_RUN_TIMEOUT_SECONDS,
+) -> ProcessResult:
     assert capture, "coverage.run() only supports capture=True (no caller passes False)"
     return run_captured(
-        cmd, cwd=cwd, env=env, check=check, timeout=timeout, encoding="utf-8",
+        cmd,
+        cwd=cwd,
+        env=env,
+        check=check,
+        timeout=timeout,
+        encoding="utf-8",
     )
 
 
@@ -97,21 +112,29 @@ def run_conformance(lang: str, env: dict) -> tuple[bool, int, int]:
     """Run conformance.py for one language with `env`; return (ok, passed, failed)."""
     proc = run(
         [sys.executable, str(CONFORMANCE), lang],
-        cwd=ROOT, env=env, check=False,
+        cwd=ROOT,
+        env=env,
+        check=False,
     )
     out = proc.stdout + proc.stderr
     passed = out.count(" OK ") + out.count(" OK\n")
     failed = sum(out.count(tok) for tok in ("FAIL", "MISMATCH"))
     ok = proc.returncode == 0
     if not ok:
-        sys.stderr.write(f"\n[coverage] conformance({lang}) FAILED (exit {proc.returncode}):\n")
+        sys.stderr.write(
+            f"\n[coverage] conformance({lang}) FAILED (exit {proc.returncode}):\n"
+        )
         sys.stderr.write("\n".join(out.splitlines()[-25:]) + "\n")
     return ok, passed, failed
 
 
 def git_describe() -> tuple[str, str]:
-    short = run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, check=False).stdout.strip()
-    branch = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ROOT, check=False).stdout.strip()
+    short = run(
+        ["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, check=False
+    ).stdout.strip()
+    branch = run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ROOT, check=False
+    ).stdout.strip()
     return short or "unknown", branch or "unknown"
 
 
@@ -159,9 +182,11 @@ def _rust_test_module_starts() -> dict[str, int]:
     return starts
 
 
-def _accumulate_region_lines(export_json: str,
-                             per_file_lines: dict[str, dict[int, bool]],
-                             exclude: str | None = None) -> None:
+def _accumulate_region_lines(
+    export_json: str,
+    per_file_lines: dict[str, dict[int, bool]],
+    exclude: str | None = None,
+) -> None:
     """Fold one `llvm-cov export` blob's per-function region detail into a
     {filename -> {line -> covered}} map with OR semantics: if any region from
     any export covers a line, the line is covered. Used to union coverage
@@ -169,6 +194,7 @@ def _accumulate_region_lines(export_json: str,
     multi-object report treats each binary's copy of a function as a separate
     instantiation, which misreports lines missed in only one copy)."""
     import re as _re
+
     exclude_re = _re.compile(exclude) if exclude else None
     data = json.loads(export_json)
     block = data["data"][0]
@@ -193,8 +219,9 @@ def _accumulate_region_lines(export_json: str,
                 lines[ln] = lines.get(ln, False) or covered
 
 
-def _summarize_lines(per_file_lines: dict[str, dict[int, bool]],
-                     cutoffs: dict[str, int] | None = None) -> tuple[int, int, list[tuple[str, int, int]]]:
+def _summarize_lines(
+    per_file_lines: dict[str, dict[int, bool]], cutoffs: dict[str, int] | None = None
+) -> tuple[int, int, list[tuple[str, int, int]]]:
     """Reduce a line map to (covered, total, per-file rows), optionally
     dropping lines at/after a per-file cutoff (the rust #[cfg(test)] marker)."""
     total = 0
@@ -218,7 +245,9 @@ def _summarize_lines(per_file_lines: dict[str, dict[int, bool]],
     return covered_count, total, files
 
 
-def _llvm_lines_excluding_tests(export_json: str, test_starts: dict[str, int]) -> tuple[int, int, list[tuple[str, int, int]]]:
+def _llvm_lines_excluding_tests(
+    export_json: str, test_starts: dict[str, int]
+) -> tuple[int, int, list[tuple[str, int, int]]]:
     """Line summary from full region detail, excluding line ranges at or
     beyond each file's #[cfg(test)] marker so test-module instrumentation is
     removed from both numerator and denominator."""
@@ -237,7 +266,7 @@ def _rust_env() -> dict:
         line = line.strip()
         if not line.startswith("export ") or "=" not in line:
             continue
-        key, value = line[len("export "):].split("=", 1)
+        key, value = line[len("export ") :].split("=", 1)
         env[key.strip()] = value.strip().strip("'\"")
     # The release profile strips symbols and uses fat LTO; both corrupt coverage
     # mapping. Override via env so we never have to touch Cargo.toml.
@@ -253,7 +282,13 @@ def cov_rust() -> Result | None:
     if not _have(_CARGO) or not (RUST_DIR / "Cargo.toml").exists():
         return None
     if run([_CARGO, "llvm-cov", "--version"], check=False).returncode != 0:
-        return Result("rust", "lines", 0, 0, note="cargo-llvm-cov not installed (cargo install cargo-llvm-cov)")
+        return Result(
+            "rust",
+            "lines",
+            0,
+            0,
+            note="cargo-llvm-cov not installed (cargo install cargo-llvm-cov)",
+        )
     print("[coverage] rust: build instrumented + run conformance + cargo test …")
     env = _rust_env()
     run([_CARGO, "llvm-cov", "clean", "--workspace"], cwd=RUST_DIR, env=env)
@@ -264,8 +299,12 @@ def cov_rust() -> Result | None:
     # so the unit-test runs merge into the same coverage report. A failing
     # unit test MUST fail the gate (a silent check=False here once masked
     # two broken tests).
-    test_proc = run([_CARGO, "test", "--release", "--no-fail-fast"],
-                    cwd=RUST_DIR, env=env, check=False)
+    test_proc = run(
+        [_CARGO, "test", "--release", "--no-fail-fast"],
+        cwd=RUST_DIR,
+        env=env,
+        check=False,
+    )
     if test_proc.returncode != 0:
         ok = False
         failed += 1
@@ -279,7 +318,8 @@ def cov_rust() -> Result | None:
     # test-only code, distorting the metric.
     export_json = run(
         [_CARGO, "llvm-cov", "report", "--release", "--json"],
-        cwd=RUST_DIR, env=env,
+        cwd=RUST_DIR,
+        env=env,
     ).stdout
     test_starts = _rust_test_module_starts()
     covered, total, files = _llvm_lines_excluding_tests(export_json, test_starts)
@@ -290,8 +330,15 @@ def cov_rust() -> Result | None:
 # C++ — clang source-based coverage
 # --------------------------------------------------------------------------- #
 def cov_cpp() -> Result | None:
-    if not (_have("clang++") and _have("llvm-profdata") and _have("llvm-cov") and _have("cmake")):
-        return Result("cpp", "lines", 0, 0, note="need clang++, cmake, llvm-profdata, llvm-cov")
+    if not (
+        _have("clang++")
+        and _have("llvm-profdata")
+        and _have("llvm-cov")
+        and _have("cmake")
+    ):
+        return Result(
+            "cpp", "lines", 0, 0, note="need clang++, cmake, llvm-profdata, llvm-cov"
+        )
     print("[coverage] cpp: configure WALKER_COVERAGE build + run conformance …")
     build = CPP_DIR / "build-cov"
     profraw_dir = build / "profraw"
@@ -300,8 +347,13 @@ def cov_cpp() -> Result | None:
         stale.unlink()
     cfg_env = dict(os.environ, CC="clang", CXX="clang++")
     cmake_args = [
-        "cmake", "-S", str(CPP_DIR), "-B", str(build),
-        "-DCMAKE_BUILD_TYPE=Debug", "-DWALKER_COVERAGE=ON",
+        "cmake",
+        "-S",
+        str(CPP_DIR),
+        "-B",
+        str(build),
+        "-DCMAKE_BUILD_TYPE=Debug",
+        "-DWALKER_COVERAGE=ON",
         "-DWALKER_BUILD_TESTS=ON",
     ]
     # Reuse already-fetched simdjson if a normal build tree has it.
@@ -338,13 +390,16 @@ def cov_cpp() -> Result | None:
     # missed even when the other copy ran it.
     per_file_lines: dict[str, dict[int, bool]] = {}
     for obj in (binary, test_binary):
-        export_json = run([
-            "llvm-cov", "export", str(obj),
-            f"-instr-profile={profdata}",
-            "-ignore-filename-regex=_deps/|tests/",
-        ]).stdout
-        _accumulate_region_lines(export_json, per_file_lines,
-                                 exclude=r"_deps/|/tests/")
+        export_json = run(
+            [
+                "llvm-cov",
+                "export",
+                str(obj),
+                f"-instr-profile={profdata}",
+                "-ignore-filename-regex=_deps/|tests/",
+            ]
+        ).stdout
+        _accumulate_region_lines(export_json, per_file_lines, exclude=r"_deps/|/tests/")
     covered, total, files = _summarize_lines(per_file_lines)
     return Result("cpp", "lines", covered, total, files, ok, passed, failed)
 
@@ -371,9 +426,18 @@ def cov_go() -> Result | None:
         shutil.rmtree(unitdir)
     unitdir.mkdir()
     test_proc = run(
-        ["go", "test", "-count=1", "-cover", "./...",
-         "-args", f"-test.gocoverdir={unitdir}"],
-        cwd=GO_DIR, env=env, check=False,
+        [
+            "go",
+            "test",
+            "-count=1",
+            "-cover",
+            "./...",
+            "-args",
+            f"-test.gocoverdir={unitdir}",
+        ],
+        cwd=GO_DIR,
+        env=env,
+        check=False,
     )
     if test_proc.returncode != 0:
         ok = False
@@ -385,7 +449,10 @@ def cov_go() -> Result | None:
     # Merge integration + unit coverage by passing both dirs to textfmt.
     txt = GO_DIR / "go-cov.txt"
     merged_input = f"{covdir},{unitdir}" if any(unitdir.iterdir()) else str(covdir)
-    run(["go", "tool", "covdata", "textfmt", f"-i={merged_input}", f"-o={txt}"], cwd=GO_DIR)
+    run(
+        ["go", "tool", "covdata", "textfmt", f"-i={merged_input}", f"-o={txt}"],
+        cwd=GO_DIR,
+    )
     covered, total, per_file = _go_counts(txt)
     files = sorted((Path(f).name, c, t) for f, (c, t) in per_file.items())
     return Result("go", "statements", covered, total, files, ok, passed, failed)
@@ -419,8 +486,13 @@ def cov_zig() -> Result | None:
         return None
     kcov = find_kcov()
     if not kcov:
-        return Result("zig", "lines", 0, 0,
-                      note="no DWARF5-capable kcov found (build SimonKagstrom/kcov master; set $KCOV)")
+        return Result(
+            "zig",
+            "lines",
+            0,
+            0,
+            note="no DWARF5-capable kcov found (build SimonKagstrom/kcov master; set $KCOV)",
+        )
     print("[coverage] zig: LLVM-backend build + run conformance under kcov …")
     for stale in (ZIG_DIR / ".zig-cache", ZIG_DIR / "zig-out"):
         if stale.exists():
@@ -456,9 +528,16 @@ def cov_zig() -> Result | None:
         run([kcov, "--merge", str(kcov_out), *run_dirs])
     cov_json = _find_kcov_json(kcov_out)
     if not cov_json:
-        return Result("zig", "lines", 0, 0, conformance_ok=ok,
-                      conformance_passed=passed, conformance_failed=failed,
-                      note="kcov produced no coverage.json")
+        return Result(
+            "zig",
+            "lines",
+            0,
+            0,
+            conformance_ok=ok,
+            conformance_passed=passed,
+            conformance_failed=failed,
+            note="kcov produced no coverage.json",
+        )
     data = json.loads(cov_json.read_text())
     covered = int(data["covered_lines"])
     total = int(data["total_lines"])
@@ -479,7 +558,9 @@ def _find_kcov_json(outdir: Path) -> Path | None:
         except Exception:
             continue
         if int(data.get("total_lines", 0)) > 0:
-            if best is None or int(data["total_lines"]) >= int(json.loads(best.read_text())["total_lines"]):
+            if best is None or int(data["total_lines"]) >= int(
+                json.loads(best.read_text())["total_lines"]
+            ):
                 best = path
     return best
 
@@ -516,13 +597,17 @@ def write_summary_json(results: list[Result]) -> None:
         "cumulative_total": cum_tot,
         "measured_impls": len(measured),
         "per_impl": [
-            {"lang": r.lang, "metric": r.metric, "percent": round(r.percent, 2),
-             "covered": r.covered, "total": r.total}
-            for r in results if r.total > 0
+            {
+                "lang": r.lang,
+                "metric": r.metric,
+                "percent": round(r.percent, 2),
+                "covered": r.covered,
+                "total": r.total,
+            }
+            for r in results
+            if r.total > 0
         ],
-        "skipped": [
-            {"lang": r.lang, "note": r.note} for r in results if r.total == 0
-        ],
+        "skipped": [{"lang": r.lang, "note": r.note} for r in results if r.total == 0],
     }
     SUMMARY.write_text(json.dumps(payload, indent=2) + "\n")
     print(f"[coverage] wrote {SUMMARY}")
@@ -540,19 +625,29 @@ def write_report(results: list[Result]) -> None:
     lines.append(f"agent-walker test report — {ts}")
     lines.append("=" * 60)
     lines.append("")
-    lines.append(f"Status:       {'PASS' if all_100 else 'BASELINE'} "
-                 f"({'100% all impls' if all_100 else 'Phase 4 baseline-gated — CI rejects regression vs ci.yml thresholds'})")
-    lines.append(f"Conformance:  {'PASS' if conformance_ok else 'FAIL'} ({total_tests} checks across measured impls)")
+    lines.append(
+        f"Status:       {'PASS' if all_100 else 'BASELINE'} "
+        f"({'100% all impls' if all_100 else 'Phase 4 baseline-gated — CI rejects regression vs ci.yml thresholds'})"
+    )
+    lines.append(
+        f"Conformance:  {'PASS' if conformance_ok else 'FAIL'} ({total_tests} checks across measured impls)"
+    )
     if measured:
         cum_pct, cum_cov, cum_tot = cumulative_percent(measured)
-        lines.append(f"Cumulative:   {cum_pct:.2f}% line/statement coverage "
-                     f"({cum_cov}/{cum_tot} pooled across {len(measured)} impls)")
+        lines.append(
+            f"Cumulative:   {cum_pct:.2f}% line/statement coverage "
+            f"({cum_cov}/{cum_tot} pooled across {len(measured)} impls)"
+        )
     lines.append(f"Git:          {short} ({branch})")
-    lines.append(f"Target:       100% line/statement coverage in all four implementations")
+    lines.append(
+        f"Target:       100% line/statement coverage in all four implementations"
+    )
     lines.append("")
     lines.append("Per-implementation coverage")
     lines.append("-" * 60)
-    lines.append(f"{'impl':<6} {'metric':<11} {'covered/total':>16} {'cover':>8}   conformance")
+    lines.append(
+        f"{'impl':<6} {'metric':<11} {'covered/total':>16} {'cover':>8}   conformance"
+    )
     for r in results:
         if r.note and r.total == 0:
             lines.append(f"{r.lang:<6} {'—':<11} {'(skipped)':>16} {'—':>8}   {r.note}")
@@ -566,7 +661,9 @@ def write_report(results: list[Result]) -> None:
     for r in results:
         if r.total == 0:
             continue
-        lines.append(f"### {r.lang} — {r.percent:.2f}% ({r.uncovered} {r.metric} uncovered)")
+        lines.append(
+            f"### {r.lang} — {r.percent:.2f}% ({r.uncovered} {r.metric} uncovered)"
+        )
         for name, c, t in r.files:
             pct = 100.0 * c / t if t else 0.0
             flag = "" if c == t else f"   <-- {t - c} uncovered"
@@ -630,18 +727,24 @@ def main() -> int:
         if r is not None:
             results.append(r)
             if r.total:
-                print(f"[coverage] {lang}: {r.percent:.2f}% ({r.covered}/{r.total} {r.metric})")
+                print(
+                    f"[coverage] {lang}: {r.percent:.2f}% ({r.covered}/{r.total} {r.metric})"
+                )
 
     print("\n" + "=" * 60)
     for r in results:
         if r.total:
-            print(f"  {r.lang:<6} {r.percent:6.2f}%  ({r.covered}/{r.total} {r.metric})")
+            print(
+                f"  {r.lang:<6} {r.percent:6.2f}%  ({r.covered}/{r.total} {r.metric})"
+            )
         else:
             print(f"  {r.lang:<6}  skipped — {r.note}")
     measured = [r for r in results if r.total > 0]
     if measured:
         cum_pct, cum_cov, cum_tot = cumulative_percent(measured)
-        print(f"  {'cum.':<6} {cum_pct:6.2f}%  ({cum_cov}/{cum_tot} pooled across {len(measured)} impls)")
+        print(
+            f"  {'cum.':<6} {cum_pct:6.2f}%  ({cum_cov}/{cum_tot} pooled across {len(measured)} impls)"
+        )
     print("=" * 60)
 
     write_report(results)
@@ -652,8 +755,10 @@ def main() -> int:
     # returned 0 with "cargo test FAILED" sitting in the log.
     failing = [r.lang for r in measured if not r.conformance_ok]
     if failing:
-        print(f"\n[coverage] GATE FAILED: conformance or native tests failed "
-              f"for: {', '.join(failing)}")
+        print(
+            f"\n[coverage] GATE FAILED: conformance or native tests failed "
+            f"for: {', '.join(failing)}"
+        )
         return 1
 
     if baseline:
@@ -676,17 +781,23 @@ def main() -> int:
             print("\n[coverage] BASELINE GATE FAILED:")
             for lang in missing:
                 note = next((r.note for r in results if r.lang == lang), "")
-                print(f"  {lang}: no coverage result (gate requires {baseline[lang]:.2f}%) — {note}")
+                print(
+                    f"  {lang}: no coverage result (gate requires {baseline[lang]:.2f}%) — {note}"
+                )
             for lang, got, want in regressions:
                 print(f"  {lang}: {got:.4f}% < baseline {want:.2f}%")
             if measured:
                 cum_pct, cum_cov, cum_tot = cumulative_percent(measured)
-                print(f"[coverage] cumulative: {cum_pct:.2f}% line/statement coverage "
-                      f"({cum_cov}/{cum_tot} pooled across {len(measured)} impls)")
+                print(
+                    f"[coverage] cumulative: {cum_pct:.2f}% line/statement coverage "
+                    f"({cum_cov}/{cum_tot} pooled across {len(measured)} impls)"
+                )
             return 1
         cum_pct, cum_cov, cum_tot = cumulative_percent(measured)
-        print(f"\n[coverage] all impls at or above documented baseline "
-              f"(cumulative {cum_pct:.2f}% — {cum_cov}/{cum_tot} pooled across {len(measured)} impls).")
+        print(
+            f"\n[coverage] all impls at or above documented baseline "
+            f"(cumulative {cum_pct:.2f}% — {cum_cov}/{cum_tot} pooled across {len(measured)} impls)."
+        )
         return 0
 
     all_100 = bool(measured) and all(r.covered == r.total for r in measured)

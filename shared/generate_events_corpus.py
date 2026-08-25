@@ -9,6 +9,7 @@ Each fixture is a JSONL file (or directory of files) under
 records the `events` subcommand must emit for each fixture.
 Languages must reproduce these values to within $0.01 per turn.
 """
+
 from __future__ import annotations
 
 import json
@@ -25,10 +26,6 @@ PIN_NOW = 1_747_900_000.0
 PIN_PERIOD = 86_400
 PIN_WIN_START = PIN_NOW - PIN_PERIOD  # == now - period (default win_start)
 
-
-# ---------------------------------------------------------------------------
-# Pricing — must match SPEC.md §Pricing exactly.
-# ---------------------------------------------------------------------------
 
 RATES = {
     "opus": (5.0, 25.0),
@@ -47,9 +44,14 @@ def _rates_for(model_id: str) -> tuple[float, float]:
     return RATES["sonnet"]
 
 
-def cost(model: str, in_tok: int, out_tok: int,
-         cache_read: int = 0, cache_write: int = 0,
-         web_search_requests: int = 0) -> float:
+def cost(
+    model: str,
+    in_tok: int,
+    out_tok: int,
+    cache_read: int = 0,
+    cache_write: int = 0,
+    web_search_requests: int = 0,
+) -> float:
     """Compute USD cost for one assistant turn per SPEC.md §Pricing."""
     input_rate, output_rate = _rates_for(model)
     token_cost = (
@@ -61,10 +63,6 @@ def cost(model: str, in_tok: int, out_tok: int,
     return token_cost + web_search_requests * WEB_SEARCH_COST_USD
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def iso_z(unix: float) -> str:
     """Format Unix epoch as ISO 8601 UTC string with .000Z suffix."""
     return datetime.fromtimestamp(unix, tz=timezone.utc).strftime(
@@ -72,10 +70,16 @@ def iso_z(unix: float) -> str:
     )
 
 
-def turn(message_id: str, ts: float, model: str,
-         in_tok: int, out_tok: int,
-         cache_read: int = 0, cache_write: int = 0,
-         web_search_requests: int = 0) -> dict:
+def turn(
+    message_id: str,
+    ts: float,
+    model: str,
+    in_tok: int,
+    out_tok: int,
+    cache_read: int = 0,
+    cache_write: int = 0,
+    web_search_requests: int = 0,
+) -> dict:
     """Build an assistant-turn dict matching the JSONL schema."""
     usage: dict = {
         "input_tokens": in_tok,
@@ -97,8 +101,9 @@ def turn(message_id: str, ts: float, model: str,
     }
 
 
-def write_fixture(name: str, slug: str, session_id: str,
-                  lines: "Sequence[dict | str | bytes]") -> None:
+def write_fixture(
+    name: str, slug: str, session_id: str, lines: "Sequence[dict | str | bytes]"
+) -> None:
     """Write a fixture JSONL file at corpus/events/<name>/<slug>/<session_id>.jsonl.
 
     Dicts are json-dumped, raw strings written verbatim, raw bytes as-is
@@ -145,10 +150,6 @@ def expected_record(turn_dict: dict, slug: str, session_id: str) -> dict:
         "slug": slug,
     }
 
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
 
 # Convenient time anchor: 60 seconds before now, well inside the window.
 _IN_WINDOW = PIN_NOW - 60
@@ -208,9 +209,15 @@ def fixture_05_cache_mix():
     name = "05-cache-mix"
     slug = "project-epsilon"
     session_id = "sess-005"
-    t = turn("msg-005", _IN_WINDOW, "claude-sonnet-4-6",
-             in_tok=1000, out_tok=200,
-             cache_read=10000, cache_write=200)
+    t = turn(
+        "msg-005",
+        _IN_WINDOW,
+        "claude-sonnet-4-6",
+        in_tok=1000,
+        out_tok=200,
+        cache_read=10000,
+        cache_write=200,
+    )
     write_fixture(name, slug, session_id, [t])
     return name, [expected_record(t, slug, session_id)]
 
@@ -240,8 +247,14 @@ def fixture_07_web_search():
     name = "07-web-search"
     slug = "project-eta"
     session_id = "sess-007"
-    t = turn("msg-007", _IN_WINDOW, "claude-opus-4-7",
-             in_tok=1000, out_tok=500, web_search_requests=4)
+    t = turn(
+        "msg-007",
+        _IN_WINDOW,
+        "claude-opus-4-7",
+        in_tok=1000,
+        out_tok=500,
+        web_search_requests=4,
+    )
     write_fixture(name, slug, session_id, [t])
     return name, [expected_record(t, slug, session_id)]
 
@@ -261,32 +274,62 @@ def fixture_08_dirty_ladder():
         '{"type":"assistant","timestamp":',
         "this is not JSON at all",
         json.dumps([1, 2, 3]),
-        json.dumps({
-            "type": "user", "timestamp": iso_z(_IN_WINDOW),
-            "message": {"role": "user", "content": "hi"},
-        }),
-        json.dumps({
-            "type": "assistant",
-            "message": {"role": "assistant", "id": "no-ts-events",
-                        "model": "claude-opus-4-7", "usage": {"input_tokens": 99}},
-        }),
-        json.dumps({
-            "type": "assistant", "timestamp": "definitely-not-iso",
-            "message": {"role": "assistant", "id": "bad-ts-events",
-                        "model": "claude-opus-4-7", "usage": {"input_tokens": 99}},
-        }),
-        json.dumps({
-            # Space in place of the ISO 'T' separator: rejected everywhere
-            # (decided 2026-06-10; rust/cpp previously accepted it).
-            "type": "assistant", "timestamp": "2026-05-09 11:00:00.000Z",
-            "message": {"role": "assistant", "id": "space-sep-ts-events",
-                        "model": "claude-opus-4-7", "usage": {"input_tokens": 99}},
-        }),
-        json.dumps({
-            "type": "assistant", "timestamp": iso_z(_IN_WINDOW),
-            "message": {"role": "user", "id": "role-mismatch-events",
-                        "model": "claude-opus-4-7", "usage": {"input_tokens": 99}},
-        }),
+        json.dumps(
+            {
+                "type": "user",
+                "timestamp": iso_z(_IN_WINDOW),
+                "message": {"role": "user", "content": "hi"},
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "id": "no-ts-events",
+                    "model": "claude-opus-4-7",
+                    "usage": {"input_tokens": 99},
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "definitely-not-iso",
+                "message": {
+                    "role": "assistant",
+                    "id": "bad-ts-events",
+                    "model": "claude-opus-4-7",
+                    "usage": {"input_tokens": 99},
+                },
+            }
+        ),
+        json.dumps(
+            {
+                # Space in place of the ISO 'T' separator: rejected everywhere
+                # (decided 2026-06-10; rust/cpp previously accepted it).
+                "type": "assistant",
+                "timestamp": "2026-05-09 11:00:00.000Z",
+                "message": {
+                    "role": "assistant",
+                    "id": "space-sep-ts-events",
+                    "model": "claude-opus-4-7",
+                    "usage": {"input_tokens": 99},
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": iso_z(_IN_WINDOW),
+                "message": {
+                    "role": "user",
+                    "id": "role-mismatch-events",
+                    "model": "claude-opus-4-7",
+                    "usage": {"input_tokens": 99},
+                },
+            }
+        ),
         good,
     ]
     write_fixture(name, slug, session_id, lines)
@@ -333,8 +376,7 @@ def fixture_10_escape_chars():
     # `\ " : < > | ? *`). The escape-output code path is exercised by the
     # `nasty_model` field below, which sees the same JSON writer.
     session_id = "sess-010-escape-chars"
-    nasty_model = ("claude-sonnet-quote\"backslash\\newline\ntab\t"
-                   "bs\bff\fcr\rctl\x01")
+    nasty_model = 'claude-sonnet-quote"backslash\\newline\ntab\tbs\bff\fcr\rctl\x01'
     t = turn("msg-010", _IN_WINDOW, nasty_model, 1000, 100)
     write_fixture(name, slug, session_id, [t])
     return name, [expected_record(t, slug, session_id)]
@@ -349,6 +391,7 @@ def fixture_11_iso_variants():
     slug = "project-lambda"
     session_id = "sess-011"
     from datetime import timedelta
+
     fresh_utc = datetime.fromtimestamp(_IN_WINDOW, tz=timezone.utc)
     offset = timedelta(hours=5, minutes=30)
     local = fresh_utc + offset
@@ -356,26 +399,44 @@ def fixture_11_iso_variants():
     iso_frac = fresh_utc.strftime("%Y-%m-%dT%H:%M:%S.123456Z")
     # Build turns by hand to control the timestamp string format exactly.
     t_offset = {
-        "type": "assistant", "timestamp": iso_offset,
-        "message": {"id": "msg-011-offset", "role": "assistant",
-                    "model": "claude-opus-4-7",
-                    "usage": {"input_tokens": 1000, "output_tokens": 500,
-                              "cache_read_input_tokens": 0,
-                              "cache_creation_input_tokens": 0}},
+        "type": "assistant",
+        "timestamp": iso_offset,
+        "message": {
+            "id": "msg-011-offset",
+            "role": "assistant",
+            "model": "claude-opus-4-7",
+            "usage": {
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            },
+        },
     }
     t_frac = {
-        "type": "assistant", "timestamp": iso_frac,
-        "message": {"id": "msg-011-frac", "role": "assistant",
-                    "model": "claude-sonnet-4-6",
-                    "usage": {"input_tokens": 500, "output_tokens": 100,
-                              "cache_read_input_tokens": 0,
-                              "cache_creation_input_tokens": 0}},
+        "type": "assistant",
+        "timestamp": iso_frac,
+        "message": {
+            "id": "msg-011-frac",
+            "role": "assistant",
+            "model": "claude-sonnet-4-6",
+            "usage": {
+                "input_tokens": 500,
+                "output_tokens": 100,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+            },
+        },
     }
     t_malformed = {
-        "type": "assistant", "timestamp": "2026-13-99T99:99:99Z",
-        "message": {"id": "msg-011-malformed", "role": "assistant",
-                    "model": "claude-opus-4-7",
-                    "usage": {"input_tokens": 999999}},
+        "type": "assistant",
+        "timestamp": "2026-13-99T99:99:99Z",
+        "message": {
+            "id": "msg-011-malformed",
+            "role": "assistant",
+            "model": "claude-opus-4-7",
+            "usage": {"input_tokens": 999999},
+        },
     }
     write_fixture(name, slug, session_id, [t_offset, t_frac, t_malformed])
     # Expected records: only the two well-formed turns. Compute expected
@@ -396,8 +457,7 @@ def fixture_12_many_sessions():
     expected = []
     for n in range(8):
         session_id = f"sess-012-{n}"
-        t = turn(f"msg-012-{n}", _IN_WINDOW - n, "claude-sonnet-4-6",
-                 500 + n, 50)
+        t = turn(f"msg-012-{n}", _IN_WINDOW - n, "claude-sonnet-4-6", 500 + n, 50)
         write_fixture(name, slug, session_id, [t])
         expected.append(expected_record(t, slug, session_id))
     return name, expected
@@ -414,24 +474,47 @@ def fixture_13_byte_edges():
     good = turn("msg-013-good", _IN_WINDOW, "claude-opus-4-7", 800, 80)
     lines: list[dict | str | bytes] = [
         json.dumps(good) + "\r",
-        b'\xff\xfe invalid utf-8 line',
+        b"\xff\xfe invalid utf-8 line",
         '{"\\ud800": "lone surrogate key"}',
-        json.dumps({"type": "assistant", "timestamp": iso_z(_IN_WINDOW),
-                    "message": "bare string"}),
-        json.dumps({"type": "assistant", "timestamp": 12345,
-                    "message": {"role": "assistant", "id": "ev-num-ts",
-                                "model": "claude-opus-4-7",
-                                "usage": {"input_tokens": 5}}}),
-        json.dumps({"type": "assistant", "timestamp": "2026-XX-09TZZ:00:00Z",
-                    "message": {"role": "assistant", "id": "ev-long-bad-ts",
-                                "model": "claude-opus-4-7",
-                                "usage": {"input_tokens": 5}}}),
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": iso_z(_IN_WINDOW),
+                "message": "bare string",
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": 12345,
+                "message": {
+                    "role": "assistant",
+                    "id": "ev-num-ts",
+                    "model": "claude-opus-4-7",
+                    "usage": {"input_tokens": 5},
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-XX-09TZZ:00:00Z",
+                "message": {
+                    "role": "assistant",
+                    "id": "ev-long-bad-ts",
+                    "model": "claude-opus-4-7",
+                    "usage": {"input_tokens": 5},
+                },
+            }
+        ),
         # Lone-surrogate key inside message, and NO role: strict parsers
         # reject the line, per-key parsers skip the key and then drop the
         # entry for missing role. Either way no record.
-        ('{"type": "assistant", "timestamp": "%s", "message": '
-         '{"\\ud800": 1, "model": "claude-opus-4-7", '
-         '"usage": {"input_tokens": 5}}}' % iso_z(_IN_WINDOW)),
+        (
+            '{"type": "assistant", "timestamp": "%s", "message": '
+            '{"\\ud800": 1, "model": "claude-opus-4-7", '
+            '"usage": {"input_tokens": 5}}}' % iso_z(_IN_WINDOW)
+        ),
     ]
     write_fixture(name, slug, session_id, lines)
     return name, [expected_record(good, slug, session_id)]
@@ -449,62 +532,133 @@ def fixture_14_wrong_typed_usage():
     session_id = "sess-014"
 
     def rec(ts: float, usd: float, model: str) -> dict:
-        return {"ts": ts, "usd": round(usd, 6), "model": model,
-                "session_id": session_id, "slug": slug}
+        return {
+            "ts": ts,
+            "usd": round(usd, 6),
+            "model": model,
+            "session_id": session_id,
+            "slug": slug,
+        }
 
     t = _IN_WINDOW
     lines: list[dict | str] = [
-        {"type": "assistant", "timestamp": iso_z(t),
-         "message": {"role": "assistant", "id": "ev-wt-1",
-                     "model": "claude-sonnet-4-6", "usage": "not-an-object"}},
-        {"type": "assistant", "timestamp": iso_z(t + 1),
-         "message": {"role": "assistant", "id": "ev-wt-2",
-                     "model": "claude-sonnet-4-6",
-                     "usage": {"input_tokens": "abc", "output_tokens": 50}}},
-        {"type": "assistant", "timestamp": iso_z(t + 2),
-         "message": {"role": "assistant", "id": "ev-wt-3",
-                     "model": "claude-sonnet-4-6",
-                     "usage": {"input_tokens": 1.5, "output_tokens": 2e2}}},
-        {"type": "assistant", "timestamp": iso_z(t + 3),
-         "message": {"role": "assistant", "id": "ev-wt-4",
-                     "model": "claude-sonnet-4-6",
-                     "usage": {"input_tokens": -5, "output_tokens": 50,
-                               "server_tool_use": "nope"}}},
-        {"type": "assistant", "timestamp": iso_z(t + 4),
-         "message": {"role": "assistant", "id": "ev-wt-5", "model": 7,
-                     "usage": {"input_tokens": 100, "output_tokens": 10,
-                               "server_tool_use": {"web_search_requests": "x",
-                                                   "other": 1}}}},
-        {"type": "assistant", "timestamp": iso_z(t + 5),
-         "message": {"role": "assistant", "id": 42,
-                     "model": "claude-opus-4-7",
-                     "usage": {"input_tokens": 100, "output_tokens": 10,
-                               "service_tier": "standard"}}},
-        {"type": "assistant", "timestamp": iso_z(t + 6),
-         "message": {"role": "assistant", "id": "ev-wt-7",
-                     "model": "claude-sonnet-4-6",
-                     "usage": {"input_tokens": 1e300, "output_tokens": 5}}},
-        ('{"type": "assistant", "timestamp": "%s", "message": '
-         '{"role": "assistant", "id": "ev-wt-8", "model": "claude-sonnet-4-6", '
-         '"usage": {"input_tokens": 99999999999999999999999, '
-         '"output_tokens": 5}}}' % iso_z(t + 7)),
-        {"type": "assistant", "timestamp": iso_z(t + 8),
-         "message": {"role": "assistant", "id": "ev-wt-9",
-                     "model": "claude-sonnet-4-6",
-                     "usage": {"server_tool_use":
-                               {"web_search_requests": 2.9}}}},
-        {"type": "assistant", "timestamp": iso_z(t + 9),
-         "message": {"role": "assistant",
-                     "model": "claude-haiku-4-5",
-                     "usage": {"input_tokens": 100, "output_tokens": 50}}},
+        {
+            "type": "assistant",
+            "timestamp": iso_z(t),
+            "message": {
+                "role": "assistant",
+                "id": "ev-wt-1",
+                "model": "claude-sonnet-4-6",
+                "usage": "not-an-object",
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": iso_z(t + 1),
+            "message": {
+                "role": "assistant",
+                "id": "ev-wt-2",
+                "model": "claude-sonnet-4-6",
+                "usage": {"input_tokens": "abc", "output_tokens": 50},
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": iso_z(t + 2),
+            "message": {
+                "role": "assistant",
+                "id": "ev-wt-3",
+                "model": "claude-sonnet-4-6",
+                "usage": {"input_tokens": 1.5, "output_tokens": 2e2},
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": iso_z(t + 3),
+            "message": {
+                "role": "assistant",
+                "id": "ev-wt-4",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": -5,
+                    "output_tokens": 50,
+                    "server_tool_use": "nope",
+                },
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": iso_z(t + 4),
+            "message": {
+                "role": "assistant",
+                "id": "ev-wt-5",
+                "model": 7,
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 10,
+                    "server_tool_use": {"web_search_requests": "x", "other": 1},
+                },
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": iso_z(t + 5),
+            "message": {
+                "role": "assistant",
+                "id": 42,
+                "model": "claude-opus-4-7",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 10,
+                    "service_tier": "standard",
+                },
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": iso_z(t + 6),
+            "message": {
+                "role": "assistant",
+                "id": "ev-wt-7",
+                "model": "claude-sonnet-4-6",
+                "usage": {"input_tokens": 1e300, "output_tokens": 5},
+            },
+        },
+        (
+            '{"type": "assistant", "timestamp": "%s", "message": '
+            '{"role": "assistant", "id": "ev-wt-8", "model": "claude-sonnet-4-6", '
+            '"usage": {"input_tokens": 99999999999999999999999, '
+            '"output_tokens": 5}}}' % iso_z(t + 7)
+        ),
+        {
+            "type": "assistant",
+            "timestamp": iso_z(t + 8),
+            "message": {
+                "role": "assistant",
+                "id": "ev-wt-9",
+                "model": "claude-sonnet-4-6",
+                "usage": {"server_tool_use": {"web_search_requests": 2.9}},
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": iso_z(t + 9),
+            "message": {
+                "role": "assistant",
+                "model": "claude-haiku-4-5",
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+            },
+        },
         # Lone-surrogate keys INSIDE usage and server_tool_use, on a line
         # whose role is wrong-typed: every impl emits NO record (strict
         # parsers reject the line, per-key parsers skip the bad keys and
         # then drop the entry for the missing role), while per-key parsers
         # exercise their key-unescape failure arms.
-        ('{"type": "assistant", "timestamp": "%s", "message": '
-         '{"role": 99, "usage": {"\\ud800": 1, "input_tokens": 5, '
-         '"server_tool_use": {"\\ud800": 2}}}}' % iso_z(t + 10)),
+        (
+            '{"type": "assistant", "timestamp": "%s", "message": '
+            '{"role": 99, "usage": {"\\ud800": 1, "input_tokens": 5, '
+            '"server_tool_use": {"\\ud800": 2}}}}' % iso_z(t + 10)
+        ),
     ]
     write_fixture(name, slug, session_id, lines)
     son_in, son_out = RATES["sonnet"]
@@ -542,10 +696,6 @@ FIXTURES = [
     fixture_14_wrong_typed_usage,
 ]
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 def main() -> None:
     # Wipe and regenerate the events corpus so deletions take effect.

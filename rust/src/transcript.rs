@@ -1,6 +1,3 @@
-// Shared transcript parsing, discovery, and pricing helpers.
-// Used by both cost mode (main.rs) and the events subcommand (events.rs).
-// Extracted from main.rs so both modules reference a single definition.
 
 use std::collections::HashMap;
 use std::fs::{read_dir, DirEntry};
@@ -478,7 +475,6 @@ mod tests {
         let root = tempdir_path("unreadable-slug");
         let slug = root.join("bad-slug");
         fs::create_dir_all(&slug).unwrap();
-        // Create a readable sibling so we can check it is still found.
         let good_slug = root.join("good-slug");
         fs::create_dir_all(&good_slug).unwrap();
         fs::write(good_slug.join("session-ok.jsonl"), b"").unwrap();
@@ -512,7 +508,6 @@ mod tests {
         let root = tempdir_path("dangling-symlink");
         let slug = root.join("slug-a");
         fs::create_dir_all(&slug).unwrap();
-        // Create a dangling symlink pointing to a non-existent target.
         symlink("/nonexistent/target.jsonl", slug.join("dangling.jsonl")).unwrap();
 
         let groups = discover_groups(std::slice::from_ref(&root), f64::NEG_INFINITY);

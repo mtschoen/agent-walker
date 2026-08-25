@@ -270,7 +270,6 @@ def emit_dense_beacon_session(
         approx += len(json.dumps(line)) + 1  # +1 for the trailing newline
 
     while approx < target_bytes:
-        # --- one begin -> report* -> end lifecycle ---
         eta = rng.randint(300, 1800)
         ts += rng.randint(1, 5)
         push(
@@ -278,7 +277,9 @@ def emit_dense_beacon_session(
                 rng,
                 ts,
                 f"{id_prefix}-m{turn:05d}",
-                text=beacon_block("begin", eta, paragraph(rng, 3, 8, needle=False), drift=None),
+                text=beacon_block(
+                    "begin", eta, paragraph(rng, 3, 8, needle=False), drift=None
+                ),
             )
         )
         turn += 1
@@ -305,13 +306,14 @@ def emit_dense_beacon_session(
                 rng,
                 ts,
                 f"{id_prefix}-m{turn:05d}",
-                text=beacon_block("end", 0, paragraph(rng, 3, 8, needle=False), drift="nominal"),
+                text=beacon_block(
+                    "end", 0, paragraph(rng, 3, 8, needle=False), drift="nominal"
+                ),
             )
         )
         turn += 1
         lifecycles += 1
 
-        # --- filler turns between lifecycles (parse volume + real-user idle gaps) ---
         for _ in range(rng.randint(2, 6)):
             ts += rng.randint(1, 8)
             roll = rng.random()
@@ -321,7 +323,9 @@ def emit_dense_beacon_session(
                         rng,
                         ts,
                         f"{id_prefix}-m{turn:05d}",
-                        text=paragraph(rng, 20, 120, needle=rng.random() < SEARCH_HIT_RATE),
+                        text=paragraph(
+                            rng, 20, 120, needle=rng.random() < SEARCH_HIT_RATE
+                        ),
                     )
                 )
             elif roll < 0.55:
@@ -330,7 +334,9 @@ def emit_dense_beacon_session(
                         rng,
                         ts,
                         f"{id_prefix}-m{turn:05d}",
-                        text=paragraph(rng, 4, 20, needle=rng.random() < SEARCH_HIT_RATE),
+                        text=paragraph(
+                            rng, 4, 20, needle=rng.random() < SEARCH_HIT_RATE
+                        ),
                         tool_use=True,
                     )
                 )

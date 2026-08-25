@@ -20,6 +20,7 @@ For each implementation we run:
 
 Tolerance: ±$0.01 on trailing_usd and window_usd per fixture and aggregate.
 """
+
 from __future__ import annotations
 
 import json
@@ -69,6 +70,7 @@ def strip_search_summary(record: dict) -> dict:
         value.pop(key, None)
     return value
 
+
 # Impls that have implemented the `search` subcommand. Add languages here as
 # their search ports land. Until the set contains an impl, its search check
 # is skipped (rather than reported as failure).
@@ -114,14 +116,24 @@ def find_binary(lang: str) -> Path | None:
     return None
 
 
-def run_walker(lang: str, binary: Path, meta: dict, projects_root: Path, extras: list[Path] | None = None) -> dict:
+def run_walker(
+    lang: str,
+    binary: Path,
+    meta: dict,
+    projects_root: Path,
+    extras: list[Path] | None = None,
+) -> dict:
     """Run the walker binary against `projects_root`, return parsed JSON output."""
     cmd = [
         str(binary),
-        "--period", str(meta["period_seconds"]),
-        "--win-start", repr(meta["win_start_unix"]),
-        "--now", repr(meta["now_unix"]),
-        "--projects-root", str(projects_root),
+        "--period",
+        str(meta["period_seconds"]),
+        "--win-start",
+        repr(meta["win_start_unix"]),
+        "--now",
+        repr(meta["now_unix"]),
+        "--projects-root",
+        str(projects_root),
         "--no-config",
     ]
     for extra in extras or []:
@@ -129,8 +141,7 @@ def run_walker(lang: str, binary: Path, meta: dict, projects_root: Path, extras:
     result = run_captured(cmd, text=True, encoding="utf-8", timeout=10)
     if result.returncode != 0:
         raise RuntimeError(
-            f"{binary.name} exited {result.returncode}\n"
-            f"stderr:\n{result.stderr}"
+            f"{binary.name} exited {result.returncode}\nstderr:\n{result.stderr}"
         )
     line = result.stdout.strip().splitlines()[-1]
     return json.loads(line)
@@ -195,7 +206,9 @@ def check_implementation(lang: str, binary: Path, expected: dict) -> bool:
     return aggregate_ok and fixtures_ok
 
 
-def run_walker_subcommand(lang: str, binary: Path, subcommand: str, args: list[str]) -> dict:
+def run_walker_subcommand(
+    lang: str, binary: Path, subcommand: str, args: list[str]
+) -> dict:
     """Invoke a walker subcommand, return parsed JSON of last stdout line."""
     cmd = [str(binary), subcommand, *args, "--no-config"]
     result = run_captured(cmd, text=True, encoding="utf-8", timeout=10)
@@ -217,11 +230,19 @@ def assert_beacons_latest(lang: str, binary: Path, expected: dict) -> bool:
             shutil.copytree(BEACON_CORPUS / scenario, Path(tmp) / scenario)
             label = f"beacons-latest:{scenario}"
             try:
-                got = run_walker_subcommand(lang, binary, "beacons-latest", [
-                    "--session-id", target["session_id"],
-                    "--projects-root", str(tmp),
-                    "--now", repr(meta["now_unix"]),
-                ])
+                got = run_walker_subcommand(
+                    lang,
+                    binary,
+                    "beacons-latest",
+                    [
+                        "--session-id",
+                        target["session_id"],
+                        "--projects-root",
+                        str(tmp),
+                        "--now",
+                        repr(meta["now_unix"]),
+                    ],
+                )
             except Exception as e:
                 print(f"  [{lang:>4s}] {label:38s} FAIL  {e}")
                 overall = False
@@ -261,12 +282,21 @@ def assert_beacons_history(lang: str, binary: Path, expected: dict) -> bool:
             tree = Path(tmp) / "tree"
             shutil.copytree(BEACON_CORPUS / scenario, tree)
             try:
-                got = run_walker_subcommand(lang, binary, "beacons-history", [
-                    "--period", "604800",  # 7 days, generous
-                    "--win-start", "0",
-                    "--projects-root", str(tree),
-                    "--now", repr(meta["now_unix"]),
-                ])
+                got = run_walker_subcommand(
+                    lang,
+                    binary,
+                    "beacons-history",
+                    [
+                        "--period",
+                        "604800",  # 7 days, generous
+                        "--win-start",
+                        "0",
+                        "--projects-root",
+                        str(tree),
+                        "--now",
+                        repr(meta["now_unix"]),
+                    ],
+                )
             except Exception as e:
                 print(f"  [{lang:>4s}] {label:38s} FAIL  {e}")
                 overall = False
@@ -303,7 +333,9 @@ def assert_beacons_history(lang: str, binary: Path, expected: dict) -> bool:
 def check_beacons(lang: str, binary: Path) -> bool:
     """Run all beacon-mode assertions if expected files are present."""
     if not EXPECTED_LATEST.is_file() or not EXPECTED_HISTORY.is_file():
-        print(f"  [{lang:>4s}] beacon expected files missing -- skipping beacon assertions")
+        print(
+            f"  [{lang:>4s}] beacon expected files missing -- skipping beacon assertions"
+        )
         return True
     expected_latest = json.loads(EXPECTED_LATEST.read_text(encoding="utf-8"))
     expected_history = json.loads(EXPECTED_HISTORY.read_text(encoding="utf-8"))
@@ -363,10 +395,15 @@ def run_walker_search(
     Raises RuntimeError on non-zero exit.
     """
     cmd = [
-        str(binary), "search", pattern,
-        "--projects-root", str(projects_root),
-        "--now", repr(now_unix),
-        "--format", "jsonl",
+        str(binary),
+        "search",
+        pattern,
+        "--projects-root",
+        str(projects_root),
+        "--now",
+        repr(now_unix),
+        "--format",
+        "jsonl",
         "--no-config",
     ]
     for extra in extras or []:
@@ -416,8 +453,12 @@ def assert_search_combo(
         shutil.copytree(SEARCH_CORPUS / scenario_name, Path(tmp) / scenario_name)
         try:
             got_hits, got_summary = run_walker_search(
-                lang, binary, Path(tmp),
-                combo["pattern"], combo["flags"], now_unix,
+                lang,
+                binary,
+                Path(tmp),
+                combo["pattern"],
+                combo["flags"],
+                now_unix,
             )
         except Exception as e:
             print(f"  [{lang:>4s}] {label:48s} FAIL  {e}")
@@ -451,7 +492,9 @@ def check_search(lang: str, binary: Path) -> bool:
     if not SEARCH_CORPUS.is_dir():
         return True  # corpus missing -- nothing to test
     if lang not in IMPLS_WITH_SEARCH:
-        print(f"  [{lang:>4s}] search subcommand -- skipping (not in IMPLS_WITH_SEARCH)")
+        print(
+            f"  [{lang:>4s}] search subcommand -- skipping (not in IMPLS_WITH_SEARCH)"
+        )
         return True
     all_ok = True
     for scenario_dir in sorted(SEARCH_CORPUS.iterdir()):
@@ -464,7 +507,12 @@ def check_search(lang: str, binary: Path) -> bool:
         now_unix = data["_meta"]["now_unix"]
         for combo_name, combo in data["combos"].items():
             if not assert_search_combo(
-                lang, binary, scenario_dir.name, combo_name, combo, now_unix,
+                lang,
+                binary,
+                scenario_dir.name,
+                combo_name,
+                combo,
+                now_unix,
             ):
                 all_ok = False
     return all_ok
@@ -482,10 +530,15 @@ def run_walker_search_pretty(
     Does not raise on non-zero exit (the caller asserts on exit + output).
     """
     cmd = [
-        str(binary), "search", pattern,
-        "--projects-root", str(projects_root),
-        "--now", repr(now_unix),
-        "--format", "pretty",
+        str(binary),
+        "search",
+        pattern,
+        "--projects-root",
+        str(projects_root),
+        "--now",
+        repr(now_unix),
+        "--format",
+        "pretty",
         "--no-config",
     ]
     cmd.extend(flags)
@@ -493,22 +546,17 @@ def run_walker_search_pretty(
     return result.returncode, result.stdout, result.stderr
 
 
-# --- Pretty-format assertions ---
-#
-# SPEC "Pretty format" (decided 2026-06-10) pins the renderer across impls:
-# the highlight line is exactly `  >>> <pre>[<match>]<post> <<<` built from
-# the first match_offsets pair, and the stream ends with ONE human-readable
-# summary line (never a JSONL record). These assertions check the exact
-# highlight line per hit and the exact summary line (files/elapsed counts
-# vary per run, so those two fields are wildcarded).
-
 def _count_hit_headers(stdout: str) -> int:
     """A hit header looks like `[<timestamp>] cwd=... role=... session=...`."""
     count = 0
     for line in stdout.splitlines():
         stripped = line.lstrip()
-        if (stripped.startswith("[") and "cwd=" in stripped
-                and "role=" in stripped and "session=" in stripped):
+        if (
+            stripped.startswith("[")
+            and "cwd=" in stripped
+            and "role=" in stripped
+            and "session=" in stripped
+        ):
             count += 1
     return count
 
@@ -535,11 +583,16 @@ def assert_search_pretty(
     label = f"search-pretty/{scenario_name}/{combo_name}"
     expected_hits = combo["hits"]
     expected_summary = combo["summary"]
-    with tempfile.TemporaryDirectory(prefix=f"walker-search-pretty-{scenario_name}-") as tmp:
+    with tempfile.TemporaryDirectory(
+        prefix=f"walker-search-pretty-{scenario_name}-"
+    ) as tmp:
         shutil.copytree(SEARCH_CORPUS / scenario_name, Path(tmp) / scenario_name)
         returncode, stdout, stderr = run_walker_search_pretty(
-            binary, Path(tmp),
-            combo["pattern"], combo["flags"], now_unix,
+            binary,
+            Path(tmp),
+            combo["pattern"],
+            combo["flags"],
+            now_unix,
         )
     if returncode != 0:
         print(f"  [{lang:>4s}] {label:48s} FAIL  exit={returncode} stderr={stderr!r}")
@@ -555,7 +608,9 @@ def assert_search_pretty(
 
     problems: list[str] = []
     if got_headers != expected_hit_count:
-        problems.append(f"header lines: got {got_headers}, expected {expected_hit_count}")
+        problems.append(
+            f"header lines: got {got_headers}, expected {expected_hit_count}"
+        )
     if got_open != expected_hit_count:
         problems.append(f">>> count: got {got_open}, expected {expected_hit_count}")
     if got_close != expected_hit_count:
@@ -579,18 +634,23 @@ def assert_search_pretty(
             )
             if expected_line not in stdout_lines:
                 problems.append(
-                    f"hit[{index}] missing exact highlight line {expected_line!r}")
+                    f"hit[{index}] missing exact highlight line {expected_line!r}"
+                )
                 break
 
         # before:/after: line counts (only meaningful when --context > 0).
         expected_before = sum(len(h.get("context_before", [])) for h in expected_hits)
         expected_after = sum(len(h.get("context_after", [])) for h in expected_hits)
-        got_before = sum(1 for line in stdout.splitlines()
-                         if line.lstrip().startswith("before:"))
-        got_after = sum(1 for line in stdout.splitlines()
-                        if line.lstrip().startswith("after:"))
+        got_before = sum(
+            1 for line in stdout.splitlines() if line.lstrip().startswith("before:")
+        )
+        got_after = sum(
+            1 for line in stdout.splitlines() if line.lstrip().startswith("after:")
+        )
         if got_before != expected_before:
-            problems.append(f"before: lines: got {got_before}, expected {expected_before}")
+            problems.append(
+                f"before: lines: got {got_before}, expected {expected_before}"
+            )
         if got_after != expected_after:
             problems.append(f"after: lines: got {got_after}, expected {expected_after}")
 
@@ -604,13 +664,16 @@ def assert_search_pretty(
             sessions=expected_summary.get("sessions_matched", 0),
             roots=expected_summary.get("roots_walked", 1),
             trunc="true" if expected_summary.get("truncated") else "false",
-        ))
+        )
+    )
     final_lines = [line for line in stdout.splitlines() if line.strip()]
     if not final_lines or not summary_re.match(final_lines[-1]):
         problems.append(
             f"missing SPEC summary line matching {summary_re.pattern!r}; "
-            f"last line: {final_lines[-1]!r}" if final_lines else
-            "empty pretty stdout")
+            f"last line: {final_lines[-1]!r}"
+            if final_lines
+            else "empty pretty stdout"
+        )
 
     if problems:
         print(f"  [{lang:>4s}] {label:48s} FAIL  " + "; ".join(problems))
@@ -652,19 +715,16 @@ def check_search_pretty(lang: str, binary: Path) -> bool:
             continue
         now_unix = data["_meta"]["now_unix"]
         if not assert_search_pretty(
-            lang, binary, scenario_name, combo_name, combo, now_unix,
+            lang,
+            binary,
+            scenario_name,
+            combo_name,
+            combo,
+            now_unix,
         ):
             all_ok = False
     return all_ok
 
-
-# --- Result truncation (gap A2) ---
-#
-# A multi-hit fixture invoked with `--limit 1` exercises:
-#   - jsonl: summary record `"truncated": true`
-#   - pretty: `truncated=true` token (rust/zig) or `"truncated":true` (cpp/go)
-#   - stderr: the `walker: search: truncated to --limit=N (had M total)` warning
-#     — text is identical across all four impls (confirmed empirically).
 
 TRUNCATION_STDERR_TOKEN = "walker: search: truncated to --limit="
 
@@ -685,20 +745,27 @@ def assert_search_truncated(lang: str, binary: Path) -> bool:
         print(f"  [{lang:>4s}] {label:48s} SKIP  base fixture has <2 hits")
         return True
 
-    # --- jsonl path ---
     with tempfile.TemporaryDirectory(prefix=f"walker-search-trunc-jsonl-") as tmp:
         shutil.copytree(SEARCH_CORPUS / scenario_name, Path(tmp) / scenario_name)
         cmd = [
-            str(binary), "search", base_combo["pattern"],
-            "--projects-root", str(tmp),
-            "--now", repr(now_unix),
-            "--format", "jsonl",
+            str(binary),
+            "search",
+            base_combo["pattern"],
+            "--projects-root",
+            str(tmp),
+            "--now",
+            repr(now_unix),
+            "--format",
+            "jsonl",
             "--no-config",
-            "--limit", "1",
+            "--limit",
+            "1",
         ]
         result = run_captured(cmd, text=True, encoding="utf-8", timeout=10)
     if result.returncode != 0:
-        print(f"  [{lang:>4s}] {label:48s} FAIL  jsonl exit={result.returncode} stderr={result.stderr!r}")
+        print(
+            f"  [{lang:>4s}] {label:48s} FAIL  jsonl exit={result.returncode} stderr={result.stderr!r}"
+        )
         return False
     # Parse jsonl: exactly 1 hit + 1 summary, summary truncated=true, hits=1.
     hits = []
@@ -709,7 +776,9 @@ def assert_search_truncated(lang: str, binary: Path) -> bool:
         try:
             obj = json.loads(line)
         except json.JSONDecodeError as e:
-            print(f"  [{lang:>4s}] {label:48s} FAIL  jsonl non-JSON line: {line!r} ({e})")
+            print(
+                f"  [{lang:>4s}] {label:48s} FAIL  jsonl non-JSON line: {line!r} ({e})"
+            )
             return False
         if obj.get("type") == "hit":
             hits.append(obj)
@@ -722,21 +791,29 @@ def assert_search_truncated(lang: str, binary: Path) -> bool:
         problems.append("jsonl: missing summary record")
     else:
         if not summary.get("truncated"):
-            problems.append(f"jsonl summary.truncated: got {summary.get('truncated')!r}, expected true")
+            problems.append(
+                f"jsonl summary.truncated: got {summary.get('truncated')!r}, expected true"
+            )
         if summary.get("hits") != 1:
-            problems.append(f"jsonl summary.hits: got {summary.get('hits')!r}, expected 1")
+            problems.append(
+                f"jsonl summary.hits: got {summary.get('hits')!r}, expected 1"
+            )
     if TRUNCATION_STDERR_TOKEN not in result.stderr:
         problems.append(f"jsonl stderr missing {TRUNCATION_STDERR_TOKEN!r}")
 
-    # --- pretty path ---
     with tempfile.TemporaryDirectory(prefix=f"walker-search-trunc-pretty-") as tmp:
         shutil.copytree(SEARCH_CORPUS / scenario_name, Path(tmp) / scenario_name)
         returncode, stdout, stderr = run_walker_search_pretty(
-            binary, Path(tmp),
-            base_combo["pattern"], ["--limit", "1"], now_unix,
+            binary,
+            Path(tmp),
+            base_combo["pattern"],
+            ["--limit", "1"],
+            now_unix,
         )
     if returncode != 0:
-        print(f"  [{lang:>4s}] {label:48s} FAIL  pretty exit={returncode} stderr={stderr!r}")
+        print(
+            f"  [{lang:>4s}] {label:48s} FAIL  pretty exit={returncode} stderr={stderr!r}"
+        )
         return False
     if "truncated=true" not in stdout:
         problems.append("pretty stdout missing truncated=true marker")
@@ -751,7 +828,9 @@ def assert_search_truncated(lang: str, binary: Path) -> bool:
     if problems:
         print(f"  [{lang:>4s}] {label:48s} FAIL  " + "; ".join(problems))
         return False
-    print(f"  [{lang:>4s}] {label:48s}  OK   jsonl+pretty+stderr truncation signals present")
+    print(
+        f"  [{lang:>4s}] {label:48s}  OK   jsonl+pretty+stderr truncation signals present"
+    )
     return True
 
 
@@ -777,7 +856,9 @@ def check_search_multi_root(lang: str, binary: Path) -> bool:
     if not SEARCH_MULTI_ROOT_CORPUS.is_dir():
         return True  # corpus missing -- nothing to test
     if lang not in IMPLS_WITH_SEARCH:
-        print(f"  [{lang:>4s}] search multi-root -- skipping (not in IMPLS_WITH_SEARCH)")
+        print(
+            f"  [{lang:>4s}] search multi-root -- skipping (not in IMPLS_WITH_SEARCH)"
+        )
         return True
     all_ok = True
     for scenario_dir in sorted(SEARCH_MULTI_ROOT_CORPUS.iterdir()):
@@ -794,8 +875,13 @@ def check_search_multi_root(lang: str, binary: Path) -> bool:
             label = f"search-mr/{scenario_dir.name}/{combo_name}"
             try:
                 got_hits, got_summary = run_walker_search(
-                    lang, binary, primary,
-                    combo["pattern"], combo["flags"], now_unix, extras=extras,
+                    lang,
+                    binary,
+                    primary,
+                    combo["pattern"],
+                    combo["flags"],
+                    now_unix,
+                    extras=extras,
                 )
             except Exception as e:
                 print(f"  [{lang:>4s}] {label:48s} FAIL  {e}")
@@ -806,19 +892,31 @@ def check_search_multi_root(lang: str, binary: Path) -> bool:
             ok = hits_ok and summary_ok
             badge = " OK " if ok else "FAIL"
             walked = got_summary.get("roots_walked") if got_summary else "?"
-            print(f"  [{lang:>4s}] {label:48s} {badge}  hits={len(got_hits)} roots_walked={walked}")
+            print(
+                f"  [{lang:>4s}] {label:48s} {badge}  hits={len(got_hits)} roots_walked={walked}"
+            )
             if not hits_ok:
-                print(f"        hits mismatch: got {len(got_hits)}, expected {len(combo['hits'])}")
+                print(
+                    f"        hits mismatch: got {len(got_hits)}, expected {len(combo['hits'])}"
+                )
                 for i in range(max(len(got_hits), len(combo["hits"]))):
                     g = got_hits[i] if i < len(got_hits) else None
                     e = combo["hits"][i] if i < len(combo["hits"]) else None
                     if g != e:
-                        print(f"          hit[{i}] got:      {json.dumps(g, sort_keys=True)}")
-                        print(f"          hit[{i}] expected: {json.dumps(e, sort_keys=True)}")
+                        print(
+                            f"          hit[{i}] got:      {json.dumps(g, sort_keys=True)}"
+                        )
+                        print(
+                            f"          hit[{i}] expected: {json.dumps(e, sort_keys=True)}"
+                        )
                         break
             if not summary_ok:
-                print(f"        summary got:      {json.dumps(got_summary, sort_keys=True)}")
-                print(f"        summary expected: {json.dumps(combo['summary'], sort_keys=True)}")
+                print(
+                    f"        summary got:      {json.dumps(got_summary, sort_keys=True)}"
+                )
+                print(
+                    f"        summary expected: {json.dumps(combo['summary'], sort_keys=True)}"
+                )
             if not ok:
                 all_ok = False
     return all_ok
@@ -859,14 +957,22 @@ def check_search_duplicate_root(lang: str, binary: Path) -> bool:
         shutil.copytree(SEARCH_CORPUS / scenario_name, tmp_path / scenario_name)
         try:
             baseline_hits, baseline_summary = run_walker_search(
-                lang, binary, tmp_path,
-                combo["pattern"], combo["flags"], now_unix,
+                lang,
+                binary,
+                tmp_path,
+                combo["pattern"],
+                combo["flags"],
+                now_unix,
             )
             # Pass the SAME root via --extra-projects-root. Both args resolve
             # to the same canonical inode -> dedup must drop the duplicate.
             dup_hits, dup_summary = run_walker_search(
-                lang, binary, tmp_path,
-                combo["pattern"], combo["flags"], now_unix,
+                lang,
+                binary,
+                tmp_path,
+                combo["pattern"],
+                combo["flags"],
+                now_unix,
                 extras=[tmp_path],
             )
         except Exception as e:
@@ -891,8 +997,7 @@ def check_search_duplicate_root(lang: str, binary: Path) -> bool:
         print(f"  [{lang:>4s}] {label:48s} FAIL  " + "; ".join(problems))
         return False
     print(
-        f"  [{lang:>4s}] {label:48s}  OK   hits={len(dup_hits)} "
-        f"roots_walked={walked}"
+        f"  [{lang:>4s}] {label:48s}  OK   hits={len(dup_hits)} roots_walked={walked}"
     )
     return True
 
@@ -909,10 +1014,14 @@ def _events_sort_key(record: dict) -> tuple:
 def check_events(lang: str, binary: Path) -> bool:
     """Run events subcommand against each fixture; compare NDJSON output to expected."""
     if not EVENTS_EXPECTED.is_file():
-        print(f"  [{lang:>4s}] events expected file missing -- skipping events assertions")
+        print(
+            f"  [{lang:>4s}] events expected file missing -- skipping events assertions"
+        )
         return True
     if lang not in IMPLS_WITH_EVENTS:
-        print(f"  [{lang:>4s}] events subcommand -- skipping (not in IMPLS_WITH_EVENTS)")
+        print(
+            f"  [{lang:>4s}] events subcommand -- skipping (not in IMPLS_WITH_EVENTS)"
+        )
         return True
 
     expected_data = json.loads(EVENTS_EXPECTED.read_text(encoding="utf-8"))
@@ -930,11 +1039,16 @@ def check_events(lang: str, binary: Path) -> bool:
 
         label = f"events/{fixture_name}"
         cmd = [
-            str(binary), "events",
-            "--period", repr(pin_period),
-            "--win-start", repr(pin_win_start),
-            "--projects-root", str(fixture_root),
-            "--now", repr(pin_now),
+            str(binary),
+            "events",
+            "--period",
+            repr(pin_period),
+            "--win-start",
+            repr(pin_win_start),
+            "--projects-root",
+            str(fixture_root),
+            "--now",
+            repr(pin_now),
             "--no-config",
         ]
         result = run_captured(cmd, text=True, encoding="utf-8", timeout=10)
@@ -946,7 +1060,6 @@ def check_events(lang: str, binary: Path) -> bool:
             all_ok = False
             continue
 
-        # Parse NDJSON output — one JSON object per non-blank line.
         got_records: list[dict] = []
         parse_error: str | None = None
         for line in result.stdout.splitlines():
@@ -978,8 +1091,13 @@ def check_events(lang: str, binary: Path) -> bool:
         first_diff: str | None = None
         records_ok = True
         for index, (got, target) in enumerate(zip(got_sorted, target_sorted)):
-            ts_ok = abs(got.get("ts", 0.0) - target.get("ts", 0.0)) <= EVENTS_TS_TOLERANCE
-            usd_ok = abs(got.get("usd", 0.0) - target.get("usd", 0.0)) <= EVENTS_USD_TOLERANCE
+            ts_ok = (
+                abs(got.get("ts", 0.0) - target.get("ts", 0.0)) <= EVENTS_TS_TOLERANCE
+            )
+            usd_ok = (
+                abs(got.get("usd", 0.0) - target.get("usd", 0.0))
+                <= EVENTS_USD_TOLERANCE
+            )
             fields_ok = (
                 got.get("model") == target.get("model")
                 and got.get("session_id") == target.get("session_id")
@@ -995,10 +1113,7 @@ def check_events(lang: str, binary: Path) -> bool:
                 break
 
         badge = " OK " if records_ok else "FAIL"
-        print(
-            f"  [{lang:>4s}] {label:30s} {badge}  "
-            f"records={len(got_sorted)}"
-        )
+        print(f"  [{lang:>4s}] {label:30s} {badge}  records={len(got_sorted)}")
         if first_diff:
             print(f"        {first_diff}")
             all_ok = False
@@ -1025,7 +1140,12 @@ def check_search_codex(lang: str, binary: Path) -> bool:
             shutil.copytree(SEARCH_CODEX_CORPUS, home_path / ".codex" / "sessions")
             if case_name == "all":
                 large_rollout = (
-                    home_path / ".codex" / "sessions" / "2026" / "05" / "09"
+                    home_path
+                    / ".codex"
+                    / "sessions"
+                    / "2026"
+                    / "05"
+                    / "09"
                     / "rollout-large-no-hit.jsonl"
                 )
                 metadata = {
@@ -1052,30 +1172,46 @@ def check_search_codex(lang: str, binary: Path) -> bool:
             env["HOME"] = str(home_path)
             env["USERPROFILE"] = str(home_path)
             cmd = [
-                str(binary), "search", expected["pattern"], *flags,
-                "--now", repr(expected["_meta"]["now_unix"]),
-                "--format", "jsonl", "--context", "0", "--no-config",
-                "--extra-projects-root", str(invalid_extra),
+                str(binary),
+                "search",
+                expected["pattern"],
+                *flags,
+                "--now",
+                repr(expected["_meta"]["now_unix"]),
+                "--format",
+                "jsonl",
+                "--context",
+                "0",
+                "--no-config",
+                "--extra-projects-root",
+                str(invalid_extra),
             ]
             result = run_captured(cmd, text=True, encoding="utf-8", timeout=10, env=env)
         try:
-            records = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+            records = [
+                json.loads(line) for line in result.stdout.splitlines() if line.strip()
+            ]
             hits = [strip_search_hit(x) for x in records if x.get("type") == "hit"]
             summary_record = next(x for x in records if x.get("type") == "summary")
             large_rollout_ok = (
                 case_name != "all" or summary_record.get("files_walked") == 3
             )
             summary_value = strip_search_summary(summary_record)
-            ok = (result.returncode == 0 and hits == expected[expected_key]["hits"]
-                  and summary_value == expected[expected_key]["summary"]
-                  and large_rollout_ok)
+            ok = (
+                result.returncode == 0
+                and hits == expected[expected_key]["hits"]
+                and summary_value == expected[expected_key]["summary"]
+                and large_rollout_ok
+            )
         except Exception:
             ok = False
             hits = []
             summary_value = None
         print(f"  [{lang:>4s}] search-codex/{case_name:34s} {' OK ' if ok else 'FAIL'}")
         if not ok:
-            print(f"        exit={result.returncode} hits={hits!r} summary={summary_value!r} stderr={result.stderr!r}")
+            print(
+                f"        exit={result.returncode} hits={hits!r} summary={summary_value!r} stderr={result.stderr!r}"
+            )
             all_ok = False
 
     # A tagged config root must select codex discovery even when the explicit
@@ -1088,28 +1224,47 @@ def check_search_codex(lang: str, binary: Path) -> bool:
         shutil.copytree(SEARCH_CODEX_CORPUS, tagged)
         config_dir = home_path / ".claude"
         config_dir.mkdir()
-        (config_dir / "walker-roots.json").write_text(json.dumps({
-            "extra_roots": [{"path": str(tagged), "format": "codex"}]
-        }), encoding="utf-8")
+        (config_dir / "walker-roots.json").write_text(
+            json.dumps({"extra_roots": [{"path": str(tagged), "format": "codex"}]}),
+            encoding="utf-8",
+        )
         env = dict(os.environ)
         env["HOME"] = str(home_path)
         env["USERPROFILE"] = str(home_path)
         cmd = [
-            str(binary), "search", expected["pattern"],
-            "--projects-root", str(primary), "--cwd", expected["cwd"],
-            "--now", repr(expected["_meta"]["now_unix"]), "--format", "jsonl",
-            "--context", "0",
+            str(binary),
+            "search",
+            expected["pattern"],
+            "--projects-root",
+            str(primary),
+            "--cwd",
+            expected["cwd"],
+            "--now",
+            repr(expected["_meta"]["now_unix"]),
+            "--format",
+            "jsonl",
+            "--context",
+            "0",
         ]
         result = run_captured(cmd, text=True, encoding="utf-8", timeout=10, env=env)
         try:
-            records = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+            records = [
+                json.loads(line) for line in result.stdout.splitlines() if line.strip()
+            ]
             hits = [strip_search_hit(x) for x in records if x.get("type") == "hit"]
-            summary_value = strip_search_summary(next(x for x in records if x.get("type") == "summary"))
-            ok = (result.returncode == 0 and hits == expected["cwd_filtered"]["hits"]
-                  and summary_value == expected["cwd_filtered"]["summary"])
+            summary_value = strip_search_summary(
+                next(x for x in records if x.get("type") == "summary")
+            )
+            ok = (
+                result.returncode == 0
+                and hits == expected["cwd_filtered"]["hits"]
+                and summary_value == expected["cwd_filtered"]["summary"]
+            )
         except Exception:
             ok = False
-        print(f"  [{lang:>4s}] search-codex/{'tagged-config-root':34s} {' OK ' if ok else 'FAIL'}")
+        print(
+            f"  [{lang:>4s}] search-codex/{'tagged-config-root':34s} {' OK ' if ok else 'FAIL'}"
+        )
         if not ok:
             all_ok = False
 
@@ -1123,23 +1278,43 @@ def check_search_codex(lang: str, binary: Path) -> bool:
         env.pop("HOME", None)
         env.pop("USERPROFILE", None)
         cmd = [
-            str(binary), "search", expected["pattern"],
-            "--now", repr(expected["_meta"]["now_unix"]),
-            "--format", "jsonl", "--context", "0", "--no-config",
+            str(binary),
+            "search",
+            expected["pattern"],
+            "--now",
+            repr(expected["_meta"]["now_unix"]),
+            "--format",
+            "jsonl",
+            "--context",
+            "0",
+            "--no-config",
         ]
         result = run_captured(
-            cmd, cwd=str(working_path), text=True, encoding="utf-8",
-            timeout=10, env=env,
+            cmd,
+            cwd=str(working_path),
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+            env=env,
         )
         try:
-            records = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+            records = [
+                json.loads(line) for line in result.stdout.splitlines() if line.strip()
+            ]
             hits = [strip_search_hit(x) for x in records if x.get("type") == "hit"]
-            summary_value = strip_search_summary(next(x for x in records if x.get("type") == "summary"))
-            ok = (result.returncode == 0 and hits == expected["all"]["hits"]
-                  and summary_value == expected["all"]["summary"])
+            summary_value = strip_search_summary(
+                next(x for x in records if x.get("type") == "summary")
+            )
+            ok = (
+                result.returncode == 0
+                and hits == expected["all"]["hits"]
+                and summary_value == expected["all"]["summary"]
+            )
         except Exception:
             ok = False
-        print(f"  [{lang:>4s}] search-codex/{'relative-home-fallback':34s} {' OK ' if ok else 'FAIL'}")
+        print(
+            f"  [{lang:>4s}] search-codex/{'relative-home-fallback':34s} {' OK ' if ok else 'FAIL'}"
+        )
         if not ok:
             all_ok = False
     return all_ok
@@ -1164,18 +1339,23 @@ def check_empty_root(lang: str, binary: Path, expected: dict) -> bool:
         # A path that DOES NOT EXIST under tmp.
         missing = Path(tmp) / "does-not-exist"
         common_args = [
-            "--projects-root", str(missing),
+            "--projects-root",
+            str(missing),
             "--no-config",
-            "--now", repr(meta["now_unix"]),
+            "--now",
+            repr(meta["now_unix"]),
         ]
 
         # 1. cost mode (bare flags) — JSON with zero totals, exit 0.
-        cmd = [str(binary),
-               "--period", str(meta["period_seconds"]),
-               "--win-start", repr(meta["win_start_unix"]),
-               *common_args]
-        result = run_captured(cmd, text=True,
-                                encoding="utf-8", timeout=10)
+        cmd = [
+            str(binary),
+            "--period",
+            str(meta["period_seconds"]),
+            "--win-start",
+            repr(meta["win_start_unix"]),
+            *common_args,
+        ]
+        result = run_captured(cmd, text=True, encoding="utf-8", timeout=10)
         cost_ok = result.returncode == 0
         if cost_ok:
             try:
@@ -1187,36 +1367,46 @@ def check_empty_root(lang: str, binary: Path, expected: dict) -> bool:
                 )
             except Exception:
                 cost_ok = False
-        print(f"  [{lang:>4s}] {'empty-root: cost':38s} "
-              f"{' OK ' if cost_ok else 'FAIL'}")
+        print(
+            f"  [{lang:>4s}] {'empty-root: cost':38s} {' OK ' if cost_ok else 'FAIL'}"
+        )
         if not cost_ok:
             print(f"        exit={result.returncode} stdout={result.stdout!r}")
             all_ok = False
 
         # 2. events — exit 0, no NDJSON records (empty stdout).
-        cmd = [str(binary), "events",
-               "--period", str(meta["period_seconds"]),
-               "--win-start", repr(meta["win_start_unix"]),
-               *common_args]
-        result = run_captured(cmd, text=True,
-                                encoding="utf-8", timeout=10)
+        cmd = [
+            str(binary),
+            "events",
+            "--period",
+            str(meta["period_seconds"]),
+            "--win-start",
+            repr(meta["win_start_unix"]),
+            *common_args,
+        ]
+        result = run_captured(cmd, text=True, encoding="utf-8", timeout=10)
         # events allows empty stdout per SPEC §events ("Exit 0 even when
         # the output stream is empty.").
         events_ok = result.returncode == 0 and all(
             not line.strip() for line in result.stdout.splitlines()
         )
-        print(f"  [{lang:>4s}] {'empty-root: events':38s} "
-              f"{' OK ' if events_ok else 'FAIL'}")
+        print(
+            f"  [{lang:>4s}] {'empty-root: events':38s} "
+            f"{' OK ' if events_ok else 'FAIL'}"
+        )
         if not events_ok:
             print(f"        exit={result.returncode} stdout={result.stdout!r}")
             all_ok = False
 
         # 3. beacons-latest — exit 0, beacon = null.
-        cmd = [str(binary), "beacons-latest",
-               "--session-id", "no-such-session",
-               *common_args]
-        result = run_captured(cmd, text=True,
-                                encoding="utf-8", timeout=10)
+        cmd = [
+            str(binary),
+            "beacons-latest",
+            "--session-id",
+            "no-such-session",
+            *common_args,
+        ]
+        result = run_captured(cmd, text=True, encoding="utf-8", timeout=10)
         bl_ok = result.returncode == 0
         if bl_ok:
             try:
@@ -1225,43 +1415,47 @@ def check_empty_root(lang: str, binary: Path, expected: dict) -> bool:
                 bl_ok = payload.get("beacon") is None
             except Exception:
                 bl_ok = False
-        print(f"  [{lang:>4s}] {'empty-root: beacons-latest':38s} "
-              f"{' OK ' if bl_ok else 'FAIL'}")
+        print(
+            f"  [{lang:>4s}] {'empty-root: beacons-latest':38s} "
+            f"{' OK ' if bl_ok else 'FAIL'}"
+        )
         if not bl_ok:
             print(f"        exit={result.returncode} stdout={result.stdout!r}")
             all_ok = False
 
         # 4. beacons-history — exit 0, n_pairs = 0, bias_factor = null.
-        cmd = [str(binary), "beacons-history",
-               "--period", str(meta["period_seconds"]),
-               "--win-start", repr(meta["win_start_unix"]),
-               *common_args]
-        result = run_captured(cmd, text=True,
-                                encoding="utf-8", timeout=10)
+        cmd = [
+            str(binary),
+            "beacons-history",
+            "--period",
+            str(meta["period_seconds"]),
+            "--win-start",
+            repr(meta["win_start_unix"]),
+            *common_args,
+        ]
+        result = run_captured(cmd, text=True, encoding="utf-8", timeout=10)
         bh_ok = result.returncode == 0
         if bh_ok:
             try:
                 line = result.stdout.strip().splitlines()[-1]
                 payload = json.loads(line)
                 bh_ok = (
-                    payload.get("n_pairs") == 0
-                    and payload.get("bias_factor") is None
+                    payload.get("n_pairs") == 0 and payload.get("bias_factor") is None
                 )
             except Exception:
                 bh_ok = False
-        print(f"  [{lang:>4s}] {'empty-root: beacons-history':38s} "
-              f"{' OK ' if bh_ok else 'FAIL'}")
+        print(
+            f"  [{lang:>4s}] {'empty-root: beacons-history':38s} "
+            f"{' OK ' if bh_ok else 'FAIL'}"
+        )
         if not bh_ok:
             print(f"        exit={result.returncode} stdout={result.stdout!r}")
             all_ok = False
 
         # 5. search — exit 0, zero hits in jsonl output.
         if lang in IMPLS_WITH_SEARCH:
-            cmd = [str(binary), "search", "pattern",
-                   "--format", "jsonl",
-                   *common_args]
-            result = run_captured(cmd, text=True,
-                                    encoding="utf-8", timeout=10)
+            cmd = [str(binary), "search", "pattern", "--format", "jsonl", *common_args]
+            result = run_captured(cmd, text=True, encoding="utf-8", timeout=10)
             search_ok = result.returncode == 0
             hits_count = 0
             summary_ok = False
@@ -1279,8 +1473,10 @@ def check_empty_root(lang: str, binary: Path, expected: dict) -> bool:
                 except Exception:
                     search_ok = False
             search_ok = search_ok and hits_count == 0 and summary_ok
-            print(f"  [{lang:>4s}] {'empty-root: search':38s} "
-                  f"{' OK ' if search_ok else 'FAIL'}")
+            print(
+                f"  [{lang:>4s}] {'empty-root: search':38s} "
+                f"{' OK ' if search_ok else 'FAIL'}"
+            )
             if not search_ok:
                 print(f"        exit={result.returncode} stdout={result.stdout!r}")
                 all_ok = False
@@ -1310,7 +1506,9 @@ def check_help(lang: str, binary: Path) -> bool:
     def run(args: list[str]) -> ProcessResult:
         return run_captured(
             [str(binary), *args],
-            text=True, encoding="utf-8", timeout=10,
+            text=True,
+            encoding="utf-8",
+            timeout=10,
         )
 
     # 1. --help: exit 0, overview on stdout with every subcommand + --period.
@@ -1327,7 +1525,9 @@ def check_help(lang: str, binary: Path) -> bool:
     ok = result.returncode == 0 and result.stdout.strip() != ""
     print(f"  [{lang:>4s}] {'help: no-args':38s} {' OK ' if ok else 'FAIL'}")
     if not ok:
-        print(f"        exit={result.returncode} stdout_empty={result.stdout.strip() == ''}")
+        print(
+            f"        exit={result.returncode} stdout_empty={result.stdout.strip() == ''}"
+        )
         all_ok = False
 
     # 3. Subcommand + --help: same overview, exit 0 (rule 3).
@@ -1371,7 +1571,9 @@ def check_cli_argument_matrix(lang: str, binary: Path) -> bool:
     def run(args: list[str]) -> ProcessResult:
         return run_captured(
             [str(binary), *args],
-            text=True, encoding="utf-8", timeout=10,
+            text=True,
+            encoding="utf-8",
+            timeout=10,
         )
 
     # (label, args, expected_exit, stderr_must_contain_or_None)
@@ -1381,133 +1583,282 @@ def check_cli_argument_matrix(lang: str, binary: Path) -> bool:
     # Several error paths fail before any roots work, so it's harmless either
     # way; included consistently for the impls that defer the check.
     cases: list[tuple[str, list[str], int, str | None]] = [
-        # --- cost mode (no subcommand prefix) ---
-        ("cost: missing --period",
-         ["--win-start", "0", "--no-config"], 2, "--period"),
-        ("cost: missing flag value (--period)",
-         ["--period", "--no-config"], 2, "--period"),
-        ("cost: unparseable --period",
-         ["--period", "x", "--win-start", "0", "--no-config"], 2, "--period"),
-        ("cost: unparseable --win-start",
-         ["--period", "60", "--win-start", "nope", "--no-config"], 2, "--win-start"),
-        ("cost: unparseable --now",
-         ["--period", "60", "--win-start", "0", "--now", "nope", "--no-config"], 2, "--now"),
-        ("cost: unknown flag",
-         ["--period", "60", "--win-start", "0", "--frobnicate", "--no-config"], 2, "--frobnicate"),
-        ("cost: unknown subcommand",
-         ["bogus", "--period", "60", "--win-start", "0", "--no-config"], 2, "bogus"),
-
-        # --- cost mode: missing-value rows (flag is the LAST argv token) ---
-        ("cost: --win-start missing value",
-         ["--period", "60", "--win-start"], 2, "--win-start"),
-        ("cost: --now missing value",
-         ["--period", "60", "--win-start", "0", "--now"], 2, "--now"),
-        ("cost: --projects-root missing value",
-         ["--period", "60", "--win-start", "0", "--projects-root"], 2,
-         "--projects-root"),
-        ("cost: --extra-projects-root missing value",
-         ["--period", "60", "--win-start", "0", "--extra-projects-root"], 2,
-         "--extra-projects-root"),
-        ("cost: missing --win-start",
-         ["--period", "60", "--no-config"], 2, "--win-start"),
-
-        # --- events ---
-        ("events: missing --period",
-         ["events", "--no-config"], 2, "--period"),
-        ("events: unparseable --period",
-         ["events", "--period", "x", "--no-config"], 2, "--period"),
-        ("events: unknown flag",
-         ["events", "--period", "60", "--frobnicate", "--no-config"], 2, "--frobnicate"),
-        ("events: --period missing value",
-         ["events", "--period"], 2, "--period"),
-        ("events: --win-start missing value",
-         ["events", "--period", "60", "--win-start"], 2, "--win-start"),
-        ("events: unparseable --win-start",
-         ["events", "--period", "60", "--win-start", "nope", "--no-config"],
-         2, "--win-start"),
-        ("events: --now missing value",
-         ["events", "--period", "60", "--now"], 2, "--now"),
-        ("events: unparseable --now",
-         ["events", "--period", "60", "--now", "nope", "--no-config"],
-         2, "--now"),
-        ("events: --projects-root missing value",
-         ["events", "--period", "60", "--projects-root"], 2, "--projects-root"),
-        ("events: --extra-projects-root missing value",
-         ["events", "--period", "60", "--extra-projects-root"], 2,
-         "--extra-projects-root"),
-
-        # --- beacons-latest ---
-        ("beacons-latest: missing --session-id",
-         ["beacons-latest", "--no-config"], 2, "--session-id"),
-        ("beacons-latest: unknown flag",
-         ["beacons-latest", "--session-id", "deadbeef", "--frobnicate", "--no-config"],
-         2, "--frobnicate"),
-        ("beacons-latest: --session-id missing value",
-         ["beacons-latest", "--session-id"], 2, "--session-id"),
-        ("beacons-latest: --projects-root missing value",
-         ["beacons-latest", "--session-id", "deadbeef", "--projects-root"],
-         2, "--projects-root"),
-        ("beacons-latest: --now missing value",
-         ["beacons-latest", "--session-id", "deadbeef", "--now"], 2, "--now"),
-        ("beacons-latest: unparseable --now",
-         ["beacons-latest", "--session-id", "deadbeef", "--now", "nope",
-          "--no-config"], 2, "--now"),
-        ("beacons-latest: --extra-projects-root missing value",
-         ["beacons-latest", "--session-id", "deadbeef", "--extra-projects-root"],
-         2, "--extra-projects-root"),
-
-        # --- beacons-history ---
-        ("beacons-history: missing --period",
-         ["beacons-history", "--no-config"], 2, "--period"),
-        ("beacons-history: unparseable --period",
-         ["beacons-history", "--period", "x", "--no-config"], 2, "--period"),
-        ("beacons-history: unknown flag",
-         ["beacons-history", "--period", "60", "--frobnicate", "--no-config"],
-         2, "--frobnicate"),
-        ("beacons-history: --period missing value",
-         ["beacons-history", "--period"], 2, "--period"),
-        ("beacons-history: --win-start missing value",
-         ["beacons-history", "--period", "60", "--win-start"], 2, "--win-start"),
-        ("beacons-history: unparseable --win-start",
-         ["beacons-history", "--period", "60", "--win-start", "nope",
-          "--no-config"], 2, "--win-start"),
-        ("beacons-history: --now missing value",
-         ["beacons-history", "--period", "60", "--now"], 2, "--now"),
-        ("beacons-history: unparseable --now",
-         ["beacons-history", "--period", "60", "--now", "nope", "--no-config"],
-         2, "--now"),
-        ("beacons-history: --projects-root missing value",
-         ["beacons-history", "--period", "60", "--projects-root"],
-         2, "--projects-root"),
-        ("beacons-history: --extra-projects-root missing value",
-         ["beacons-history", "--period", "60", "--extra-projects-root"],
-         2, "--extra-projects-root"),
-
-        # --- search ---
-        ("search: missing pattern",
-         ["search", "--no-config"], 2, None),
-        ("search: empty pattern",
-         ["search", "", "--no-config"], 2, None),
-        ("search: invalid --role",
-         ["search", "hello", "--role", "bogus", "--no-config"], 2, "--role"),
-        ("search: invalid --format",
-         ["search", "hello", "--format", "bogus", "--no-config"], 2, "--format"),
-        ("search: --cwd + --any-cwd mutex",
-         ["search", "hello", "--cwd", "foo", "--any-cwd", "--no-config"],
-         2, "--cwd"),
-        ("search: duplicate positional",
-         ["search", "a", "b", "--no-config"], 2, None),
-        ("search: malformed regex (trailing backslash)",
-         ["search", "\\", "--regex", "--no-config"], 2, None),
+        ("cost: missing --period", ["--win-start", "0", "--no-config"], 2, "--period"),
+        (
+            "cost: missing flag value (--period)",
+            ["--period", "--no-config"],
+            2,
+            "--period",
+        ),
+        (
+            "cost: unparseable --period",
+            ["--period", "x", "--win-start", "0", "--no-config"],
+            2,
+            "--period",
+        ),
+        (
+            "cost: unparseable --win-start",
+            ["--period", "60", "--win-start", "nope", "--no-config"],
+            2,
+            "--win-start",
+        ),
+        (
+            "cost: unparseable --now",
+            ["--period", "60", "--win-start", "0", "--now", "nope", "--no-config"],
+            2,
+            "--now",
+        ),
+        (
+            "cost: unknown flag",
+            ["--period", "60", "--win-start", "0", "--frobnicate", "--no-config"],
+            2,
+            "--frobnicate",
+        ),
+        (
+            "cost: unknown subcommand",
+            ["bogus", "--period", "60", "--win-start", "0", "--no-config"],
+            2,
+            "bogus",
+        ),
+        (
+            "cost: --win-start missing value",
+            ["--period", "60", "--win-start"],
+            2,
+            "--win-start",
+        ),
+        (
+            "cost: --now missing value",
+            ["--period", "60", "--win-start", "0", "--now"],
+            2,
+            "--now",
+        ),
+        (
+            "cost: --projects-root missing value",
+            ["--period", "60", "--win-start", "0", "--projects-root"],
+            2,
+            "--projects-root",
+        ),
+        (
+            "cost: --extra-projects-root missing value",
+            ["--period", "60", "--win-start", "0", "--extra-projects-root"],
+            2,
+            "--extra-projects-root",
+        ),
+        (
+            "cost: missing --win-start",
+            ["--period", "60", "--no-config"],
+            2,
+            "--win-start",
+        ),
+        ("events: missing --period", ["events", "--no-config"], 2, "--period"),
+        (
+            "events: unparseable --period",
+            ["events", "--period", "x", "--no-config"],
+            2,
+            "--period",
+        ),
+        (
+            "events: unknown flag",
+            ["events", "--period", "60", "--frobnicate", "--no-config"],
+            2,
+            "--frobnicate",
+        ),
+        ("events: --period missing value", ["events", "--period"], 2, "--period"),
+        (
+            "events: --win-start missing value",
+            ["events", "--period", "60", "--win-start"],
+            2,
+            "--win-start",
+        ),
+        (
+            "events: unparseable --win-start",
+            ["events", "--period", "60", "--win-start", "nope", "--no-config"],
+            2,
+            "--win-start",
+        ),
+        (
+            "events: --now missing value",
+            ["events", "--period", "60", "--now"],
+            2,
+            "--now",
+        ),
+        (
+            "events: unparseable --now",
+            ["events", "--period", "60", "--now", "nope", "--no-config"],
+            2,
+            "--now",
+        ),
+        (
+            "events: --projects-root missing value",
+            ["events", "--period", "60", "--projects-root"],
+            2,
+            "--projects-root",
+        ),
+        (
+            "events: --extra-projects-root missing value",
+            ["events", "--period", "60", "--extra-projects-root"],
+            2,
+            "--extra-projects-root",
+        ),
+        (
+            "beacons-latest: missing --session-id",
+            ["beacons-latest", "--no-config"],
+            2,
+            "--session-id",
+        ),
+        (
+            "beacons-latest: unknown flag",
+            [
+                "beacons-latest",
+                "--session-id",
+                "deadbeef",
+                "--frobnicate",
+                "--no-config",
+            ],
+            2,
+            "--frobnicate",
+        ),
+        (
+            "beacons-latest: --session-id missing value",
+            ["beacons-latest", "--session-id"],
+            2,
+            "--session-id",
+        ),
+        (
+            "beacons-latest: --projects-root missing value",
+            ["beacons-latest", "--session-id", "deadbeef", "--projects-root"],
+            2,
+            "--projects-root",
+        ),
+        (
+            "beacons-latest: --now missing value",
+            ["beacons-latest", "--session-id", "deadbeef", "--now"],
+            2,
+            "--now",
+        ),
+        (
+            "beacons-latest: unparseable --now",
+            [
+                "beacons-latest",
+                "--session-id",
+                "deadbeef",
+                "--now",
+                "nope",
+                "--no-config",
+            ],
+            2,
+            "--now",
+        ),
+        (
+            "beacons-latest: --extra-projects-root missing value",
+            ["beacons-latest", "--session-id", "deadbeef", "--extra-projects-root"],
+            2,
+            "--extra-projects-root",
+        ),
+        (
+            "beacons-history: missing --period",
+            ["beacons-history", "--no-config"],
+            2,
+            "--period",
+        ),
+        (
+            "beacons-history: unparseable --period",
+            ["beacons-history", "--period", "x", "--no-config"],
+            2,
+            "--period",
+        ),
+        (
+            "beacons-history: unknown flag",
+            ["beacons-history", "--period", "60", "--frobnicate", "--no-config"],
+            2,
+            "--frobnicate",
+        ),
+        (
+            "beacons-history: --period missing value",
+            ["beacons-history", "--period"],
+            2,
+            "--period",
+        ),
+        (
+            "beacons-history: --win-start missing value",
+            ["beacons-history", "--period", "60", "--win-start"],
+            2,
+            "--win-start",
+        ),
+        (
+            "beacons-history: unparseable --win-start",
+            ["beacons-history", "--period", "60", "--win-start", "nope", "--no-config"],
+            2,
+            "--win-start",
+        ),
+        (
+            "beacons-history: --now missing value",
+            ["beacons-history", "--period", "60", "--now"],
+            2,
+            "--now",
+        ),
+        (
+            "beacons-history: unparseable --now",
+            ["beacons-history", "--period", "60", "--now", "nope", "--no-config"],
+            2,
+            "--now",
+        ),
+        (
+            "beacons-history: --projects-root missing value",
+            ["beacons-history", "--period", "60", "--projects-root"],
+            2,
+            "--projects-root",
+        ),
+        (
+            "beacons-history: --extra-projects-root missing value",
+            ["beacons-history", "--period", "60", "--extra-projects-root"],
+            2,
+            "--extra-projects-root",
+        ),
+        ("search: missing pattern", ["search", "--no-config"], 2, None),
+        ("search: empty pattern", ["search", "", "--no-config"], 2, None),
+        (
+            "search: invalid --role",
+            ["search", "hello", "--role", "bogus", "--no-config"],
+            2,
+            "--role",
+        ),
+        (
+            "search: invalid --format",
+            ["search", "hello", "--format", "bogus", "--no-config"],
+            2,
+            "--format",
+        ),
+        (
+            "search: --cwd + --any-cwd mutex",
+            ["search", "hello", "--cwd", "foo", "--any-cwd", "--no-config"],
+            2,
+            "--cwd",
+        ),
+        ("search: duplicate positional", ["search", "a", "b", "--no-config"], 2, None),
+        (
+            "search: malformed regex (trailing backslash)",
+            ["search", "\\", "--regex", "--no-config"],
+            2,
+            None,
+        ),
         # COVERAGE-GAPS.md A7 / SPEC §"Search" — unsupported regex
         # metachars (grouping, alternation, bounded repetition) must reject
         # with exit 2. Zig's hand-rolled engine silently accepted `(` as a
         # literal pre-task-#13; that fix added explicit rejection so all four
         # impls now parity-fail this case.
-        ("search: malformed regex (unsupported metachar)",
-         ["search", "(", "--regex", "--no-config"], 2, None),
-        ("search: unknown flag",
-         ["search", "hello", "--frobnicate", "--no-config"], 2, "--frobnicate"),
+        (
+            "search: malformed regex (unsupported metachar)",
+            ["search", "(", "--regex", "--no-config"],
+            2,
+            None,
+        ),
+        (
+            "search: unknown flag",
+            ["search", "hello", "--frobnicate", "--no-config"],
+            2,
+            "--frobnicate",
+        ),
         # COVERAGE-GAPS.md A4 — `bad time` diagnostic. SPEC §"### search":
         # "unparseable --since/--until (`bad time: ...`)". Exit code is the
         # shared contract; the exact diagnostic wording (whether the flag
@@ -1519,51 +1870,87 @@ def check_cli_argument_matrix(lang: str, binary: Path) -> bool:
         #   malformed-{since,until} -> parse_iso8601 fallback + error format
         #   empty value             -> parse_time_arg's "empty value" branch
         #   missing value           -> iter.next().ok_or("--since needs a value")
-        ("search: malformed --since",
-         ["search", "hello", "--since", "not-a-time", "--no-config"], 2, None),
-        ("search: malformed --until",
-         ["search", "hello", "--until", "tomorrow", "--no-config"], 2, None),
-        ("search: empty --since value",
-         ["search", "hello", "--since", "", "--no-config"], 2, None),
-        ("search: --since missing value",
-         ["search", "hello", "--since"], 2, None),
+        (
+            "search: malformed --since",
+            ["search", "hello", "--since", "not-a-time", "--no-config"],
+            2,
+            None,
+        ),
+        (
+            "search: malformed --until",
+            ["search", "hello", "--until", "tomorrow", "--no-config"],
+            2,
+            None,
+        ),
+        (
+            "search: empty --since value",
+            ["search", "hello", "--since", "", "--no-config"],
+            2,
+            None,
+        ),
+        ("search: --since missing value", ["search", "hello", "--since"], 2, None),
         # Missing-value rows for every value-taking search flag. Wording is
         # per-impl; the flag name itself is the stable token.
-        ("search: --role missing value",
-         ["search", "hello", "--role"], 2, "--role"),
-        ("search: --until missing value",
-         ["search", "hello", "--until"], 2, "--until"),
-        ("search: --cwd missing value",
-         ["search", "hello", "--cwd"], 2, "--cwd"),
-        ("search: --context missing value",
-         ["search", "hello", "--context"], 2, "--context"),
-        ("search: --limit missing value",
-         ["search", "hello", "--limit"], 2, "--limit"),
-        ("search: --format missing value",
-         ["search", "hello", "--format"], 2, "--format"),
-        ("search: --snippet-chars missing value",
-         ["search", "hello", "--snippet-chars"], 2, "--snippet-chars"),
-        ("search: --projects-root missing value",
-         ["search", "hello", "--projects-root"], 2, "--projects-root"),
-        ("search: --now missing value",
-         ["search", "hello", "--now"], 2, "--now"),
-        ("search: --extra-projects-root missing value",
-         ["search", "hello", "--extra-projects-root"], 2,
-         "--extra-projects-root"),
+        ("search: --role missing value", ["search", "hello", "--role"], 2, "--role"),
+        ("search: --until missing value", ["search", "hello", "--until"], 2, "--until"),
+        ("search: --cwd missing value", ["search", "hello", "--cwd"], 2, "--cwd"),
+        (
+            "search: --context missing value",
+            ["search", "hello", "--context"],
+            2,
+            "--context",
+        ),
+        ("search: --limit missing value", ["search", "hello", "--limit"], 2, "--limit"),
+        (
+            "search: --format missing value",
+            ["search", "hello", "--format"],
+            2,
+            "--format",
+        ),
+        (
+            "search: --snippet-chars missing value",
+            ["search", "hello", "--snippet-chars"],
+            2,
+            "--snippet-chars",
+        ),
+        (
+            "search: --projects-root missing value",
+            ["search", "hello", "--projects-root"],
+            2,
+            "--projects-root",
+        ),
+        ("search: --now missing value", ["search", "hello", "--now"], 2, "--now"),
+        (
+            "search: --extra-projects-root missing value",
+            ["search", "hello", "--extra-projects-root"],
+            2,
+            "--extra-projects-root",
+        ),
         # Invalid-numeric rows: each targets the per-flag parse-failure branch.
-        ("search: invalid --context",
-         ["search", "hello", "--context", "x", "--no-config"], 2, "--context"),
-        ("search: invalid --limit",
-         ["search", "hello", "--limit", "x", "--no-config"], 2, "--limit"),
-        ("search: invalid --snippet-chars",
-         ["search", "hello", "--snippet-chars", "x", "--no-config"], 2,
-         "--snippet-chars"),
-        ("search: invalid --now",
-         ["search", "hello", "--now", "x", "--no-config"], 2, "--now"),
-
-        # --- --version (cost + events) — exit 0, stdout non-empty ---
-        # (kept in the same matrix so reporting stays uniform; the stdout-check
-        # below handles the 0-exit case.)
+        (
+            "search: invalid --context",
+            ["search", "hello", "--context", "x", "--no-config"],
+            2,
+            "--context",
+        ),
+        (
+            "search: invalid --limit",
+            ["search", "hello", "--limit", "x", "--no-config"],
+            2,
+            "--limit",
+        ),
+        (
+            "search: invalid --snippet-chars",
+            ["search", "hello", "--snippet-chars", "x", "--no-config"],
+            2,
+            "--snippet-chars",
+        ),
+        (
+            "search: invalid --now",
+            ["search", "hello", "--now", "x", "--no-config"],
+            2,
+            "--now",
+        ),
         ("--version (cost)", ["--version"], 0, None),
         ("--version (events)", ["events", "--version"], 0, None),
     ]
@@ -1618,30 +2005,83 @@ def check_omit_now_smoke(lang: str, binary: Path) -> bool:
         # real-dir to keep the no-warning path (some impls emit a stderr line
         # for the missing-root case which is fine but noisier than needed).
         cases: list[tuple[str, list[str]]] = [
-            ("cost", ["--period", "60", "--win-start", "0",
-                      "--projects-root", empty, "--no-config"]),
-            ("events", ["events", "--period", "60", "--win-start", "0",
-                        "--projects-root", empty, "--no-config"]),
-            ("beacons-history", ["beacons-history", "--period", "60",
-                                  "--win-start", "0",
-                                  "--projects-root", empty, "--no-config"]),
-            ("beacons-latest", ["beacons-latest", "--session-id", "deadbeef",
-                                "--projects-root", empty, "--no-config"]),
-            ("search", ["search", "hello",
-                        "--projects-root", empty, "--no-config",
-                        "--format", "jsonl"]),
+            (
+                "cost",
+                [
+                    "--period",
+                    "60",
+                    "--win-start",
+                    "0",
+                    "--projects-root",
+                    empty,
+                    "--no-config",
+                ],
+            ),
+            (
+                "events",
+                [
+                    "events",
+                    "--period",
+                    "60",
+                    "--win-start",
+                    "0",
+                    "--projects-root",
+                    empty,
+                    "--no-config",
+                ],
+            ),
+            (
+                "beacons-history",
+                [
+                    "beacons-history",
+                    "--period",
+                    "60",
+                    "--win-start",
+                    "0",
+                    "--projects-root",
+                    empty,
+                    "--no-config",
+                ],
+            ),
+            (
+                "beacons-latest",
+                [
+                    "beacons-latest",
+                    "--session-id",
+                    "deadbeef",
+                    "--projects-root",
+                    empty,
+                    "--no-config",
+                ],
+            ),
+            (
+                "search",
+                [
+                    "search",
+                    "hello",
+                    "--projects-root",
+                    empty,
+                    "--no-config",
+                    "--format",
+                    "jsonl",
+                ],
+            ),
         ]
         for label, args in cases:
             result = run_captured(
                 [str(binary), *args],
-                text=True, encoding="utf-8", timeout=10,
+                text=True,
+                encoding="utf-8",
+                timeout=10,
             )
             ok = result.returncode == 0
             badge = " OK " if ok else "FAIL"
             print(f"  [{lang:>4s}] {'omit-now/' + label:48s} {badge}")
             if not ok:
-                print(f"        exit={result.returncode} "
-                      f"stderr={result.stderr.strip()[:200]!r}")
+                print(
+                    f"        exit={result.returncode} "
+                    f"stderr={result.stderr.strip()[:200]!r}"
+                )
                 all_ok = False
 
     return all_ok
@@ -1649,16 +2089,30 @@ def check_omit_now_smoke(lang: str, binary: Path) -> bool:
 
 @overload
 def run_walker_env(
-    lang: str, binary: Path, meta: dict, env: dict, projects_root: Path | None = None,
-    *, return_stderr: Literal[False] = False,
+    lang: str,
+    binary: Path,
+    meta: dict,
+    env: dict,
+    projects_root: Path | None = None,
+    *,
+    return_stderr: Literal[False] = False,
 ) -> dict: ...
 @overload
 def run_walker_env(
-    lang: str, binary: Path, meta: dict, env: dict, projects_root: Path | None = None,
-    *, return_stderr: Literal[True],
+    lang: str,
+    binary: Path,
+    meta: dict,
+    env: dict,
+    projects_root: Path | None = None,
+    *,
+    return_stderr: Literal[True],
 ) -> tuple[dict, str]: ...
 def run_walker_env(
-    lang: str, binary: Path, meta: dict, env: dict, projects_root: Path | None = None,
+    lang: str,
+    binary: Path,
+    meta: dict,
+    env: dict,
+    projects_root: Path | None = None,
     return_stderr: bool = False,
 ) -> dict | tuple[dict, str]:
     """Run cost mode WITHOUT --no-config (so walker-roots.json is read) under a
@@ -1669,15 +2123,16 @@ def run_walker_env(
     (dict, stderr_text) so callers can assert on diagnostic emission."""
     cmd = [
         str(binary),
-        "--period", str(meta["period_seconds"]),
-        "--win-start", repr(meta["win_start_unix"]),
-        "--now", repr(meta["now_unix"]),
+        "--period",
+        str(meta["period_seconds"]),
+        "--win-start",
+        repr(meta["win_start_unix"]),
+        "--now",
+        repr(meta["now_unix"]),
     ]
     if projects_root is not None:
         cmd.extend(["--projects-root", str(projects_root)])
-    result = run_captured(
-        cmd, text=True, encoding="utf-8", timeout=10, env=env
-    )
+    result = run_captured(cmd, text=True, encoding="utf-8", timeout=10, env=env)
     if result.returncode != 0:
         raise RuntimeError(
             f"{binary.name} exited {result.returncode}\nstderr:\n{result.stderr}"
@@ -1714,7 +2169,9 @@ def check_config_resolution(lang: str, binary: Path, expected: dict) -> bool:
         return True
     # Pick the two priciest fixtures so the sum is discriminating (a dropped
     # config root or a 0-cost primary can't masquerade as a pass).
-    ranked = sorted(names, key=lambda n: expected["fixtures"][n]["trailing_usd"], reverse=True)
+    ranked = sorted(
+        names, key=lambda n: expected["fixtures"][n]["trailing_usd"], reverse=True
+    )
     fixture_a, fixture_b = ranked[0], ranked[1]
     target = {
         "trailing_usd": expected["fixtures"][fixture_a]["trailing_usd"]
@@ -1722,9 +2179,11 @@ def check_config_resolution(lang: str, binary: Path, expected: dict) -> bool:
         "window_usd": expected["fixtures"][fixture_a]["window_usd"]
         + expected["fixtures"][fixture_b]["window_usd"],
     }
-    with tempfile.TemporaryDirectory(prefix="walker-cfg-home-") as home, \
-         tempfile.TemporaryDirectory(prefix="walker-cfg-extra-") as extra, \
-         tempfile.TemporaryDirectory(prefix="walker-cfg-bogus-") as bogus:
+    with (
+        tempfile.TemporaryDirectory(prefix="walker-cfg-home-") as home,
+        tempfile.TemporaryDirectory(prefix="walker-cfg-extra-") as extra,
+        tempfile.TemporaryDirectory(prefix="walker-cfg-bogus-") as bogus,
+    ):
         home_p, extra_p = Path(home), Path(extra)
         shutil.copytree(CORPUS / fixture_a, home_p / ".claude" / "projects" / fixture_a)
         shutil.copytree(CORPUS / fixture_b, extra_p / fixture_b)
@@ -1766,25 +2225,25 @@ def check_config_resolution(lang: str, binary: Path, expected: dict) -> bool:
 # extra path does not exist; SPEC says the binary emits a stderr "extra root
 # not a directory, skipping" line and continues.
 MALFORMED_CONFIG_VARIANTS: list[tuple[str, str, bool]] = [
-    ("empty",              "",                                     False),
-    ("malformed-json",     "{not valid json",                      True),
+    ("empty", "", False),
+    ("malformed-json", "{not valid json", True),
     # Unclosed string fails JSON tokenization itself (a different parse
     # stage than the bareword case above in some parsers).
-    ("unclosed-string",    '{"extra_roots": ["/x',                 True),
-    ("non-object-array",   "[]",                                   True),
-    ("non-object-scalar",  '"hello"',                              True),
-    ("missing-key",        "{}",                                   False),
-    ("unrelated-key",      '{"unrelated": []}',                    False),
-    ("empty-extra-array",  '{"extra_roots": []}',                  False),
-    ("nonexistent-extra",  '{"extra_roots": ["/does/not/exist"]}', True),
+    ("unclosed-string", '{"extra_roots": ["/x', True),
+    ("non-object-array", "[]", True),
+    ("non-object-scalar", '"hello"', True),
+    ("missing-key", "{}", False),
+    ("unrelated-key", '{"unrelated": []}', False),
+    ("empty-extra-array", '{"extra_roots": []}', False),
+    ("nonexistent-extra", '{"extra_roots": ["/does/not/exist"]}', True),
     # Valid object with wrong-typed extras array. Reaches Go's typed
     # json.Unmarshal failure branch (walker_roots.go:71); Rust/C++/Zig
     # silently skip non-string elements. Diagnostic optional — Go emits
     # one, the others don't.
-    ("wrong-typed-extras", '{"extra_roots":[1,2,3]}',              False),
+    ("wrong-typed-extras", '{"extra_roots":[1,2,3]}', False),
     # Valid object wrapped in leading/trailing whitespace (exercises the
     # pre-parse whitespace skip in Go's object sniff; a no-op elsewhere).
-    ("surrounding-ws",     '\n\t  {"extra_roots": []}  \n\n',      False),
+    ("surrounding-ws", '\n\t  {"extra_roots": []}  \n\n', False),
 ]
 
 
@@ -1813,11 +2272,15 @@ def check_config_malformed(lang: str, binary: Path, expected: dict) -> bool:
     overall = True
     for variant_label, body, expect_diagnostic in MALFORMED_CONFIG_VARIANTS:
         label = f"config-malformed:{variant_label}"
-        with tempfile.TemporaryDirectory(prefix="walker-cfg-mal-home-") as home, \
-             tempfile.TemporaryDirectory(prefix="walker-cfg-mal-bogus-") as bogus:
+        with (
+            tempfile.TemporaryDirectory(prefix="walker-cfg-mal-home-") as home,
+            tempfile.TemporaryDirectory(prefix="walker-cfg-mal-bogus-") as bogus,
+        ):
             home_p = Path(home)
             shutil.copytree(CORPUS / fixture, home_p / ".claude" / "projects" / fixture)
-            (home_p / ".claude" / "walker-roots.json").write_text(body, encoding="utf-8")
+            (home_p / ".claude" / "walker-roots.json").write_text(
+                body, encoding="utf-8"
+            )
             env = dict(os.environ)
             if sys.platform == "win32":
                 env["USERPROFILE"], env["HOME"] = str(home_p), str(bogus)
@@ -1866,15 +2329,19 @@ def check_cost_subcommand(lang: str, binary: Path, expected: dict) -> bool:
     with tempfile.TemporaryDirectory(prefix="walker-cost-sub-") as tmp:
         shutil.copytree(CORPUS / fixture, Path(tmp) / fixture)
         cmd = [
-            str(binary), "cost",
-            "--period", str(meta["period_seconds"]),
-            "--win-start", repr(meta["win_start_unix"]),
-            "--now", repr(meta["now_unix"]),
-            "--projects-root", tmp,
+            str(binary),
+            "cost",
+            "--period",
+            str(meta["period_seconds"]),
+            "--win-start",
+            repr(meta["win_start_unix"]),
+            "--now",
+            repr(meta["now_unix"]),
+            "--projects-root",
+            tmp,
             "--no-config",
         ]
-        result = run_captured(cmd, text=True,
-                                encoding="utf-8", timeout=10)
+        result = run_captured(cmd, text=True, encoding="utf-8", timeout=10)
     ok = result.returncode == 0
     got: dict = {}
     if ok:
@@ -1906,7 +2373,6 @@ def check_beacons_extra_root(lang: str, binary: Path) -> bool:
     now_unix = expected_latest["_meta"]["now_unix"]
     all_ok = True
 
-    # --- latest: empty primary, scenario under the extra root ---
     scenario = "clean_lifecycle"
     target = expected_latest["fixtures"][scenario]
     label = "beacons-latest: extra root"
@@ -1916,12 +2382,21 @@ def check_beacons_extra_root(lang: str, binary: Path) -> bool:
         primary.mkdir()
         shutil.copytree(BEACON_CORPUS / scenario, extra / scenario)
         try:
-            got = run_walker_subcommand(lang, binary, "beacons-latest", [
-                "--session-id", target["session_id"],
-                "--projects-root", str(primary),
-                "--extra-projects-root", str(extra),
-                "--now", repr(now_unix),
-            ])
+            got = run_walker_subcommand(
+                lang,
+                binary,
+                "beacons-latest",
+                [
+                    "--session-id",
+                    target["session_id"],
+                    "--projects-root",
+                    str(primary),
+                    "--extra-projects-root",
+                    str(extra),
+                    "--now",
+                    repr(now_unix),
+                ],
+            )
         except Exception as e:
             print(f"  [{lang:>4s}] {label:38s} FAIL  {e}")
             got = None
@@ -1939,7 +2414,6 @@ def check_beacons_extra_root(lang: str, binary: Path) -> bool:
     else:
         all_ok = False
 
-    # --- history: slug_a in primary, slug_b in extra root ---
     scenario = "cross_session_pairs"
     target = expected_history["fixtures"][scenario]
     label = "beacons-history: extra root"
@@ -1949,29 +2423,45 @@ def check_beacons_extra_root(lang: str, binary: Path) -> bool:
         shutil.copytree(BEACON_CORPUS / scenario / "slug_a", primary / "slug_a")
         shutil.copytree(BEACON_CORPUS / scenario / "slug_b", extra / "slug_b")
         try:
-            got = run_walker_subcommand(lang, binary, "beacons-history", [
-                "--period", "604800",
-                "--win-start", "0",
-                "--projects-root", str(primary),
-                "--extra-projects-root", str(extra),
-                "--now", repr(now_unix),
-            ])
+            got = run_walker_subcommand(
+                lang,
+                binary,
+                "beacons-history",
+                [
+                    "--period",
+                    "604800",
+                    "--win-start",
+                    "0",
+                    "--projects-root",
+                    str(primary),
+                    "--extra-projects-root",
+                    str(extra),
+                    "--now",
+                    repr(now_unix),
+                ],
+            )
         except Exception as e:
             print(f"  [{lang:>4s}] {label:38s} FAIL  {e}")
             got = None
     if got is not None:
+
         def pairs_key(p):
             return (p["begin_eta"], p["actual_elapsed"])
+
         pairs_ok = sorted(map(pairs_key, got.get("pairs", []))) == sorted(
-            map(pairs_key, target["pairs"]))
+            map(pairs_key, target["pairs"])
+        )
         bias_got, bias_tgt = got.get("bias_factor"), target.get("bias_factor")
         if bias_got is None or bias_tgt is None:
             bias_ok = bias_got == bias_tgt
         else:
             bias_ok = abs(bias_got - bias_tgt) <= BIAS_TOLERANCE
-        ok = (pairs_ok and bias_ok
-              and got.get("session_count") == target["session_count"]
-              and got.get("n_pairs") == target["n_pairs"])
+        ok = (
+            pairs_ok
+            and bias_ok
+            and got.get("session_count") == target["session_count"]
+            and got.get("n_pairs") == target["n_pairs"]
+        )
         print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
         if not ok:
             print(f"        got: {got}")
@@ -2003,22 +2493,28 @@ def check_events_extra_root_profile(lang: str, binary: Path) -> bool:
         primary = Path(tmp) / "primary"
         primary.mkdir()
         cmd = [
-            str(binary), "events",
-            "--period", repr(expected_data["pin_period"]),
-            "--win-start", repr(expected_data["pin_win_start"]),
-            "--projects-root", str(primary),
-            "--extra-projects-root", str(EVENTS_CORPUS / fixture_name),
-            "--now", repr(expected_data["pin_now"]),
+            str(binary),
+            "events",
+            "--period",
+            repr(expected_data["pin_period"]),
+            "--win-start",
+            repr(expected_data["pin_win_start"]),
+            "--projects-root",
+            str(primary),
+            "--extra-projects-root",
+            str(EVENTS_CORPUS / fixture_name),
+            "--now",
+            repr(expected_data["pin_now"]),
             "--no-config",
         ]
-        result = run_captured(cmd, text=True,
-                                encoding="utf-8", timeout=10, env=env)
+        result = run_captured(cmd, text=True, encoding="utf-8", timeout=10, env=env)
     ok = result.returncode == 0
     got_records: list[dict] = []
     if ok:
         try:
-            got_records = [json.loads(line) for line in result.stdout.splitlines()
-                           if line.strip()]
+            got_records = [
+                json.loads(line) for line in result.stdout.splitlines() if line.strip()
+            ]
         except Exception:
             ok = False
     if ok:
@@ -2034,8 +2530,10 @@ def check_events_extra_root_profile(lang: str, binary: Path) -> bool:
         )
     print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
     if not ok:
-        print(f"        exit={result.returncode} stdout={result.stdout!r} "
-              f"stderr={result.stderr!r}")
+        print(
+            f"        exit={result.returncode} stdout={result.stdout!r} "
+            f"stderr={result.stderr!r}"
+        )
     return ok
 
 
@@ -2056,15 +2554,19 @@ def check_search_cpuprofile(lang: str, binary: Path) -> bool:
         shutil.copytree(SEARCH_CORPUS / scenario_name, Path(tmp) / scenario_name)
         env = dict(os.environ, WALKER_CPUPROFILE=str(Path(tmp) / "cpu.prof"))
         cmd = [
-            str(binary), "search", combo["pattern"],
-            "--projects-root", tmp,
-            "--now", repr(now_unix),
-            "--format", "jsonl",
+            str(binary),
+            "search",
+            combo["pattern"],
+            "--projects-root",
+            tmp,
+            "--now",
+            repr(now_unix),
+            "--format",
+            "jsonl",
             "--no-config",
             *combo["flags"],
         ]
-        result = run_captured(cmd, text=True,
-                                encoding="utf-8", timeout=10, env=env)
+        result = run_captured(cmd, text=True, encoding="utf-8", timeout=10, env=env)
     ok = result.returncode == 0
     hits = []
     if ok:
@@ -2082,23 +2584,29 @@ def check_search_cpuprofile(lang: str, binary: Path) -> bool:
     ok = ok and hits == combo["hits"]
     print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
     if not ok:
-        print(f"        exit={result.returncode} hits={len(hits)} "
-              f"expected={len(combo['hits'])}")
+        print(
+            f"        exit={result.returncode} hits={len(hits)} "
+            f"expected={len(combo['hits'])}"
+        )
     return ok
 
 
-def _write_beacon_lines(path: Path,
-                        entries: list[tuple[float, str, str]]) -> None:
+def _write_beacon_lines(path: Path, entries: list[tuple[float, str, str]]) -> None:
     """Write a minimal beacon transcript: entries are (unix_ts, kind, eta_json)
     triples rendered as assistant turns carrying one beacon block each."""
     from datetime import datetime, timezone
+
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="\n") as f:
         for index, (ts, kind, eta) in enumerate(entries):
             iso = datetime.fromtimestamp(ts, tz=timezone.utc).strftime(
-                "%Y-%m-%dT%H:%M:%S.000Z")
-            beacon = ('{"kind": "%s", "eta_seconds": %s, "summary": "odd %d"}'
-                      % (kind, eta, index))
+                "%Y-%m-%dT%H:%M:%S.000Z"
+            )
+            beacon = '{"kind": "%s", "eta_seconds": %s, "summary": "odd %d"}' % (
+                kind,
+                eta,
+                index,
+            )
             entry = {
                 "type": "assistant",
                 "timestamp": iso,
@@ -2106,9 +2614,12 @@ def _write_beacon_lines(path: Path,
                     "id": f"msg_odd_{index}",
                     "role": "assistant",
                     "model": "claude-opus-4-7",
-                    "content": [{"type": "text",
-                                 "text": f"<progress-beacon>{beacon}"
-                                         f"</progress-beacon>"}],
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"<progress-beacon>{beacon}</progress-beacon>",
+                        }
+                    ],
                     "usage": {"input_tokens": 1, "output_tokens": 1},
                 },
             }
@@ -2126,7 +2637,8 @@ def _populate_oddities(root: Path) -> None:
     (slug_a / "plain-session-dir").mkdir()
     (slug_a / "sess-file-subagents").mkdir()
     (slug_a / "sess-file-subagents" / "subagents").write_text(
-        "a file, not a dir\n", encoding="utf-8")
+        "a file, not a dir\n", encoding="utf-8"
+    )
     # A directory named like a parent transcript.
     dir_jsonl = root / "slug-dir" / "phantom.jsonl"
     dir_jsonl.mkdir(parents=True)
@@ -2146,7 +2658,6 @@ def check_discovery_oddities(lang: str, binary: Path, expected: dict) -> bool:
     meta = expected["_meta"]
     all_ok = True
 
-    # --- cost mode ---
     label = "oddities: cost walk"
     fix_parent = "01-single-parent"
     fix_agent = "07-unknown-model"
@@ -2182,15 +2693,17 @@ def check_discovery_oddities(lang: str, binary: Path, expected: dict) -> bool:
             print(f"  [{lang:>4s}] {label:38s} FAIL  {e}")
             all_ok = False
 
-    # --- beacons-latest + beacons-history over one decorated tree ---
     now_unix = meta["now_unix"]
     with tempfile.TemporaryDirectory(prefix="walker-oddities-bc-") as tmp:
         root = Path(tmp)
         # Parent transcript with a begin->end lifecycle (sid "oddsess").
-        _write_beacon_lines(root / "slug-a" / "oddsess.jsonl", [
-            (now_unix - 600, "begin", "600"),
-            (now_unix - 100, "end", "0"),
-        ])
+        _write_beacon_lines(
+            root / "slug-a" / "oddsess.jsonl",
+            [
+                (now_unix - 600, "begin", "600"),
+                (now_unix - 100, "end", "0"),
+            ],
+        )
         _populate_oddities(root)
         # Subagent transcript with its own lifecycle, plus strays.
         sub = root / "slug-a" / "sess2" / "subagents"
@@ -2198,21 +2711,34 @@ def check_discovery_oddities(lang: str, binary: Path, expected: dict) -> bool:
         (sub / "stray.txt").write_text("skip\n", encoding="utf-8")
         (sub / "notagent.jsonl").write_text("", encoding="utf-8")
         (sub / "nested-dir").mkdir()
-        _write_beacon_lines(sub / "agent-sub.jsonl", [
-            (now_unix - 1000, "begin", "200"),
-            (now_unix - 700, "end", "0"),
-        ])
+        _write_beacon_lines(
+            sub / "agent-sub.jsonl",
+            [
+                (now_unix - 1000, "begin", "200"),
+                (now_unix - 700, "end", "0"),
+            ],
+        )
 
         label = "oddities: beacons-latest walk"
         try:
-            got = run_walker_subcommand(lang, binary, "beacons-latest", [
-                "--session-id", "oddsess",
-                "--projects-root", str(root),
-                "--extra-projects-root", str(root / "does-not-exist"),
-                "--now", repr(now_unix),
-            ])
-            ok = (got.get("beacon") or {}).get("kind") == "end" and \
-                got.get("emitted_at") == now_unix - 100
+            got = run_walker_subcommand(
+                lang,
+                binary,
+                "beacons-latest",
+                [
+                    "--session-id",
+                    "oddsess",
+                    "--projects-root",
+                    str(root),
+                    "--extra-projects-root",
+                    str(root / "does-not-exist"),
+                    "--now",
+                    repr(now_unix),
+                ],
+            )
+            ok = (got.get("beacon") or {}).get("kind") == "end" and got.get(
+                "emitted_at"
+            ) == now_unix - 100
         except Exception as e:
             print(f"  [{lang:>4s}] {label:38s} FAIL  {e}")
             ok = False
@@ -2222,20 +2748,33 @@ def check_discovery_oddities(lang: str, binary: Path, expected: dict) -> bool:
 
         label = "oddities: beacons-history walk"
         try:
-            got = run_walker_subcommand(lang, binary, "beacons-history", [
-                "--period", "604800",
-                "--win-start", "0",
-                "--projects-root", str(root),
-                "--now", repr(now_unix),
-            ])
+            got = run_walker_subcommand(
+                lang,
+                binary,
+                "beacons-history",
+                [
+                    "--period",
+                    "604800",
+                    "--win-start",
+                    "0",
+                    "--projects-root",
+                    str(root),
+                    "--now",
+                    repr(now_unix),
+                ],
+            )
             got_pairs = sorted(
-                (p["begin_eta"], p["actual_elapsed"]) for p in got.get("pairs", []))
+                (p["begin_eta"], p["actual_elapsed"]) for p in got.get("pairs", [])
+            )
             ok = (
                 got_pairs == [(200.0, 300.0), (600.0, 500.0)]
                 and got.get("n_pairs") == 2
                 and got.get("session_count") == 2
-                and abs((got.get("bias_factor") or 0.0)
-                        - ((500.0 / 600.0 + 300.0 / 200.0) / 2.0)) <= BIAS_TOLERANCE
+                and abs(
+                    (got.get("bias_factor") or 0.0)
+                    - ((500.0 / 600.0 + 300.0 / 200.0) / 2.0)
+                )
+                <= BIAS_TOLERANCE
             )
         except Exception as e:
             print(f"  [{lang:>4s}] {label:38s} FAIL  {e}")
@@ -2265,7 +2804,6 @@ def check_mtime_prune(lang: str, binary: Path, expected: dict) -> bool:
     aged = (cutoff - 30 * 86400, cutoff - 30 * 86400)
     all_ok = True
 
-    # --- aged parent transcript ---
     label = "mtime-prune: parent"
     with tempfile.TemporaryDirectory(prefix="walker-prune-parent-") as tmp:
         root = Path(tmp)
@@ -2283,7 +2821,6 @@ def check_mtime_prune(lang: str, binary: Path, expected: dict) -> bool:
     if not ok:
         all_ok = False
 
-    # --- aged subagent transcript ---
     label = "mtime-prune: subagent"
     with tempfile.TemporaryDirectory(prefix="walker-prune-sub-") as tmp:
         root = Path(tmp)
@@ -2331,8 +2868,12 @@ def check_search_mtime_prune(lang: str, binary: Path) -> bool:
             aged.append(sub)
         try:
             got_hits, got_summary = run_walker_search(
-                lang, binary, Path(tmp),
-                combo["pattern"], ["--since", "365d"], now_unix,
+                lang,
+                binary,
+                Path(tmp),
+                combo["pattern"],
+                ["--since", "365d"],
+                now_unix,
             )
         except Exception as e:
             print(f"  [{lang:>4s}] {label:38s} FAIL  {e}")
@@ -2343,27 +2884,32 @@ def check_search_mtime_prune(lang: str, binary: Path) -> bool:
     sub_snippets = set()
     for sub in aged:
         # The fixture generator writes one assistant turn per subagent file.
-        for line in (SEARCH_CORPUS / scenario_name /
-                     sub.relative_to(scen)).read_text(encoding="utf-8").splitlines():
+        for line in (
+            (SEARCH_CORPUS / scenario_name / sub.relative_to(scen))
+            .read_text(encoding="utf-8")
+            .splitlines()
+        ):
             if line.strip():
                 blocks = json.loads(line)["message"]["content"]
-                sub_snippets.update(b["text"] for b in blocks
-                                    if b.get("type") == "text")
+                sub_snippets.update(
+                    b["text"] for b in blocks if b.get("type") == "text"
+                )
     exp_hits = [h for h in combo["hits"] if h["snippet"] not in sub_snippets]
     sessions = len({h["session_id"] for h in exp_hits})
-    ok = (got_hits == exp_hits
-          and got_summary is not None
-          and got_summary.get("hits") == len(exp_hits)
-          and got_summary.get("sessions_matched") == sessions)
+    ok = (
+        got_hits == exp_hits
+        and got_summary is not None
+        and got_summary.get("hits") == len(exp_hits)
+        and got_summary.get("sessions_matched") == sessions
+    )
     print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
     if not ok:
-        print(f"        got {len(got_hits)} hits, expected {len(exp_hits)}; "
-              f"summary={got_summary}")
+        print(
+            f"        got {len(got_hits)} hits, expected {len(exp_hits)}; "
+            f"summary={got_summary}"
+        )
         return False
 
-    # Phase 2: age the PARENT transcripts too -- the parent-side prune arm
-    # is distinct code in every impl (zig walks parents and subagents in
-    # separate scanners). All hits must now be pruned.
     label2 = "search: --since mtime prune (parents)"
     with tempfile.TemporaryDirectory(prefix="walker-search-mtime2-") as tmp:
         scen = Path(tmp) / scenario_name
@@ -2372,18 +2918,20 @@ def check_search_mtime_prune(lang: str, binary: Path) -> bool:
             os.utime(transcript, (0, 0))
         try:
             got_hits, got_summary = run_walker_search(
-                lang, binary, Path(tmp),
-                combo["pattern"], ["--since", "365d"], now_unix,
+                lang,
+                binary,
+                Path(tmp),
+                combo["pattern"],
+                ["--since", "365d"],
+                now_unix,
             )
         except Exception as e:
             print(f"  [{lang:>4s}] {label2:38s} FAIL  {e}")
             return False
-    ok = (got_hits == [] and got_summary is not None
-          and got_summary.get("hits") == 0)
+    ok = got_hits == [] and got_summary is not None and got_summary.get("hits") == 0
     print(f"  [{lang:>4s}] {label2:38s} {' OK ' if ok else 'FAIL'}")
     if not ok:
-        print(f"        got {len(got_hits)} hits, expected 0; "
-              f"summary={got_summary}")
+        print(f"        got {len(got_hits)} hits, expected 0; summary={got_summary}")
     return ok
 
 
@@ -2404,64 +2952,115 @@ def check_search_tool_blocks_rich(lang: str, binary: Path) -> bool:
     ts = "2026-05-09T11:58:00.000Z"
     pad = "padding words " * 30  # keep the snippet window inside the text block
     rich_input = {
-        "cmd": "run", "count": 3, "ratio": 1.5, "ok": True, "none": None,
+        "cmd": "run",
+        "count": 3,
+        "ratio": 1.5,
+        "ok": True,
+        "none": None,
         "obj": {"k": [1, "two", False, None, {"d": 2.5}]},
         "arr": [{"x": "y"}, [2, 3], "s", True, None],
         # Escape-needing characters inside dumped tool-input strings.
-        "esc": "tab\there\nquote\"back\\slash bs\bff\fcr\rctl\x01",
+        "esc": 'tab\there\nquote"back\\slash bs\bff\fcr\rctl\x01',
         # Searchable needle INSIDE the dump for the canonical-form combo.
         "needle_key": "rich-tool-needle",
     }
     lines = [
-        {"type": "assistant", "timestamp": ts, "message": {
-            "id": "m-rich", "role": "assistant", "model": "claude-opus-4-7",
-            "content": [
-                {"type": "text", "text": pad + " rich-needle " + pad},
-                {"type": "tool_use", "id": "t1", "name": "Bash",
-                 "input": rich_input},
-                {"type": "tool_use", "id": "t2", "name": "Bash",
-                 "input": "pre-stringified input"},
-            ],
-            "usage": {"input_tokens": 1, "output_tokens": 1}}},
+        {
+            "type": "assistant",
+            "timestamp": ts,
+            "message": {
+                "id": "m-rich",
+                "role": "assistant",
+                "model": "claude-opus-4-7",
+                "content": [
+                    {"type": "text", "text": pad + " rich-needle " + pad},
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Bash",
+                        "input": rich_input,
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "t2",
+                        "name": "Bash",
+                        "input": "pre-stringified input",
+                    },
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        },
         # Decoy shapes that must be skipped silently in every impl.
-        {"type": "user", "timestamp": ts, "message": {
-            "role": "user", "content": 42}},
-        {"type": "user", "timestamp": ts, "message": {
-            "role": "user", "content": ["bare string block",
-                                        {"text": "typeless block"},
-                                        {"type": "image", "source": "x"}]}},
-        {"type": "user", "timestamp": ts, "message": {
-            "role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "t1"},
-                {"type": "tool_result", "tool_use_id": "t2", "content": 7},
-                {"type": "tool_result", "tool_use_id": "t3",
-                 "content": "plain result string"},
-            ]}},
+        {"type": "user", "timestamp": ts, "message": {"role": "user", "content": 42}},
+        {
+            "type": "user",
+            "timestamp": ts,
+            "message": {
+                "role": "user",
+                "content": [
+                    "bare string block",
+                    {"text": "typeless block"},
+                    {"type": "image", "source": "x"},
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": ts,
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t1"},
+                    {"type": "tool_result", "tool_use_id": "t2", "content": 7},
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t3",
+                        "content": "plain result string",
+                    },
+                ],
+            },
+        },
         # Text block FIRST, then tool_result string + array, then a SECOND
         # text block: exercises the newline-join arms of both the text and
         # tool-block extraction paths.
-        {"type": "user", "timestamp": ts, "message": {
-            "role": "user", "content": [
-                {"type": "text", "text": "lead text"},
-                {"type": "tool_result", "tool_use_id": "t5",
-                 "content": "trailing result"},
-                {"type": "tool_result", "tool_use_id": "t6",
-                 "content": [{"type": "text", "text": "inner text"},
-                             {"type": "image", "src": "x"},
-                             "bare-inner"]},
-                {"type": "text", "text": "tail text"},
-            ]}},
+        {
+            "type": "user",
+            "timestamp": ts,
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "lead text"},
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t5",
+                        "content": "trailing result",
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t6",
+                        "content": [
+                            {"type": "text", "text": "inner text"},
+                            {"type": "image", "src": "x"},
+                            "bare-inner",
+                        ],
+                    },
+                    {"type": "text", "text": "tail text"},
+                ],
+            },
+        },
         # Content whose FIRST (and only) block is an object without a type:
         # the only-tool-blocks classifier must bail on the missing type.
-        {"type": "user", "timestamp": ts, "message": {
-            "role": "user", "content": [{"text": "typeless only"}]}},
+        {
+            "type": "user",
+            "timestamp": ts,
+            "message": {"role": "user", "content": [{"text": "typeless only"}]},
+        },
     ]
     all_ok = True
     with tempfile.TemporaryDirectory(prefix="walker-search-rich-") as tmp:
         scen = Path(tmp) / "rich-tools"
         scen.mkdir()
-        with (scen / "richsess.jsonl").open("w", encoding="utf-8",
-                                            newline="\n") as f:
+        with (scen / "richsess.jsonl").open("w", encoding="utf-8", newline="\n") as f:
             for line in lines:
                 f.write(json.dumps(line))
                 f.write("\n")
@@ -2470,30 +3069,42 @@ def check_search_tool_blocks_rich(lang: str, binary: Path) -> bool:
             ("search: rich tool blocks (include)", ["--include-tool-blocks"]),
         ):
             cmd = [
-                str(binary), "search", "rich-needle",
-                "--projects-root", tmp,
-                "--now", repr(now_unix),
-                "--format", "jsonl",
+                str(binary),
+                "search",
+                "rich-needle",
+                "--projects-root",
+                tmp,
+                "--now",
+                repr(now_unix),
+                "--format",
+                "jsonl",
                 "--no-config",
                 *flags,
             ]
-            result = run_captured(cmd, text=True,
-                                    encoding="utf-8", timeout=10)
+            result = run_captured(cmd, text=True, encoding="utf-8", timeout=10)
             ok = result.returncode == 0
             hits = []
             if ok:
                 try:
-                    hits = [json.loads(line) for line in result.stdout.splitlines()
-                            if line.strip() and json.loads(line).get("type") == "hit"]
+                    hits = [
+                        json.loads(line)
+                        for line in result.stdout.splitlines()
+                        if line.strip() and json.loads(line).get("type") == "hit"
+                    ]
                 except Exception:
                     ok = False
-            ok = (ok and len(hits) == 1
-                  and hits[0].get("session_id") == "richsess"
-                  and "rich-needle" in hits[0].get("snippet", ""))
+            ok = (
+                ok
+                and len(hits) == 1
+                and hits[0].get("session_id") == "richsess"
+                and "rich-needle" in hits[0].get("snippet", "")
+            )
             print(f"  [{lang:>4s}] {combo_label:48s} {' OK ' if ok else 'FAIL'}")
             if not ok:
-                print(f"        exit={result.returncode} hits={len(hits)} "
-                      f"stderr={result.stderr.strip()[:160]!r}")
+                print(
+                    f"        exit={result.returncode} hits={len(hits)} "
+                    f"stderr={result.stderr.strip()[:160]!r}"
+                )
                 all_ok = False
 
         # Canonical-form combos (SPEC "Tool blocks"): the pattern matches
@@ -2501,33 +3112,47 @@ def check_search_tool_blocks_rich(lang: str, binary: Path) -> bool:
         # canonical serialization fragments verbatim. Escape-free fragments
         # only -- escape rendering of control characters stays impl-local.
         for combo_label, pattern, fragments in (
-            ("search: tool dump canonical object form",
-             "rich-tool-needle",
-             ['"needle_key":"rich-tool-needle"',
-              '"obj":{"k":[1,"two",false,null,{"d":2.5}]}',
-              '"none":null',
-              '"ratio":1.5']),
-            ("search: tool dump string input keeps quotes",
-             "pre-stringified",
-             ['"pre-stringified input"']),
+            (
+                "search: tool dump canonical object form",
+                "rich-tool-needle",
+                [
+                    '"needle_key":"rich-tool-needle"',
+                    '"obj":{"k":[1,"two",false,null,{"d":2.5}]}',
+                    '"none":null',
+                    '"ratio":1.5',
+                ],
+            ),
+            (
+                "search: tool dump string input keeps quotes",
+                "pre-stringified",
+                ['"pre-stringified input"'],
+            ),
         ):
             cmd = [
-                str(binary), "search", pattern,
-                "--projects-root", tmp,
-                "--now", repr(now_unix),
-                "--format", "jsonl",
+                str(binary),
+                "search",
+                pattern,
+                "--projects-root",
+                tmp,
+                "--now",
+                repr(now_unix),
+                "--format",
+                "jsonl",
                 "--no-config",
                 "--include-tool-blocks",
-                "--snippet-chars", "600",
+                "--snippet-chars",
+                "600",
             ]
-            result = run_captured(cmd, text=True,
-                                    encoding="utf-8", timeout=10)
+            result = run_captured(cmd, text=True, encoding="utf-8", timeout=10)
             ok = result.returncode == 0
             hits = []
             if ok:
                 try:
-                    hits = [json.loads(line) for line in result.stdout.splitlines()
-                            if line.strip() and json.loads(line).get("type") == "hit"]
+                    hits = [
+                        json.loads(line)
+                        for line in result.stdout.splitlines()
+                        if line.strip() and json.loads(line).get("type") == "hit"
+                    ]
                 except Exception:
                     ok = False
             snippet = hits[0].get("snippet", "") if hits else ""
@@ -2535,8 +3160,10 @@ def check_search_tool_blocks_rich(lang: str, binary: Path) -> bool:
             ok = ok and len(hits) == 1 and not missing
             print(f"  [{lang:>4s}] {combo_label:48s} {' OK ' if ok else 'FAIL'}")
             if not ok:
-                print(f"        exit={result.returncode} hits={len(hits)} "
-                      f"missing={missing!r} snippet={snippet[:200]!r}")
+                print(
+                    f"        exit={result.returncode} hits={len(hits)} "
+                    f"missing={missing!r} snippet={snippet[:200]!r}"
+                )
                 all_ok = False
     return all_ok
 
@@ -2559,20 +3186,26 @@ def check_home_fallbacks(lang: str, binary: Path, expected: dict) -> bool:
     # config-path fallbacks alongside the projects-root ones.
     base_cmd = [
         str(binary),
-        "--period", str(meta["period_seconds"]),
-        "--win-start", repr(meta["win_start_unix"]),
-        "--now", repr(meta["now_unix"]),
+        "--period",
+        str(meta["period_seconds"]),
+        "--win-start",
+        repr(meta["win_start_unix"]),
+        "--now",
+        repr(meta["now_unix"]),
     ]
     all_ok = True
     for label, drop_vars, set_fallback, use_cwd in (
-        ("home-fallback: cross var",
-         ("USERPROFILE",) if sys.platform == "win32" else ("HOME",), True, False),
+        (
+            "home-fallback: cross var",
+            ("USERPROFILE",) if sys.platform == "win32" else ("HOME",),
+            True,
+            False,
+        ),
         ("home-fallback: relative default", ("HOME", "USERPROFILE"), False, True),
     ):
         with tempfile.TemporaryDirectory(prefix="walker-home-fb-") as home:
             home_p = Path(home)
-            shutil.copytree(CORPUS / fixture,
-                            home_p / ".claude" / "projects" / fixture)
+            shutil.copytree(CORPUS / fixture, home_p / ".claude" / "projects" / fixture)
             env = dict(os.environ)
             for var in drop_vars:
                 env.pop(var, None)
@@ -2582,8 +3215,12 @@ def check_home_fallbacks(lang: str, binary: Path, expected: dict) -> bool:
                 env[fallback] = str(home_p)
             try:
                 result = run_captured(
-                    base_cmd, text=True, encoding="utf-8",
-                    timeout=10, env=env, cwd=str(home_p) if use_cwd else None,
+                    base_cmd,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=10,
+                    env=env,
+                    cwd=str(home_p) if use_cwd else None,
                 )
                 got = json.loads(result.stdout.strip().splitlines()[-1])
                 ok, _, _ = within_tolerance(got, target)
@@ -2592,8 +3229,12 @@ def check_home_fallbacks(lang: str, binary: Path, expected: dict) -> bool:
                 # default-root path: exit 0 with records on stdout.
                 ev_cmd = [str(binary), "events", *base_cmd[1:]]
                 ev = run_captured(
-                    ev_cmd, text=True, encoding="utf-8",
-                    timeout=10, env=env, cwd=str(home_p) if use_cwd else None,
+                    ev_cmd,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=10,
+                    env=env,
+                    cwd=str(home_p) if use_cwd else None,
                 )
                 ok = ok and ev.returncode == 0 and ev.stdout.strip() != ""
             except Exception as e:
@@ -2616,16 +3257,20 @@ def main():
     requested = sys.argv[1:] or list(CANDIDATES.keys())
     overall_ok = True
     print(f"Conformance corpus: {CORPUS}")
-    print(f"Pinned now={expected['_meta']['now_unix']}  "
-          f"period={expected['_meta']['period_seconds']}  "
-          f"win_start={expected['_meta']['win_start_unix']}")
+    print(
+        f"Pinned now={expected['_meta']['now_unix']}  "
+        f"period={expected['_meta']['period_seconds']}  "
+        f"win_start={expected['_meta']['win_start_unix']}"
+    )
     print(f"Fixtures: {len(expected['fixtures'])}\n")
 
     for lang in requested:
         binary = find_binary(lang)
         if binary is None:
-            print(f"  [{lang:>4s}] SKIP  no built binary "
-                  f"(checked {[str(p) for p in CANDIDATES.get(lang, [])]})")
+            print(
+                f"  [{lang:>4s}] SKIP  no built binary "
+                f"(checked {[str(p) for p in CANDIDATES.get(lang, [])]})"
+            )
             continue
         if not check_implementation(lang, binary, expected):
             overall_ok = False

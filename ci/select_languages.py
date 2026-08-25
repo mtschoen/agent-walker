@@ -11,6 +11,7 @@ from collections.abc import Iterable, Sequence
 LANGUAGES = ("rust", "cpp", "go", "zig")
 CROSS_LANGUAGE_PREFIXES = ("shared/", ".gitea/", "ci/")
 CROSS_LANGUAGE_FILES = {"SPEC.md"}
+IGNORED_PREFIXES = (".aislop/",)
 
 
 def select_languages(
@@ -25,7 +26,7 @@ def select_languages(
     selected: set[str] = set()
     for raw_path in changed_paths:
         path = raw_path.strip().removeprefix("./")
-        if not path:
+        if not path or path.startswith(IGNORED_PREFIXES):
             continue
         if path in CROSS_LANGUAGE_FILES or path.startswith(CROSS_LANGUAGE_PREFIXES):
             return LANGUAGES

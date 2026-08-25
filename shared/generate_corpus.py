@@ -8,6 +8,7 @@ Each fixture is a small JSONL file (or directory of files) under
 SAME logic the spec mandates, then locked into `shared/expected.json`.
 Languages must reproduce these values to within $0.01.
 """
+
 from __future__ import annotations
 
 import json
@@ -74,8 +75,11 @@ def cost_for(usage: dict, model_id: str, date_prefix: str = "") -> float:
     w = as_int(usage.get("cache_creation_input_tokens", 0))
     o = as_int(usage.get("output_tokens", 0))
     server_tool_use = usage.get("server_tool_use")
-    web = as_int(server_tool_use.get("web_search_requests", 0)
-                 if isinstance(server_tool_use, dict) else 0)
+    web = as_int(
+        server_tool_use.get("web_search_requests", 0)
+        if isinstance(server_tool_use, dict)
+        else 0
+    )
     token_cost = (i * inp + r * inp * 0.10 + w * inp * 1.25 + o * out) / 1_000_000
     return token_cost + web * WEB_SEARCH_COST_USD
 
@@ -86,10 +90,17 @@ def iso(unix: float) -> str:
     )
 
 
-def turn(model: str, ts_unix: float, *, msg_id: str | None,
-         input_tokens: int = 0, output_tokens: int = 0,
-         cache_read: int = 0, cache_write: int = 0,
-         web_search_requests: int = 0) -> dict:
+def turn(
+    model: str,
+    ts_unix: float,
+    *,
+    msg_id: str | None,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cache_read: int = 0,
+    cache_write: int = 0,
+    web_search_requests: int = 0,
+) -> dict:
     usage: dict = {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
@@ -136,10 +147,10 @@ def write_jsonl(path: Path, entries: list[dict | str | bytes]) -> None:
 period_cutoff = NOW_UNIX - PERIOD_SECONDS
 
 # Convenient time anchors for fixtures
-FRESH = NOW_UNIX - 1800       # 30 min ago: in trailing AND in window
+FRESH = NOW_UNIX - 1800  # 30 min ago: in trailing AND in window
 RECENT = NOW_UNIX - 5 * 3600  # 5h ago: in trailing AND in window
 PRE_WIN = NOW_UNIX - 12 * 3600  # 12h ago: in trailing, NOT in window
-OLD = NOW_UNIX - 2 * 86400    # 2 days ago: out of trailing AND window
+OLD = NOW_UNIX - 2 * 86400  # 2 days ago: out of trailing AND window
 # Future anchor past the Sonnet 5 intro->standard boundary (2026-09-01). It is
 # after NOW so it lands in BOTH buckets (no upper bound on ts), letting the
 # standard-rate branch be exercised and priced.
@@ -151,14 +162,27 @@ def fixture_01_single_parent():
     slug = "01-single-parent"
     sid = "alpha"
     turns = [
-        turn("claude-opus-4-7", FRESH, msg_id="m01",
-             input_tokens=1000, output_tokens=500,
-             cache_read=10000, cache_write=2000),
-        turn("claude-sonnet-4-6", RECENT, msg_id="m02",
-             input_tokens=500, output_tokens=200,
-             cache_read=5000, cache_write=0),
-        turn("claude-haiku-4-5", FRESH, msg_id="m03",
-             input_tokens=100, output_tokens=50),
+        turn(
+            "claude-opus-4-7",
+            FRESH,
+            msg_id="m01",
+            input_tokens=1000,
+            output_tokens=500,
+            cache_read=10000,
+            cache_write=2000,
+        ),
+        turn(
+            "claude-sonnet-4-6",
+            RECENT,
+            msg_id="m02",
+            input_tokens=500,
+            output_tokens=200,
+            cache_read=5000,
+            cache_write=0,
+        ),
+        turn(
+            "claude-haiku-4-5", FRESH, msg_id="m03", input_tokens=100, output_tokens=50
+        ),
     ]
     return slug, {f"{sid}.jsonl": turns}
 
@@ -168,20 +192,50 @@ def fixture_02_parent_acompact():
     slug = "02-parent-acompact"
     sid = "beta"
     parent_turns = [
-        turn("claude-opus-4-7", FRESH, msg_id="shared-1",
-             input_tokens=2000, output_tokens=1000),
-        turn("claude-opus-4-7", RECENT, msg_id="shared-2",
-             input_tokens=2000, output_tokens=1000),
-        turn("claude-sonnet-4-6", FRESH, msg_id="parent-only",
-             input_tokens=500, output_tokens=200),
+        turn(
+            "claude-opus-4-7",
+            FRESH,
+            msg_id="shared-1",
+            input_tokens=2000,
+            output_tokens=1000,
+        ),
+        turn(
+            "claude-opus-4-7",
+            RECENT,
+            msg_id="shared-2",
+            input_tokens=2000,
+            output_tokens=1000,
+        ),
+        turn(
+            "claude-sonnet-4-6",
+            FRESH,
+            msg_id="parent-only",
+            input_tokens=500,
+            output_tokens=200,
+        ),
     ]
     subagent_turns = [
-        turn("claude-opus-4-7", FRESH, msg_id="shared-1",
-             input_tokens=2000, output_tokens=1000),  # dup -> skip
-        turn("claude-opus-4-7", RECENT, msg_id="shared-2",
-             input_tokens=2000, output_tokens=1000),  # dup -> skip
-        turn("claude-haiku-4-5", FRESH, msg_id="sub-only",
-             input_tokens=300, output_tokens=100),
+        turn(
+            "claude-opus-4-7",
+            FRESH,
+            msg_id="shared-1",
+            input_tokens=2000,
+            output_tokens=1000,
+        ),  # dup -> skip
+        turn(
+            "claude-opus-4-7",
+            RECENT,
+            msg_id="shared-2",
+            input_tokens=2000,
+            output_tokens=1000,
+        ),  # dup -> skip
+        turn(
+            "claude-haiku-4-5",
+            FRESH,
+            msg_id="sub-only",
+            input_tokens=300,
+            output_tokens=100,
+        ),
     ]
     return slug, {
         f"{sid}.jsonl": parent_turns,
@@ -198,14 +252,33 @@ def fixture_03_malformed_lines():
         '{"unclosed":',
         json.dumps({"type": "user", "message": {"role": "user"}}),
         json.dumps({"type": "assistant", "message": {"role": "user"}}),  # wrong role
-        json.dumps({"type": "assistant", "message": {"role": "assistant", "id": "no-ts",
-                    "model": "claude-opus-4-7", "usage": {"input_tokens": 100}}}),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "id": "no-ts",
+                    "model": "claude-opus-4-7",
+                    "usage": {"input_tokens": 100},
+                },
+            }
+        ),
         # missing timestamp -> skipped
-        turn("claude-opus-4-7", FRESH, msg_id="ok",
-             input_tokens=1000, output_tokens=500),
-        json.dumps({"type": "assistant", "message": {"role": "assistant",
-                    "model": "claude-opus-4-7", "usage": {}, "id": "bad-ts"},
-                    "timestamp": "not-a-timestamp"}),
+        turn(
+            "claude-opus-4-7", FRESH, msg_id="ok", input_tokens=1000, output_tokens=500
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-opus-4-7",
+                    "usage": {},
+                    "id": "bad-ts",
+                },
+                "timestamp": "not-a-timestamp",
+            }
+        ),
         # bad timestamp -> skipped
     ]
     return slug, {f"{sid}.jsonl": entries}
@@ -222,10 +295,20 @@ def fixture_05_out_of_range():
     slug = "05-out-of-range"
     sid = "delta"
     turns = [
-        turn("claude-opus-4-7", OLD, msg_id="old1",
-             input_tokens=999999, output_tokens=999999),
-        turn("claude-opus-4-7", OLD, msg_id="old2",
-             input_tokens=999999, output_tokens=999999),
+        turn(
+            "claude-opus-4-7",
+            OLD,
+            msg_id="old1",
+            input_tokens=999999,
+            output_tokens=999999,
+        ),
+        turn(
+            "claude-opus-4-7",
+            OLD,
+            msg_id="old2",
+            input_tokens=999999,
+            output_tokens=999999,
+        ),
     ]
     return slug, {f"{sid}.jsonl": turns}
 
@@ -235,11 +318,17 @@ def fixture_06_period_only():
     slug = "06-period-only"
     sid = "epsilon"
     turns = [
-        turn("claude-opus-4-7", PRE_WIN, msg_id="p1",
-             input_tokens=1000, output_tokens=500),
+        turn(
+            "claude-opus-4-7",
+            PRE_WIN,
+            msg_id="p1",
+            input_tokens=1000,
+            output_tokens=500,
+        ),
         # Above is between period_cutoff and win_start: in trailing only.
-        turn("claude-opus-4-7", FRESH, msg_id="p2",
-             input_tokens=1000, output_tokens=500),
+        turn(
+            "claude-opus-4-7", FRESH, msg_id="p2", input_tokens=1000, output_tokens=500
+        ),
         # Above is in BOTH buckets.
     ]
     return slug, {f"{sid}.jsonl": turns}
@@ -250,8 +339,9 @@ def fixture_07_unknown_model():
     slug = "07-unknown-model"
     sid = "zeta"
     turns = [
-        turn("claude-mystery-x", FRESH, msg_id="u1",
-             input_tokens=1000, output_tokens=500),  # priced as sonnet
+        turn(
+            "claude-mystery-x", FRESH, msg_id="u1", input_tokens=1000, output_tokens=500
+        ),  # priced as sonnet
     ]
     return slug, {f"{sid}.jsonl": turns}
 
@@ -267,10 +357,22 @@ def fixture_08_web_search():
     slug = "08-web-search"
     sid = "eta"
     turns = [
-        turn("claude-opus-4-7", FRESH, msg_id="ws1",
-             input_tokens=1000, output_tokens=500, web_search_requests=5),
-        turn("claude-sonnet-4-6", RECENT, msg_id="ws2",
-             input_tokens=200, output_tokens=100, web_search_requests=3),
+        turn(
+            "claude-opus-4-7",
+            FRESH,
+            msg_id="ws1",
+            input_tokens=1000,
+            output_tokens=500,
+            web_search_requests=5,
+        ),
+        turn(
+            "claude-sonnet-4-6",
+            RECENT,
+            msg_id="ws2",
+            input_tokens=200,
+            output_tokens=100,
+            web_search_requests=3,
+        ),
     ]
     return slug, {f"{sid}.jsonl": turns}
 
@@ -298,43 +400,74 @@ def dirty_ladder_entries(good_msg_id: str = "dirty-good") -> list[dict | str]:
     Then one valid assistant turn that should be counted.
     """
     entries: list[dict | str] = [
-        "",                                   # 1: blank
-        "   ",                                # 2: whitespace only
-        '{"type":"assistant","timestamp":',   # 3: unclosed JSON
-        "this is not JSON at all",            # 4: bareword garbage
-        json.dumps([1, 2, 3]),                # 5: non-object root
-        json.dumps({                           # 6: user role -- not assistant
-            "type": "user", "timestamp": iso(FRESH),
-            "message": {"role": "user", "content": "hi"},
-        }),
-        json.dumps({                           # 7: missing timestamp
-            "type": "assistant",
-            "message": {"role": "assistant", "id": "no-ts",
-                        "model": "claude-opus-4-7",
-                        "usage": {"input_tokens": 99}},
-        }),
-        json.dumps({                           # 8: unparseable timestamp
-            "type": "assistant", "timestamp": "definitely-not-iso",
-            "message": {"role": "assistant", "id": "bad-ts",
-                        "model": "claude-opus-4-7",
-                        "usage": {"input_tokens": 99}},
-        }),
-        json.dumps({                           # 8b: space in place of the
-            # ISO 'T' separator -- digit-positional parsers must reject it
-            # (decided 2026-06-10; rust/cpp previously accepted it).
-            "type": "assistant", "timestamp": "2026-05-09 11:00:00.000Z",
-            "message": {"role": "assistant", "id": "space-sep-ts",
-                        "model": "claude-opus-4-7",
-                        "usage": {"input_tokens": 99}},
-        }),
-        json.dumps({                           # 9: type=assistant, role=user
-            "type": "assistant", "timestamp": iso(FRESH),
-            "message": {"role": "user", "id": "role-mismatch",
-                        "model": "claude-opus-4-7",
-                        "usage": {"input_tokens": 99}},
-        }),
-        turn("claude-sonnet-4-6", FRESH, msg_id=good_msg_id,
-             input_tokens=1000, output_tokens=500),   # the one good turn
+        "",  # 1: blank
+        "   ",  # 2: whitespace only
+        '{"type":"assistant","timestamp":',  # 3: unclosed JSON
+        "this is not JSON at all",  # 4: bareword garbage
+        json.dumps([1, 2, 3]),  # 5: non-object root
+        json.dumps(
+            {  # 6: user role -- not assistant
+                "type": "user",
+                "timestamp": iso(FRESH),
+                "message": {"role": "user", "content": "hi"},
+            }
+        ),
+        json.dumps(
+            {  # 7: missing timestamp
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "id": "no-ts",
+                    "model": "claude-opus-4-7",
+                    "usage": {"input_tokens": 99},
+                },
+            }
+        ),
+        json.dumps(
+            {  # 8: unparseable timestamp
+                "type": "assistant",
+                "timestamp": "definitely-not-iso",
+                "message": {
+                    "role": "assistant",
+                    "id": "bad-ts",
+                    "model": "claude-opus-4-7",
+                    "usage": {"input_tokens": 99},
+                },
+            }
+        ),
+        json.dumps(
+            {  # 8b: space in place of the
+                # ISO 'T' separator -- digit-positional parsers must reject it
+                # (decided 2026-06-10; rust/cpp previously accepted it).
+                "type": "assistant",
+                "timestamp": "2026-05-09 11:00:00.000Z",
+                "message": {
+                    "role": "assistant",
+                    "id": "space-sep-ts",
+                    "model": "claude-opus-4-7",
+                    "usage": {"input_tokens": 99},
+                },
+            }
+        ),
+        json.dumps(
+            {  # 9: type=assistant, role=user
+                "type": "assistant",
+                "timestamp": iso(FRESH),
+                "message": {
+                    "role": "user",
+                    "id": "role-mismatch",
+                    "model": "claude-opus-4-7",
+                    "usage": {"input_tokens": 99},
+                },
+            }
+        ),
+        turn(
+            "claude-sonnet-4-6",
+            FRESH,
+            msg_id=good_msg_id,
+            input_tokens=1000,
+            output_tokens=500,
+        ),  # the one good turn
     ]
     return entries
 
@@ -362,6 +495,7 @@ def fixture_10_iso_variants():
     fresh_utc = datetime.fromtimestamp(FRESH, tz=timezone.utc)
     # 1) Non-Z numeric offset (+05:30) — local clock = UTC + 5h30m.
     from datetime import timedelta
+
     offset = timedelta(hours=5, minutes=30)
     local = fresh_utc + offset
     iso_offset = local.strftime("%Y-%m-%dT%H:%M:%S") + "+05:30"
@@ -369,30 +503,54 @@ def fixture_10_iso_variants():
     iso_frac = fresh_utc.strftime("%Y-%m-%dT%H:%M:%S.123456Z")
     entries: list[dict | str] = [
         # Non-Z numeric offset → equivalent FRESH timestamp.
-        json.dumps({
-            "type": "assistant", "timestamp": iso_offset,
-            "message": {"role": "assistant", "id": "iso-offset",
-                        "model": "claude-opus-4-7",
-                        "usage": {"input_tokens": 1000, "output_tokens": 500,
-                                  "cache_read_input_tokens": 0,
-                                  "cache_creation_input_tokens": 0}},
-        }),
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": iso_offset,
+                "message": {
+                    "role": "assistant",
+                    "id": "iso-offset",
+                    "model": "claude-opus-4-7",
+                    "usage": {
+                        "input_tokens": 1000,
+                        "output_tokens": 500,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                    },
+                },
+            }
+        ),
         # Fractional seconds → also FRESH.
-        json.dumps({
-            "type": "assistant", "timestamp": iso_frac,
-            "message": {"role": "assistant", "id": "iso-frac",
-                        "model": "claude-sonnet-4-6",
-                        "usage": {"input_tokens": 500, "output_tokens": 100,
-                                  "cache_read_input_tokens": 0,
-                                  "cache_creation_input_tokens": 0}},
-        }),
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": iso_frac,
+                "message": {
+                    "role": "assistant",
+                    "id": "iso-frac",
+                    "model": "claude-sonnet-4-6",
+                    "usage": {
+                        "input_tokens": 500,
+                        "output_tokens": 100,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                    },
+                },
+            }
+        ),
         # Malformed timestamp → skipped.
-        json.dumps({
-            "type": "assistant", "timestamp": "2026-13-99T99:99:99Z",
-            "message": {"role": "assistant", "id": "iso-malformed",
-                        "model": "claude-opus-4-7",
-                        "usage": {"input_tokens": 999999}},
-        }),
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": "2026-13-99T99:99:99Z",
+                "message": {
+                    "role": "assistant",
+                    "id": "iso-malformed",
+                    "model": "claude-opus-4-7",
+                    "usage": {"input_tokens": 999999},
+                },
+            }
+        ),
     ]
     return slug, {f"{sid}.jsonl": entries}
 
@@ -406,63 +564,119 @@ def fixture_11_byte_edges():
     out-of-range, but the date math must not blow up)."""
     slug = "11-byte-edges"
     sid = "kappa"
-    good = turn("claude-opus-4-7", FRESH, msg_id="be-good",
-                input_tokens=1000, output_tokens=500)
-    dup = turn("claude-sonnet-4-6", FRESH, msg_id="be-dup",
-               input_tokens=400, output_tokens=200)
-    pre_epoch = dict(turn("claude-opus-4-7", FRESH, msg_id="be-1965",
-                          input_tokens=777777, output_tokens=777777))
+    good = turn(
+        "claude-opus-4-7", FRESH, msg_id="be-good", input_tokens=1000, output_tokens=500
+    )
+    dup = turn(
+        "claude-sonnet-4-6", FRESH, msg_id="be-dup", input_tokens=400, output_tokens=200
+    )
+    pre_epoch = dict(
+        turn(
+            "claude-opus-4-7",
+            FRESH,
+            msg_id="be-1965",
+            input_tokens=777777,
+            output_tokens=777777,
+        )
+    )
     pre_epoch["timestamp"] = "1965-03-01T00:00:00Z"
     entries: list[dict | str | bytes] = [
         # CRLF-terminated good turn (the \r must be stripped, then counted).
         json.dumps(good) + "\r",
-        b'\xff\xfe invalid utf-8 line',
+        b"\xff\xfe invalid utf-8 line",
         '{"\\ud800": "lone surrogate key"}',
         dup,
         dup,  # same message id -> second occurrence deduped
         {"type": "assistant", "timestamp": iso(FRESH), "message": "bare"},
         {"type": "assistant", "timestamp": iso(FRESH), "message": None},
-        {"type": "assistant", "timestamp": 12345,
-         "message": {"role": "assistant", "id": "be-num-ts",
-                     "model": "claude-opus-4-7", "usage": {"input_tokens": 5}}},
-        {"type": "assistant", "timestamp": "2026-XX-09TZZ:00:00Z",
-         "message": {"role": "assistant", "id": "be-long-bad-ts",
-                     "model": "claude-opus-4-7", "usage": {"input_tokens": 5}}},
+        {
+            "type": "assistant",
+            "timestamp": 12345,
+            "message": {
+                "role": "assistant",
+                "id": "be-num-ts",
+                "model": "claude-opus-4-7",
+                "usage": {"input_tokens": 5},
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-XX-09TZZ:00:00Z",
+            "message": {
+                "role": "assistant",
+                "id": "be-long-bad-ts",
+                "model": "claude-opus-4-7",
+                "usage": {"input_tokens": 5},
+            },
+        },
         # Wrong-typed usage values: every impl prices them as zero (whether
         # it rejects the line or zeroes the fields), so totals agree.
-        {"type": "assistant", "timestamp": iso(FRESH),
-         "message": {"role": "assistant", "id": "be-bad-usage",
-                     "model": "claude-opus-4-7",
-                     "usage": {"input_tokens": "many", "output_tokens": None,
-                               "cache_read_input_tokens": [],
-                               "cache_creation_input_tokens": {}}}},
+        {
+            "type": "assistant",
+            "timestamp": iso(FRESH),
+            "message": {
+                "role": "assistant",
+                "id": "be-bad-usage",
+                "model": "claude-opus-4-7",
+                "usage": {
+                    "input_tokens": "many",
+                    "output_tokens": None,
+                    "cache_read_input_tokens": [],
+                    "cache_creation_input_tokens": {},
+                },
+            },
+        },
         # Lone-surrogate keys at message / usage / server_tool_use depth:
         # strict parsers reject the line, per-key parsers skip the key; all
         # carried costs are zero, so totals agree either way.
-        ('{"type": "assistant", "timestamp": "%s", "message": '
-         '{"\\ud800": 1, "role": "assistant", "id": "be-msg-badkey", '
-         '"model": "claude-opus-4-7", "usage": {}}}' % iso(FRESH)),
-        ('{"type": "assistant", "timestamp": "%s", "message": '
-         '{"role": "assistant", "id": "be-usage-badkey", '
-         '"model": "claude-opus-4-7", "usage": {"\\ud800": 1}}}' % iso(FRESH)),
-        ('{"type": "assistant", "timestamp": "%s", "message": '
-         '{"role": "assistant", "id": "be-stu-badkey", '
-         '"model": "claude-opus-4-7", '
-         '"usage": {"server_tool_use": {"\\ud800": 1}}}}' % iso(FRESH)),
+        (
+            '{"type": "assistant", "timestamp": "%s", "message": '
+            '{"\\ud800": 1, "role": "assistant", "id": "be-msg-badkey", '
+            '"model": "claude-opus-4-7", "usage": {}}}' % iso(FRESH)
+        ),
+        (
+            '{"type": "assistant", "timestamp": "%s", "message": '
+            '{"role": "assistant", "id": "be-usage-badkey", '
+            '"model": "claude-opus-4-7", "usage": {"\\ud800": 1}}}' % iso(FRESH)
+        ),
+        (
+            '{"type": "assistant", "timestamp": "%s", "message": '
+            '{"role": "assistant", "id": "be-stu-badkey", '
+            '"model": "claude-opus-4-7", '
+            '"usage": {"server_tool_use": {"\\ud800": 1}}}}' % iso(FRESH)
+        ),
         # Wrong-shaped usage / server_tool_use containers and a wrong-typed
         # web_search_requests: all price to zero in every impl.
-        {"type": "assistant", "timestamp": iso(FRESH),
-         "message": {"role": "assistant", "id": "be-usage-str",
-                     "model": "claude-opus-4-7", "usage": "notanobject"}},
-        {"type": "assistant", "timestamp": iso(FRESH),
-         "message": {"role": "assistant", "id": "be-stu-scalar",
-                     "model": "claude-opus-4-7",
-                     "usage": {"server_tool_use": 5}}},
-        {"type": "assistant", "timestamp": iso(FRESH),
-         "message": {"role": "assistant", "id": "be-stu-wrong-typed",
-                     "model": "claude-opus-4-7",
-                     "usage": {"server_tool_use":
-                               {"web_search_requests": "five"}}}},
+        {
+            "type": "assistant",
+            "timestamp": iso(FRESH),
+            "message": {
+                "role": "assistant",
+                "id": "be-usage-str",
+                "model": "claude-opus-4-7",
+                "usage": "notanobject",
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": iso(FRESH),
+            "message": {
+                "role": "assistant",
+                "id": "be-stu-scalar",
+                "model": "claude-opus-4-7",
+                "usage": {"server_tool_use": 5},
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": iso(FRESH),
+            "message": {
+                "role": "assistant",
+                "id": "be-stu-wrong-typed",
+                "model": "claude-opus-4-7",
+                "usage": {"server_tool_use": {"web_search_requests": "five"}},
+            },
+        },
         pre_epoch,
     ]
     return slug, {f"{sid}.jsonl": entries}
@@ -480,60 +694,124 @@ def fixture_12_wrong_typed_usage():
     sid = "wrongu"
     entries: list[dict | str] = [
         # usage is not an object -> zero-usd turn, still counted.
-        {"type": "assistant", "timestamp": iso(FRESH),
-         "message": {"role": "assistant", "id": "wt-1",
-                     "model": "claude-sonnet-4-6", "usage": "not-an-object"}},
+        {
+            "type": "assistant",
+            "timestamp": iso(FRESH),
+            "message": {
+                "role": "assistant",
+                "id": "wt-1",
+                "model": "claude-sonnet-4-6",
+                "usage": "not-an-object",
+            },
+        },
         # One wrong-typed field among good ones -> only that field absent.
-        {"type": "assistant", "timestamp": iso(FRESH),
-         "message": {"role": "assistant", "id": "wt-2",
-                     "model": "claude-sonnet-4-6",
-                     "usage": {"input_tokens": "abc", "output_tokens": 50}}},
+        {
+            "type": "assistant",
+            "timestamp": iso(FRESH),
+            "message": {
+                "role": "assistant",
+                "id": "wt-2",
+                "model": "claude-sonnet-4-6",
+                "usage": {"input_tokens": "abc", "output_tokens": 50},
+            },
+        },
         # Fractional + exponent numbers truncate toward zero (1.5 -> 1,
         # 2e2 -> 200).
-        {"type": "assistant", "timestamp": iso(FRESH),
-         "message": {"role": "assistant", "id": "wt-3",
-                     "model": "claude-sonnet-4-6",
-                     "usage": {"input_tokens": 1.5, "output_tokens": 2e2}}},
+        {
+            "type": "assistant",
+            "timestamp": iso(FRESH),
+            "message": {
+                "role": "assistant",
+                "id": "wt-3",
+                "model": "claude-sonnet-4-6",
+                "usage": {"input_tokens": 1.5, "output_tokens": 2e2},
+            },
+        },
         # Negative count absent; non-object server_tool_use absent.
-        {"type": "assistant", "timestamp": iso(FRESH),
-         "message": {"role": "assistant", "id": "wt-4",
-                     "model": "claude-sonnet-4-6",
-                     "usage": {"input_tokens": -5, "output_tokens": 50,
-                               "server_tool_use": "nope"}}},
+        {
+            "type": "assistant",
+            "timestamp": iso(FRESH),
+            "message": {
+                "role": "assistant",
+                "id": "wt-4",
+                "model": "claude-sonnet-4-6",
+                "usage": {
+                    "input_tokens": -5,
+                    "output_tokens": 50,
+                    "server_tool_use": "nope",
+                },
+            },
+        },
         # Wrong-typed model -> empty model -> sonnet rates; wrong-typed
         # web_search_requests absent; unknown server_tool_use key skipped.
-        {"type": "assistant", "timestamp": iso(FRESH),
-         "message": {"role": "assistant", "id": "wt-5", "model": 7,
-                     "usage": {"input_tokens": 100, "output_tokens": 10,
-                               "server_tool_use": {"web_search_requests": "x",
-                                                   "other": 1}}}},
+        {
+            "type": "assistant",
+            "timestamp": iso(FRESH),
+            "message": {
+                "role": "assistant",
+                "id": "wt-5",
+                "model": 7,
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 10,
+                    "server_tool_use": {"web_search_requests": "x", "other": 1},
+                },
+            },
+        },
         # Wrong-typed id -> no dedup participation; unknown usage key skipped.
-        {"type": "assistant", "timestamp": iso(FRESH),
-         "message": {"role": "assistant", "id": 42,
-                     "model": "claude-opus-4-7",
-                     "usage": {"input_tokens": 100, "output_tokens": 10,
-                               "service_tier": "standard"}}},
+        {
+            "type": "assistant",
+            "timestamp": iso(FRESH),
+            "message": {
+                "role": "assistant",
+                "id": 42,
+                "model": "claude-opus-4-7",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 10,
+                    "service_tier": "standard",
+                },
+            },
+        },
         # Out-of-u64-range numbers price as absent and MUST NOT panic
         # (1e300 aborted the zig walker before the 2026-06-10 fix).
-        {"type": "assistant", "timestamp": iso(FRESH),
-         "message": {"role": "assistant", "id": "wt-7",
-                     "model": "claude-sonnet-4-6",
-                     "usage": {"input_tokens": 1e300, "output_tokens": 5}}},
-        ('{"type": "assistant", "timestamp": "%s", "message": '
-         '{"role": "assistant", "id": "wt-8", "model": "claude-sonnet-4-6", '
-         '"usage": {"input_tokens": 99999999999999999999999, '
-         '"output_tokens": 5}}}' % iso(FRESH)),
+        {
+            "type": "assistant",
+            "timestamp": iso(FRESH),
+            "message": {
+                "role": "assistant",
+                "id": "wt-7",
+                "model": "claude-sonnet-4-6",
+                "usage": {"input_tokens": 1e300, "output_tokens": 5},
+            },
+        },
+        (
+            '{"type": "assistant", "timestamp": "%s", "message": '
+            '{"role": "assistant", "id": "wt-8", "model": "claude-sonnet-4-6", '
+            '"usage": {"input_tokens": 99999999999999999999999, '
+            '"output_tokens": 5}}}' % iso(FRESH)
+        ),
         # Fractional web_search_requests truncates (2.9 -> 2 -> $0.02).
-        {"type": "assistant", "timestamp": iso(FRESH),
-         "message": {"role": "assistant", "id": "wt-9",
-                     "model": "claude-sonnet-4-6",
-                     "usage": {"server_tool_use":
-                               {"web_search_requests": 2.9}}}},
+        {
+            "type": "assistant",
+            "timestamp": iso(FRESH),
+            "message": {
+                "role": "assistant",
+                "id": "wt-9",
+                "model": "claude-sonnet-4-6",
+                "usage": {"server_tool_use": {"web_search_requests": 2.9}},
+            },
+        },
         # No id field at all -> counted, dedup is skipped for this turn.
-        {"type": "assistant", "timestamp": iso(FRESH),
-         "message": {"role": "assistant",
-                     "model": "claude-haiku-4-5",
-                     "usage": {"input_tokens": 100, "output_tokens": 50}}},
+        {
+            "type": "assistant",
+            "timestamp": iso(FRESH),
+            "message": {
+                "role": "assistant",
+                "model": "claude-haiku-4-5",
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+            },
+        },
     ]
     return slug, {f"{sid}.jsonl": entries}
 
@@ -544,9 +822,15 @@ def fixture_13_fable():
     slug = "13-fable"
     sid = "fable"
     turns = [
-        turn("claude-fable-5", FRESH, msg_id="fa1",
-             input_tokens=1000, output_tokens=500,
-             cache_read=10000, cache_write=2000),
+        turn(
+            "claude-fable-5",
+            FRESH,
+            msg_id="fa1",
+            input_tokens=1000,
+            output_tokens=500,
+            cache_read=10000,
+            cache_write=2000,
+        ),
     ]
     return slug, {f"{sid}.jsonl": turns}
 
@@ -557,9 +841,15 @@ def fixture_14_mythos():
     slug = "14-mythos"
     sid = "mythos"
     turns = [
-        turn("claude-mythos-preview", FRESH, msg_id="my1",
-             input_tokens=1000, output_tokens=500,
-             cache_read=10000, cache_write=2000),
+        turn(
+            "claude-mythos-preview",
+            FRESH,
+            msg_id="my1",
+            input_tokens=1000,
+            output_tokens=500,
+            cache_read=10000,
+            cache_write=2000,
+        ),
     ]
     return slug, {f"{sid}.jsonl": turns}
 
@@ -570,9 +860,15 @@ def fixture_15_sonnet5_intro():
     slug = "15-sonnet5-intro"
     sid = "sonnet5intro"
     turns = [
-        turn("claude-sonnet-5", FRESH, msg_id="s5i1",
-             input_tokens=1000, output_tokens=500,
-             cache_read=10000, cache_write=2000),
+        turn(
+            "claude-sonnet-5",
+            FRESH,
+            msg_id="s5i1",
+            input_tokens=1000,
+            output_tokens=500,
+            cache_read=10000,
+            cache_write=2000,
+        ),
     ]
     return slug, {f"{sid}.jsonl": turns}
 
@@ -583,9 +879,15 @@ def fixture_16_sonnet5_standard():
     slug = "16-sonnet5-standard"
     sid = "sonnet5std"
     turns = [
-        turn("claude-sonnet-5", SONNET5_STANDARD_TS, msg_id="s5s1",
-             input_tokens=1000, output_tokens=500,
-             cache_read=10000, cache_write=2000),
+        turn(
+            "claude-sonnet-5",
+            SONNET5_STANDARD_TS,
+            msg_id="s5s1",
+            input_tokens=1000,
+            output_tokens=500,
+            cache_read=10000,
+            cache_write=2000,
+        ),
     ]
     return slug, {f"{sid}.jsonl": turns}
 
@@ -598,12 +900,24 @@ def fixture_17_sonnet45_noncollision():
     slug = "17-sonnet45-noncollision"
     sid = "sonnet45"
     turns = [
-        turn("claude-sonnet-4-5", SONNET5_STANDARD_TS, msg_id="s45a",
-             input_tokens=1000, output_tokens=500,
-             cache_read=10000, cache_write=2000),
-        turn("claude-sonnet-4-5", FRESH, msg_id="s45b",
-             input_tokens=1000, output_tokens=500,
-             cache_read=10000, cache_write=2000),
+        turn(
+            "claude-sonnet-4-5",
+            SONNET5_STANDARD_TS,
+            msg_id="s45a",
+            input_tokens=1000,
+            output_tokens=500,
+            cache_read=10000,
+            cache_write=2000,
+        ),
+        turn(
+            "claude-sonnet-4-5",
+            FRESH,
+            msg_id="s45b",
+            input_tokens=1000,
+            output_tokens=500,
+            cache_read=10000,
+            cache_write=2000,
+        ),
     ]
     return slug, {f"{sid}.jsonl": turns}
 
@@ -663,9 +977,7 @@ def walk_group(files: dict[str, list]) -> tuple[float, float]:
             if not ts_str or not isinstance(ts_str, str):
                 continue
             try:
-                ts = datetime.fromisoformat(
-                    ts_str.replace("Z", "+00:00")
-                ).timestamp()
+                ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
             except (ValueError, TypeError):
                 continue
             earliest = min(period_cutoff, WIN_START_UNIX)

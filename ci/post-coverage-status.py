@@ -16,6 +16,7 @@ On any read/parse failure it posts state=error and exits 0 so an
 `if: always()` step does not double-fail the job. A POST/network failure
 DOES raise. Outside CI (no GITHUB_* env), it prints and skips cleanly.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -34,12 +35,14 @@ def _post(state: str, description: str) -> None:
     repository = os.environ["GITHUB_REPOSITORY"]
     sha = os.environ["GITHUB_SHA"]
     run_id = os.environ.get("GITHUB_RUN_ID", "")
-    body = json.dumps({
-        "context": "pr-crew/coverage",
-        "state": state,
-        "description": description,
-        "target_url": f"{server}/{repository}/actions/runs/{run_id}",
-    }).encode()
+    body = json.dumps(
+        {
+            "context": "pr-crew/coverage",
+            "state": state,
+            "description": description,
+            "target_url": f"{server}/{repository}/actions/runs/{run_id}",
+        }
+    ).encode()
     request = urllib.request.Request(
         f"{server}/api/v1/repos/{repository}/statuses/{sha}",
         data=body,
@@ -62,8 +65,9 @@ def _description(summary: dict) -> str:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--summary", default=str(DEFAULT_SUMMARY),
-                        help="path to coverage/summary.json")
+    parser.add_argument(
+        "--summary", default=str(DEFAULT_SUMMARY), help="path to coverage/summary.json"
+    )
     arguments = parser.parse_args(argv[1:])
 
     # Off-CI guard — running locally without GITHUB_* env should not crash.

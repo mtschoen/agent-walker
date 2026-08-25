@@ -308,8 +308,6 @@ func computeIdleInWindow(events []event, lo, hi float64) float64 {
 	return idle
 }
 
-// === beacons-latest ===
-
 type latestArguments struct {
 	sessionID          string
 	projectsRoot       string
@@ -469,8 +467,6 @@ func runBeaconsLatest(args []string) {
 func formatFloat(value float64) string {
 	return strconv.FormatFloat(value, 'f', -1, 64)
 }
-
-// === beacons-history ===
 
 type historyArguments struct {
 	periodSeconds      uint64
@@ -709,9 +705,6 @@ func runBeaconsHistory(args []string) {
 					}
 				}
 
-				// Iterate in timestamp order (stable), tracking one in-flight
-				// pending begin: emit one pair per properly-closed begin->end
-				// lifecycle. Replaces the old earliest-begin/latest-end rule.
 				sort.SliceStable(inside, func(i, j int) bool {
 					return inside[i].timestamp < inside[j].timestamp
 				})

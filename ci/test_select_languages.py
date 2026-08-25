@@ -64,6 +64,16 @@ class SelectLanguagesTests(unittest.TestCase):
     def test_selects_nothing_for_empty_change_set(self) -> None:
         self.assertEqual(select_languages([""]), ())
 
+    def test_selects_nothing_for_aislop_pin_change(self) -> None:
+        self.assertEqual(select_languages([".aislop/fork-commit"]), ())
+        self.assertEqual(select_languages([".aislop/config.yml"]), ())
+
+    def test_selects_implementation_for_mixed_aislop_and_code_change(self) -> None:
+        self.assertEqual(
+            select_languages([".aislop/fork-commit", "cpp/main.cpp"]),
+            ("cpp",),
+        )
+
     def test_formats_stable_github_outputs(self) -> None:
         self.assertEqual(
             format_outputs(("cpp", "go")),

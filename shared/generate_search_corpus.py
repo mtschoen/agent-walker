@@ -16,6 +16,7 @@ run).
 Anchored to the same NOW_UNIX as the beacon corpus (2026-05-09 12:00:00 UTC)
 so the time-window scenario is reproducible.
 """
+
 from __future__ import annotations
 
 import json
@@ -142,7 +143,11 @@ def user_tool_result_array(unix_ts: float, tool_use_id: str, texts: list[str]) -
 
 
 def assistant_with_tool_use(
-    unix_ts: float, msg_id: str, text: str, tool_use_id: str, tool_name: str,
+    unix_ts: float,
+    msg_id: str,
+    text: str,
+    tool_use_id: str,
+    tool_name: str,
     tool_input: dict | str,
 ) -> dict:
     """Assistant entry mixing a text block with a tool_use block. `tool_input`
@@ -235,7 +240,10 @@ def write_jsonl(path: Path, lines: "Sequence[dict | str | bytes]") -> None:
 
 # Hit-record helpers --------------------------------------------------------
 
-def find_offset(text: str, needle: str, *, case_sensitive: bool = False) -> tuple[int, int]:
+
+def find_offset(
+    text: str, needle: str, *, case_sensitive: bool = False
+) -> tuple[int, int]:
     if case_sensitive:
         idx = text.find(needle)
     else:
@@ -341,7 +349,9 @@ def ctx(role: str, text: str, timestamp: str) -> dict:
     return {"role": role, "text": text, "timestamp": timestamp}
 
 
-def summary(*, hits: int, sessions_matched: int, roots_walked: int = 1, truncated: bool = False) -> dict:
+def summary(
+    *, hits: int, sessions_matched: int, roots_walked: int = 1, truncated: bool = False
+) -> dict:
     return {
         "type": "summary",
         "hits": hits,
@@ -352,6 +362,7 @@ def summary(*, hits: int, sessions_matched: int, roots_walked: int = 1, truncate
 
 
 # Scenarios -----------------------------------------------------------------
+
 
 def scenario_01_basic():
     """Three sessions, one match each, default flags."""
@@ -371,18 +382,30 @@ def scenario_01_basic():
     # Newest-first ordering.
     hits = [
         hit(
-            session_id="sid3", cwd_slug=scenario, line_number=1,
-            timestamp=iso(t3), role="assistant", snippet=text3,
+            session_id="sid3",
+            cwd_slug=scenario,
+            line_number=1,
+            timestamp=iso(t3),
+            role="assistant",
+            snippet=text3,
             match_offsets=[[o3[0], o3[1]]],
         ),
         hit(
-            session_id="sid2", cwd_slug=scenario, line_number=1,
-            timestamp=iso(t2), role="assistant", snippet=text2,
+            session_id="sid2",
+            cwd_slug=scenario,
+            line_number=1,
+            timestamp=iso(t2),
+            role="assistant",
+            snippet=text2,
             match_offsets=[[o2[0], o2[1]]],
         ),
         hit(
-            session_id="sid1", cwd_slug=scenario, line_number=1,
-            timestamp=iso(t1), role="assistant", snippet=text1,
+            session_id="sid1",
+            cwd_slug=scenario,
+            line_number=1,
+            timestamp=iso(t1),
+            role="assistant",
+            snippet=text1,
             match_offsets=[[o1[0], o1[1]]],
         ),
     ]
@@ -418,22 +441,34 @@ def scenario_02_multi_match_per_session():
     # Newest first; each hit's context is its immediate neighbors.
     hits = [
         hit(
-            session_id="sid1", cwd_slug=scenario, line_number=3,
-            timestamp=iso(t3), role="assistant", snippet=text3,
+            session_id="sid1",
+            cwd_slug=scenario,
+            line_number=3,
+            timestamp=iso(t3),
+            role="assistant",
+            snippet=text3,
             match_offsets=[[o3[0], o3[1]]],
             context_before=[ctx("assistant", text2, iso(t2))],
             context_after=[],
         ),
         hit(
-            session_id="sid1", cwd_slug=scenario, line_number=2,
-            timestamp=iso(t2), role="assistant", snippet=text2,
+            session_id="sid1",
+            cwd_slug=scenario,
+            line_number=2,
+            timestamp=iso(t2),
+            role="assistant",
+            snippet=text2,
             match_offsets=[[o2[0], o2[1]]],
             context_before=[ctx("assistant", text1, iso(t1))],
             context_after=[ctx("assistant", text3, iso(t3))],
         ),
         hit(
-            session_id="sid1", cwd_slug=scenario, line_number=1,
-            timestamp=iso(t1), role="assistant", snippet=text1,
+            session_id="sid1",
+            cwd_slug=scenario,
+            line_number=1,
+            timestamp=iso(t1),
+            role="assistant",
+            snippet=text1,
             match_offsets=[[o1[0], o1[1]]],
             context_before=[],
             context_after=[ctx("assistant", text2, iso(t2))],
@@ -466,8 +501,12 @@ def scenario_03_bare_string_user_content():
     o = find_offset(user_msg, "needle")
     hits = [
         hit(
-            session_id="sid1", cwd_slug=scenario, line_number=2,
-            timestamp=iso(t2), role="user", snippet=user_msg,
+            session_id="sid1",
+            cwd_slug=scenario,
+            line_number=2,
+            timestamp=iso(t2),
+            role="user",
+            snippet=user_msg,
             match_offsets=[[o[0], o[1]]],
             context_before=[ctx("assistant", assistant_msg, iso(t1))],
             context_after=[],
@@ -510,22 +549,34 @@ def scenario_04_role_filter():
     ou2 = find_offset(u2, "needle")
     oa3 = find_offset(a3, "needle")
     hit_a1 = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=1,
-        timestamp=iso(t1), role="assistant", snippet=a1,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=1,
+        timestamp=iso(t1),
+        role="assistant",
+        snippet=a1,
         match_offsets=[[oa1[0], oa1[1]]],
         context_before=[],
         context_after=[ctx("user", u2, iso(t2))],
     )
     hit_u2 = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=2,
-        timestamp=iso(t2), role="user", snippet=u2,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=2,
+        timestamp=iso(t2),
+        role="user",
+        snippet=u2,
         match_offsets=[[ou2[0], ou2[1]]],
         context_before=[ctx("assistant", a1, iso(t1))],
         context_after=[ctx("assistant", a3, iso(t3))],
     )
     hit_a3 = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=3,
-        timestamp=iso(t3), role="assistant", snippet=a3,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=3,
+        timestamp=iso(t3),
+        role="assistant",
+        snippet=a3,
         match_offsets=[[oa3[0], oa3[1]]],
         context_before=[ctx("user", u2, iso(t2))],
         context_after=[ctx("user", u4, iso(t4))],
@@ -571,8 +622,12 @@ def scenario_05_tool_block_skip():
     o = find_offset(tool_output, "needle")
     hits_with_tool = [
         hit(
-            session_id="sid1", cwd_slug=scenario, line_number=2,
-            timestamp=iso(t2), role="user", snippet=tool_output,
+            session_id="sid1",
+            cwd_slug=scenario,
+            line_number=2,
+            timestamp=iso(t2),
+            role="user",
+            snippet=tool_output,
             match_offsets=[[o[0], o[1]]],
             context_before=[ctx("assistant", assistant_msg, iso(t1))],
             context_after=[],
@@ -614,15 +669,23 @@ def scenario_06_regex():
     o1 = (text1.find("foo1"), text1.find("foo1") + 4)
     o3 = (text3.find("foo42"), text3.find("foo42") + 5)
     hit_t1 = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=1,
-        timestamp=iso(t1), role="assistant", snippet=text1,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=1,
+        timestamp=iso(t1),
+        role="assistant",
+        snippet=text1,
         match_offsets=[[o1[0], o1[1]]],
         context_before=[],
         context_after=[ctx("assistant", text2, iso(t2))],
     )
     hit_t3 = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=3,
-        timestamp=iso(t3), role="assistant", snippet=text3,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=3,
+        timestamp=iso(t3),
+        role="assistant",
+        snippet=text3,
         match_offsets=[[o3[0], o3[1]]],
         context_before=[ctx("assistant", text2, iso(t2))],
         context_after=[],
@@ -658,22 +721,34 @@ def scenario_07_case():
     o2_ci = find_offset(text2, "needle")
     o3_ci = find_offset(text3, "needle")
     hit_t1_ci = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=1,
-        timestamp=iso(t1), role="assistant", snippet=text1,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=1,
+        timestamp=iso(t1),
+        role="assistant",
+        snippet=text1,
         match_offsets=[[o1_ci[0], o1_ci[1]]],
         context_before=[],
         context_after=[ctx("assistant", text2, iso(t2))],
     )
     hit_t2_ci = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=2,
-        timestamp=iso(t2), role="assistant", snippet=text2,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=2,
+        timestamp=iso(t2),
+        role="assistant",
+        snippet=text2,
         match_offsets=[[o2_ci[0], o2_ci[1]]],
         context_before=[ctx("assistant", text1, iso(t1))],
         context_after=[ctx("assistant", text3, iso(t3))],
     )
     hit_t3_ci = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=3,
-        timestamp=iso(t3), role="assistant", snippet=text3,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=3,
+        timestamp=iso(t3),
+        role="assistant",
+        snippet=text3,
         match_offsets=[[o3_ci[0], o3_ci[1]]],
         context_before=[ctx("assistant", text2, iso(t2))],
         context_after=[],
@@ -681,8 +756,12 @@ def scenario_07_case():
     # Case-sensitive: only the lowercase one.
     o3_cs = find_offset(text3, "needle", case_sensitive=True)
     hit_t3_cs = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=3,
-        timestamp=iso(t3), role="assistant", snippet=text3,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=3,
+        timestamp=iso(t3),
+        role="assistant",
+        snippet=text3,
         match_offsets=[[o3_cs[0], o3_cs[1]]],
         context_before=[ctx("assistant", text2, iso(t2))],
         context_after=[],
@@ -726,22 +805,34 @@ def scenario_08_time_window():
     o2 = find_offset(text2, "needle")
     o3 = find_offset(text3, "needle")
     hit_30d = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=1,
-        timestamp=iso(t_30d), role="assistant", snippet=text1,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=1,
+        timestamp=iso(t_30d),
+        role="assistant",
+        snippet=text1,
         match_offsets=[[o1[0], o1[1]]],
         context_before=[],
         context_after=[ctx("assistant", text2, iso(t_14d))],
     )
     hit_14d = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=2,
-        timestamp=iso(t_14d), role="assistant", snippet=text2,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=2,
+        timestamp=iso(t_14d),
+        role="assistant",
+        snippet=text2,
         match_offsets=[[o2[0], o2[1]]],
         context_before=[ctx("assistant", text1, iso(t_30d))],
         context_after=[ctx("assistant", text3, iso(t_3d))],
     )
     hit_3d = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=3,
-        timestamp=iso(t_3d), role="assistant", snippet=text3,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=3,
+        timestamp=iso(t_3d),
+        role="assistant",
+        snippet=text3,
         match_offsets=[[o3[0], o3[1]]],
         context_before=[ctx("assistant", text2, iso(t_14d))],
         context_after=[],
@@ -752,8 +843,12 @@ def scenario_08_time_window():
     # set by the role-filter scenario, where context crosses the --role
     # boundary. Spec edge case to confirm at review time.
     hit_3d_with_filtered_ctx = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=3,
-        timestamp=iso(t_3d), role="assistant", snippet=text3,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=3,
+        timestamp=iso(t_3d),
+        role="assistant",
+        snippet=text3,
         match_offsets=[[o3[0], o3[1]]],
         context_before=[ctx("assistant", text2, iso(t_14d))],
         context_after=[],
@@ -794,15 +889,29 @@ def scenario_09_count_only():
         ts = timestamps[i]
         text = texts[i]
         o = find_offset(text, "needle")
-        cb = [ctx("assistant", texts[i - 1], iso(timestamps[i - 1]))] if i - 1 >= 0 else []
-        ca = [ctx("assistant", texts[i + 1], iso(timestamps[i + 1]))] if i + 1 < 5 else []
-        hits_default.append(hit(
-            session_id="sid1", cwd_slug=scenario, line_number=i + 1,
-            timestamp=iso(ts), role="assistant", snippet=text,
-            match_offsets=[[o[0], o[1]]],
-            context_before=cb,
-            context_after=ca,
-        ))
+        cb = (
+            [ctx("assistant", texts[i - 1], iso(timestamps[i - 1]))]
+            if i - 1 >= 0
+            else []
+        )
+        ca = (
+            [ctx("assistant", texts[i + 1], iso(timestamps[i + 1]))]
+            if i + 1 < 5
+            else []
+        )
+        hits_default.append(
+            hit(
+                session_id="sid1",
+                cwd_slug=scenario,
+                line_number=i + 1,
+                timestamp=iso(ts),
+                role="assistant",
+                snippet=text,
+                match_offsets=[[o[0], o[1]]],
+                context_before=cb,
+                context_after=ca,
+            )
+        )
     expected = {
         "default": {
             "description": "Default: 5 hits + summary.",
@@ -847,16 +956,24 @@ def scenario_10_context_zero():
     o = find_offset(a3, "needle")
     # --context 0: empty context arrays.
     hit_ctx0 = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=4,
-        timestamp=iso(timestamps[3]), role="assistant", snippet=a3,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=4,
+        timestamp=iso(timestamps[3]),
+        role="assistant",
+        snippet=a3,
         match_offsets=[[o[0], o[1]]],
         context_before=[],
         context_after=[],
     )
     # Default --context 1: one turn before, one after.
     hit_ctx1 = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=4,
-        timestamp=iso(timestamps[3]), role="assistant", snippet=a3,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=4,
+        timestamp=iso(timestamps[3]),
+        role="assistant",
+        snippet=a3,
         match_offsets=[[o[0], o[1]]],
         context_before=[ctx("assistant", a2, iso(timestamps[2]))],
         context_after=[ctx("user", u2, iso(timestamps[4]))],
@@ -894,15 +1011,19 @@ def scenario_11_multibyte_snippet_boundary():
     snip, offsets = snippet_and_offsets(text, "needle", 20)
     hits = [
         hit(
-            session_id="sid1", cwd_slug=scenario, line_number=1,
-            timestamp=iso(t1), role="assistant", snippet=snip,
+            session_id="sid1",
+            cwd_slug=scenario,
+            line_number=1,
+            timestamp=iso(t1),
+            role="assistant",
+            snippet=snip,
             match_offsets=offsets,
         ),
     ]
     expected = {
         "snippet-chars-20": {
             "description": "Multibyte chars + small --snippet-chars: snippet must "
-                           "stay on UTF-8 boundaries (no split codepoints).",
+            "stay on UTF-8 boundaries (no split codepoints).",
             "pattern": "needle",
             "flags": ["--snippet-chars", "20"],
             "hits": hits,
@@ -948,7 +1069,12 @@ def scenario_12_tool_use_and_result_array():
     files = {
         "sid_a.jsonl": [
             assistant_with_tool_use(
-                t_a, "msg_12_a", text_a, "toolu_12_a", "fake_tool", string_input,
+                t_a,
+                "msg_12_a",
+                text_a,
+                "toolu_12_a",
+                "fake_tool",
+                string_input,
             ),
         ],
         "sid_c.jsonl": [
@@ -960,16 +1086,20 @@ def scenario_12_tool_use_and_result_array():
     snip_c, off_c = snippet_and_offsets(blob_c, "needle", 240)
 
     hit_c = hit(
-        session_id="sid_c", cwd_slug=scenario, line_number=1,
-        timestamp=iso(t_c), role="user", snippet=snip_c,
+        session_id="sid_c",
+        cwd_slug=scenario,
+        line_number=1,
+        timestamp=iso(t_c),
+        role="user",
+        snippet=snip_c,
         match_offsets=off_c,
     )
 
     expected = {
         "default": {
             "description": "Default mode: tool_use input and tool_result-array "
-                           "are invisible (sid_a 'ok' text has no needle, "
-                           "sid_c is only-tool-blocks). 0 hits.",
+            "are invisible (sid_a 'ok' text has no needle, "
+            "sid_c is only-tool-blocks). 0 hits.",
             "pattern": "needle",
             "flags": [],
             "hits": [],
@@ -977,8 +1107,8 @@ def scenario_12_tool_use_and_result_array():
         },
         "include-tool-blocks-array": {
             "description": "--include-tool-blocks finds the needle inside a "
-                           "tool_result.content text-block array (sid_c only; "
-                           "sid_a's tool_use input snippet is per-impl).",
+            "tool_result.content text-block array (sid_c only; "
+            "sid_a's tool_use input snippet is per-impl).",
             "pattern": "needle",
             "flags": ["--include-tool-blocks", "--cwd", scenario, "--role", "user"],
             "hits": [hit_c],
@@ -986,8 +1116,8 @@ def scenario_12_tool_use_and_result_array():
         },
         "include-tool-blocks-count": {
             "description": "--include-tool-blocks + --count-only across both "
-                           "sessions: count alone (snippet bytes for tool_use "
-                           "differ per impl, so we don't pin them).",
+            "sessions: count alone (snippet bytes for tool_use "
+            "differ per impl, so we don't pin them).",
             "pattern": "needle",
             "flags": ["--include-tool-blocks", "--count-only"],
             "hits": [],
@@ -1027,8 +1157,8 @@ def scenario_13_time_units_and_edges():
     # Slack the t-2h entry past the 2h boundary so it filters reliably across
     # impls (a hair past the cutoff, not exactly on it).
     t_e1 = NOW_UNIX - 30 * DAY
-    t_e2 = NOW_UNIX - 7201.0   # 2h 1s old
-    t_e3 = NOW_UNIX - 45.0     # 45s old
+    t_e2 = NOW_UNIX - 7201.0  # 2h 1s old
+    t_e3 = NOW_UNIX - 45.0  # 45s old
     text_e1 = "needle thirty days ago"
     text_e2 = "needle two hours ago"
     text_e3 = "needle forty-five seconds ago"
@@ -1049,22 +1179,34 @@ def scenario_13_time_units_and_edges():
     o_e4 = find_offset(text_e4, "needle")
 
     h_e1 = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=1,
-        timestamp=iso(t_e1), role="assistant", snippet=text_e1,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=1,
+        timestamp=iso(t_e1),
+        role="assistant",
+        snippet=text_e1,
         match_offsets=[[o_e1[0], o_e1[1]]],
         context_before=[],
         context_after=[ctx("assistant", text_e2, iso(t_e2))],
     )
     h_e2 = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=2,
-        timestamp=iso(t_e2), role="assistant", snippet=text_e2,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=2,
+        timestamp=iso(t_e2),
+        role="assistant",
+        snippet=text_e2,
         match_offsets=[[o_e2[0], o_e2[1]]],
         context_before=[ctx("assistant", text_e1, iso(t_e1))],
         context_after=[ctx("assistant", text_e3, iso(t_e3))],
     )
     h_e3 = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=3,
-        timestamp=iso(t_e3), role="assistant", snippet=text_e3,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=3,
+        timestamp=iso(t_e3),
+        role="assistant",
+        snippet=text_e3,
         match_offsets=[[o_e3[0], o_e3[1]]],
         context_before=[ctx("assistant", text_e2, iso(t_e2))],
         # e4 has no timestamp -> emits as ts="" in context (matches scanner
@@ -1072,8 +1214,12 @@ def scenario_13_time_units_and_edges():
         context_after=[ctx("assistant", text_e4, "")],
     )
     h_e4 = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=4,
-        timestamp="", role="assistant", snippet=text_e4,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=4,
+        timestamp="",
+        role="assistant",
+        snippet=text_e4,
         match_offsets=[[o_e4[0], o_e4[1]]],
         context_before=[ctx("assistant", text_e3, iso(t_e3))],
         context_after=[],
@@ -1086,7 +1232,7 @@ def scenario_13_time_units_and_edges():
     expected = {
         "since-2h": {
             "description": "--since 2h: only the 45s-old entry survives (e2 is "
-                           "past 2h boundary; e4 skipped — no timestamp).",
+            "past 2h boundary; e4 skipped — no timestamp).",
             "pattern": "needle",
             "flags": ["--since", "2h"],
             "hits": [h_e3],
@@ -1101,7 +1247,7 @@ def scenario_13_time_units_and_edges():
         },
         "since-10s": {
             "description": "--since 10s: nothing matches (e3 is 45s old; "
-                           "e4 still skipped under any time filter).",
+            "e4 still skipped under any time filter).",
             "pattern": "needle",
             "flags": ["--since", "10s"],
             "hits": [],
@@ -1116,7 +1262,7 @@ def scenario_13_time_units_and_edges():
         },
         "until-1h": {
             "description": "--until 1h: the 30d and ~2h entries match (e3 newer "
-                           "than cutoff; e4 skipped — missing timestamp + filter).",
+            "than cutoff; e4 skipped — missing timestamp + filter).",
             "pattern": "needle",
             "flags": ["--until", "1h"],
             "hits": [h_e2, h_e1],
@@ -1124,7 +1270,7 @@ def scenario_13_time_units_and_edges():
         },
         "no-filter": {
             "description": "No --since/--until: all four entries match, e4 "
-                           "(no-ts) emits with empty timestamp string.",
+            "(no-ts) emits with empty timestamp string.",
             "pattern": "needle",
             "flags": [],
             # h_e4 has timestamp "" so newest-first puts it last (lexicographic
@@ -1167,16 +1313,20 @@ def scenario_14_snippet_whitespace_nudge():
     )
     hits = [
         hit(
-            session_id="sid1", cwd_slug=scenario, line_number=1,
-            timestamp=iso(t1), role="assistant", snippet=snip,
+            session_id="sid1",
+            cwd_slug=scenario,
+            line_number=1,
+            timestamp=iso(t1),
+            role="assistant",
+            snippet=snip,
             match_offsets=offsets,
         ),
     ]
     expected = {
         "snippet-chars-60": {
             "description": "Long ASCII paragraph + small --snippet-chars: both "
-                           "snippet cuts land mid-word and get nudged outward "
-                           "to whitespace boundaries (no codepoint splits).",
+            "snippet cuts land mid-word and get nudged outward "
+            "to whitespace boundaries (no codepoint splits).",
             "pattern": "needle",
             "flags": ["--snippet-chars", "60"],
             "hits": hits,
@@ -1191,66 +1341,119 @@ REGEX_CLASS_SPECS = [
     # Patterns are raw strings: r"\d+" -> the two chars `\d+`.
     # Offsets are byte offsets within `text`; with default snippet_chars=240
     # snippet == text.
-    ("digit-class",
-     "\\d+ — digit class escape",
-     "alpha 7 beta", r"\d+", [[6, 7]]),
-    ("non-digit-class",
-     "\\D+ — non-digit class escape, greedy",
-     "alpha-7-beta", r"\D+", [[0, 6], [7, 12]]),
-    ("word-class",
-     "\\w+ — word class escape",
-     "foo bar", r"\w+", [[0, 3], [4, 7]]),
-    ("non-word-class",
-     "\\W — non-word class escape",
-     "ping!pong", r"\W", [[4, 5]]),
-    ("default-escape",
-     "\\! — default-escape arm (literal `!`, escape char NOT in dDwWsSntr)",
-     "ping!pong", r"\!", [[4, 5]]),
-    ("space-class",
-     "\\s — whitespace class escape (single ASCII space)",
-     "foo bar", r"\s", [[3, 4]]),
-    ("non-space-class",
-     "\\S+ — non-whitespace class escape, greedy",
-     "foo bar", r"\S+", [[0, 3], [4, 7]]),
-    ("dot-metachar",
-     ". — dot atom (any byte except newline)",
-     "section 5: end", r"5.", [[8, 10]]),
-    ("escaped-dot",
-     "\\. — escaped dot literal",
-     "literal a.b dot", r"a\.b", [[8, 11]]),
-    ("class-range",
-     "[a-z]+ — char class with range expansion",
-     "items cat dog", r"[a-z]+", [[0, 5], [6, 9], [10, 13]]),
-    ("class-negated",
-     "[^a-z]+ — negated class (case-sensitive so uppercase/digits land)",
-     "code Z and 9 here", r"[^a-z]+", [[4, 7], [10, 13]]),
-    ("class-simple",
-     "[abc]+ — class set without ranges",
-     "show me a or b or c", r"[abc]+", [[8, 9], [13, 14], [18, 19]]),
-    ("quant-star",
-     "a*b — `*` quantifier with backtracking",
-     "aaab tail", r"a*b", [[0, 4]]),
-    ("quant-opt",
-     "colou?r — `?` quantifier",
-     "color colour", r"colou?r", [[0, 5], [6, 12]]),
-    ("quant-plus-on-class",
-     "[0-9]+x — `+` quantifier on a class atom",
-     "123x done", r"[0-9]+x", [[0, 4]]),
-    ("class-escape-in-class",
-     "[\\n\\t\\r] — escape-in-class arm; matches a tab between letters",
-     "left\tright", r"[\n\t\r]", [[4, 5]]),
-    ("escape-atoms",
-     "\\t/\\r/\\n - control-escape atoms OUTSIDE a class",
-     "a\tb\rc\nd tail", r"a\tb\rc\nd", [[0, 7]]),
-    ("class-escaped-range-end",
-     "[%-\\\\]+ - class range whose END is an escaped char",
-     "see + or . mark", r"[%-\\]+", [[4, 5], [9, 10]]),
+    ("digit-class", "\\d+ — digit class escape", "alpha 7 beta", r"\d+", [[6, 7]]),
+    (
+        "non-digit-class",
+        "\\D+ — non-digit class escape, greedy",
+        "alpha-7-beta",
+        r"\D+",
+        [[0, 6], [7, 12]],
+    ),
+    ("word-class", "\\w+ — word class escape", "foo bar", r"\w+", [[0, 3], [4, 7]]),
+    ("non-word-class", "\\W — non-word class escape", "ping!pong", r"\W", [[4, 5]]),
+    (
+        "default-escape",
+        "\\! — default-escape arm (literal `!`, escape char NOT in dDwWsSntr)",
+        "ping!pong",
+        r"\!",
+        [[4, 5]],
+    ),
+    (
+        "space-class",
+        "\\s — whitespace class escape (single ASCII space)",
+        "foo bar",
+        r"\s",
+        [[3, 4]],
+    ),
+    (
+        "non-space-class",
+        "\\S+ — non-whitespace class escape, greedy",
+        "foo bar",
+        r"\S+",
+        [[0, 3], [4, 7]],
+    ),
+    (
+        "dot-metachar",
+        ". — dot atom (any byte except newline)",
+        "section 5: end",
+        r"5.",
+        [[8, 10]],
+    ),
+    ("escaped-dot", "\\. — escaped dot literal", "literal a.b dot", r"a\.b", [[8, 11]]),
+    (
+        "class-range",
+        "[a-z]+ — char class with range expansion",
+        "items cat dog",
+        r"[a-z]+",
+        [[0, 5], [6, 9], [10, 13]],
+    ),
+    (
+        "class-negated",
+        "[^a-z]+ — negated class (case-sensitive so uppercase/digits land)",
+        "code Z and 9 here",
+        r"[^a-z]+",
+        [[4, 7], [10, 13]],
+    ),
+    (
+        "class-simple",
+        "[abc]+ — class set without ranges",
+        "show me a or b or c",
+        r"[abc]+",
+        [[8, 9], [13, 14], [18, 19]],
+    ),
+    (
+        "quant-star",
+        "a*b — `*` quantifier with backtracking",
+        "aaab tail",
+        r"a*b",
+        [[0, 4]],
+    ),
+    (
+        "quant-opt",
+        "colou?r — `?` quantifier",
+        "color colour",
+        r"colou?r",
+        [[0, 5], [6, 12]],
+    ),
+    (
+        "quant-plus-on-class",
+        "[0-9]+x — `+` quantifier on a class atom",
+        "123x done",
+        r"[0-9]+x",
+        [[0, 4]],
+    ),
+    (
+        "class-escape-in-class",
+        "[\\n\\t\\r] — escape-in-class arm; matches a tab between letters",
+        "left\tright",
+        r"[\n\t\r]",
+        [[4, 5]],
+    ),
+    (
+        "escape-atoms",
+        "\\t/\\r/\\n - control-escape atoms OUTSIDE a class",
+        "a\tb\rc\nd tail",
+        r"a\tb\rc\nd",
+        [[0, 7]],
+    ),
+    (
+        "class-escaped-range-end",
+        "[%-\\\\]+ - class range whose END is an escaped char",
+        "see + or . mark",
+        r"[%-\\]+",
+        [[4, 5], [9, 10]],
+    ),
 ]
 
 
-def _make_regex_class_scenario(index: int, name: str, description: str,
-                                text: str, pattern: str,
-                                match_offsets: list[list[int]]):
+def _make_regex_class_scenario(
+    index: int,
+    name: str,
+    description: str,
+    text: str,
+    pattern: str,
+    match_offsets: list[list[int]],
+):
     """A7 helper: each pattern gets its OWN scenario dir so walker only scans
     one message — eliminates cross-pattern leakage when the regex matches
     multiple sessions in the same scenario dir.
@@ -1262,7 +1465,7 @@ def _make_regex_class_scenario(index: int, name: str, description: str,
     class expansion would let some negated/positive classes match both halves
     of the alphabet and offsets drift across impls.
     """
-    suffix = chr(ord('a') + index)
+    suffix = chr(ord("a") + index)
     scenario = f"15{suffix}-regex-{name}"
     ts = NOW_UNIX - 5000 + index * 100
     files = {
@@ -1273,12 +1476,19 @@ def _make_regex_class_scenario(index: int, name: str, description: str,
             "description": description,
             "pattern": pattern,
             "flags": ["--regex", "--case-sensitive"],
-            "hits": [hit(
-                session_id="sid1", cwd_slug=scenario, line_number=1,
-                timestamp=iso(ts), role="assistant", snippet=text,
-                match_offsets=match_offsets,
-                context_before=[], context_after=[],
-            )],
+            "hits": [
+                hit(
+                    session_id="sid1",
+                    cwd_slug=scenario,
+                    line_number=1,
+                    timestamp=iso(ts),
+                    role="assistant",
+                    snippet=text,
+                    match_offsets=match_offsets,
+                    context_before=[],
+                    context_after=[],
+                )
+            ],
             "summary": summary(hits=1, sessions_matched=1),
         },
     }
@@ -1289,11 +1499,20 @@ def _regex_class_scenario_factory(index: int):
     """Return a zero-arg scenario function bound to spec[index]. Returning a
     closure lets us register each as a separate entry in SCENARIOS."""
     name, description, text, pattern, match_offsets = REGEX_CLASS_SPECS[index]
+
     def scenario_fn():
         return _make_regex_class_scenario(
-            index, name, description, text, pattern, match_offsets,
+            index,
+            name,
+            description,
+            text,
+            pattern,
+            match_offsets,
         )
-    scenario_fn.__name__ = f"scenario_15{chr(ord('a') + index)}_regex_{name.replace('-', '_')}"
+
+    scenario_fn.__name__ = (
+        f"scenario_15{chr(ord('a') + index)}_regex_{name.replace('-', '_')}"
+    )
     scenario_fn.__doc__ = description
     return scenario_fn
 
@@ -1341,22 +1560,34 @@ def scenario_16_same_timestamp():
     # (session_id asc, line_number asc) after timestamp-desc primary. Context
     # is the message's intra-file neighbors only (no cross-file context).
     hit_a1 = hit(
-        session_id="sid_a", cwd_slug=scenario, line_number=1,
-        timestamp=iso(t), role="assistant", snippet=text_a1,
+        session_id="sid_a",
+        cwd_slug=scenario,
+        line_number=1,
+        timestamp=iso(t),
+        role="assistant",
+        snippet=text_a1,
         match_offsets=[[o_a1[0], o_a1[1]]],
         context_before=[],
         context_after=[ctx("assistant", text_a2, iso(t))],
     )
     hit_a2 = hit(
-        session_id="sid_a", cwd_slug=scenario, line_number=2,
-        timestamp=iso(t), role="assistant", snippet=text_a2,
+        session_id="sid_a",
+        cwd_slug=scenario,
+        line_number=2,
+        timestamp=iso(t),
+        role="assistant",
+        snippet=text_a2,
         match_offsets=[[o_a2[0], o_a2[1]]],
         context_before=[ctx("assistant", text_a1, iso(t))],
         context_after=[],
     )
     hit_b1 = hit(
-        session_id="sid_b", cwd_slug=scenario, line_number=1,
-        timestamp=iso(t), role="assistant", snippet=text_b1,
+        session_id="sid_b",
+        cwd_slug=scenario,
+        line_number=1,
+        timestamp=iso(t),
+        role="assistant",
+        snippet=text_b1,
         match_offsets=[[o_b1[0], o_b1[1]]],
         context_before=[],
         context_after=[],
@@ -1389,7 +1620,9 @@ def multi_root_scenario_01_two_roots():
     text_p = "primary root mentions needle once"
     text_e = "extra root also has needle here"
     files = {
-        "primary/proj-primary/sid_p.jsonl": [assistant_text(t_primary, "msg_mr_p", text_p)],
+        "primary/proj-primary/sid_p.jsonl": [
+            assistant_text(t_primary, "msg_mr_p", text_p)
+        ],
         "extra/proj-extra/sid_e.jsonl": [assistant_text(t_extra, "msg_mr_e", text_e)],
         # Root-LEVEL stray file (slug position): discovery must skip a
         # non-directory entry where a slug dir is expected.
@@ -1398,13 +1631,21 @@ def multi_root_scenario_01_two_roots():
     o_p = find_offset(text_p, "needle")
     o_e = find_offset(text_e, "needle")
     hit_e = hit(
-        session_id="sid_e", cwd_slug="proj-extra", line_number=1,
-        timestamp=iso(t_extra), role="assistant", snippet=text_e,
+        session_id="sid_e",
+        cwd_slug="proj-extra",
+        line_number=1,
+        timestamp=iso(t_extra),
+        role="assistant",
+        snippet=text_e,
         match_offsets=[[o_e[0], o_e[1]]],
     )
     hit_p = hit(
-        session_id="sid_p", cwd_slug="proj-primary", line_number=1,
-        timestamp=iso(t_primary), role="assistant", snippet=text_p,
+        session_id="sid_p",
+        cwd_slug="proj-primary",
+        line_number=1,
+        timestamp=iso(t_primary),
+        role="assistant",
+        snippet=text_p,
         match_offsets=[[o_p[0], o_p[1]]],
     )
     combos = {
@@ -1458,11 +1699,13 @@ def scenario_17_queue_operation():
             assistant_text(t1, "msg_17_a1", a1),
             queue_operation(t2, "enqueue", enqueue_plain),
             queue_operation(t3, "enqueue", enqueue_notif),
-            queue_operation(t4, "remove"),                    # no content -> skip
-            queue_operation(t5, "dequeue"),                   # no content -> skip
-            queue_operation(t6, "enqueue", ""),               # empty content -> skip
-            queue_operation(t7, "enqueue", 42),               # non-string content -> skip
-            queue_operation(None, "popAll", enqueue_no_ts),   # no timestamp -> hit, ts ""
+            queue_operation(t4, "remove"),  # no content -> skip
+            queue_operation(t5, "dequeue"),  # no content -> skip
+            queue_operation(t6, "enqueue", ""),  # empty content -> skip
+            queue_operation(t7, "enqueue", 42),  # non-string content -> skip
+            queue_operation(
+                None, "popAll", enqueue_no_ts
+            ),  # no timestamp -> hit, ts ""
         ],
     }
     oa1 = find_offset(a1, "needle")
@@ -1472,8 +1715,12 @@ def scenario_17_queue_operation():
 
     # --- default combo: queue-ops invisible, only the assistant message scans.
     hit_a1_default = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=1,
-        timestamp=iso(t1), role="assistant", snippet=a1,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=1,
+        timestamp=iso(t1),
+        role="assistant",
+        snippet=a1,
         match_offsets=[[oa1[0], oa1[1]]],
         context_before=[],
         context_after=[],
@@ -1488,29 +1735,45 @@ def scenario_17_queue_operation():
     # list (default context = 1 neighbour each side). Newest-first by timestamp;
     # the no-ts entry has timestamp "" and sorts last (empty < any RFC3339).
     hit_notif = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=3,
-        timestamp=iso(t3), role="user", snippet=enqueue_notif,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=3,
+        timestamp=iso(t3),
+        role="user",
+        snippet=enqueue_notif,
         match_offsets=[[on[0], on[1]]],
         context_before=[ctx("user", enqueue_plain, iso(t2))],
         context_after=[ctx("user", enqueue_no_ts, "")],
     )
     hit_plain = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=2,
-        timestamp=iso(t2), role="user", snippet=enqueue_plain,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=2,
+        timestamp=iso(t2),
+        role="user",
+        snippet=enqueue_plain,
         match_offsets=[[op[0], op[1]]],
         context_before=[ctx("assistant", a1, iso(t1))],
         context_after=[ctx("user", enqueue_notif, iso(t3))],
     )
     hit_a1_with_q = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=1,
-        timestamp=iso(t1), role="assistant", snippet=a1,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=1,
+        timestamp=iso(t1),
+        role="assistant",
+        snippet=a1,
         match_offsets=[[oa1[0], oa1[1]]],
         context_before=[],
         context_after=[ctx("user", enqueue_plain, iso(t2))],
     )
     hit_no_ts = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=8,
-        timestamp="", role="user", snippet=enqueue_no_ts,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=8,
+        timestamp="",
+        role="user",
+        snippet=enqueue_no_ts,
         match_offsets=[[ots[0], ots[1]]],
         context_before=[ctx("user", enqueue_notif, iso(t3))],
         context_after=[],
@@ -1526,10 +1789,10 @@ def scenario_17_queue_operation():
         },
         "include-queue-ops": {
             "description": "--include-queue-ops: the content-bearing enqueues "
-                           "index as role:user (incl. the task-notification, no "
-                           "filtering); remove/dequeue/empty/non-string skipped. "
-                           "The no-timestamp popAll surfaces with ts \"\" and "
-                           "sorts last. Newest first.",
+            "index as role:user (incl. the task-notification, no "
+            "filtering); remove/dequeue/empty/non-string skipped. "
+            'The no-timestamp popAll surfaces with ts "" and '
+            "sorts last. Newest first.",
             "pattern": "needle",
             "flags": ["--include-queue-ops"],
             "hits": [hit_notif, hit_plain, hit_a1_with_q, hit_no_ts],
@@ -1537,9 +1800,9 @@ def scenario_17_queue_operation():
         },
         "include-queue-ops-role-assistant": {
             "description": "--include-queue-ops --role assistant: queue-ops are "
-                           "role:user, so only the assistant message emits a hit "
-                           "(its positional context still spans the enqueue, per "
-                           "the role-filter precedent).",
+            "role:user, so only the assistant message emits a hit "
+            "(its positional context still spans the enqueue, per "
+            "the role-filter precedent).",
             "pattern": "needle",
             "flags": ["--include-queue-ops", "--role", "assistant"],
             "hits": [hit_a1_with_q],
@@ -1570,19 +1833,27 @@ def scenario_18_subagent_traversal():
     o_p = find_offset(text_parent, "needle")
     o_s = find_offset(text_sub, "needle")
     hit_sub = hit(
-        session_id="sid_parent", cwd_slug=scenario, line_number=1,
-        timestamp=iso(t_sub), role="assistant", snippet=text_sub,
+        session_id="sid_parent",
+        cwd_slug=scenario,
+        line_number=1,
+        timestamp=iso(t_sub),
+        role="assistant",
+        snippet=text_sub,
         match_offsets=[[o_s[0], o_s[1]]],
     )
     hit_parent = hit(
-        session_id="sid_parent", cwd_slug=scenario, line_number=1,
-        timestamp=iso(t_parent), role="assistant", snippet=text_parent,
+        session_id="sid_parent",
+        cwd_slug=scenario,
+        line_number=1,
+        timestamp=iso(t_parent),
+        role="assistant",
+        snippet=text_parent,
         match_offsets=[[o_p[0], o_p[1]]],
     )
     expected = {
         "default": {
             "description": "Subagent transcript is searched; its hit carries the "
-                           "parent session's id, so sessions_matched stays 1.",
+            "parent session's id, so sessions_matched stays 1.",
             "pattern": "needle",
             "flags": [],
             "hits": [hit_sub, hit_parent],
@@ -1601,8 +1872,12 @@ def scenario_19_prefilter_edges():
     that must defeat the skip when the pattern contains k/s, and a pattern
     starting with a non-letter byte."""
     scenario = "19-prefilter-edges"
-    t1, t2, t3, t4 = (NOW_UNIX - 4000, NOW_UNIX - 3000,
-                      NOW_UNIX - 2000, NOW_UNIX - 1000)
+    t1, t2, t3, t4 = (
+        NOW_UNIX - 4000,
+        NOW_UNIX - 3000,
+        NOW_UNIX - 2000,
+        NOW_UNIX - 1000,
+    )
     text_hit = "report: zebra count five"
     text_digits = "code 7zulu engaged"
     text_miss = "nothing interesting here at all"
@@ -1622,20 +1897,20 @@ def scenario_19_prefilter_edges():
         # messages. The trailing malformed line ends the FILE with the byte
         # 'z' -- the only 'z' in the file, too close to EOF for "zebra" to
         # fit (candidate found beyond the last viable start).
-        "tail.jsonl": [assistant_text(t1, "msg_19_tail", text_tail),
-                       "",
-                       b'\xff\xfe not utf-8',
-                       '{"message": "bare", "timestamp": "x"}',
-                       '{"message": {"content": [{"type": "text", '
-                       '"text": "no role"}]}}',
-                       '{"message": {"role": "", "content": []}}',
-                       '{"message": {"role": "user"}}',
-                       "garbagez"],
+        "tail.jsonl": [
+            assistant_text(t1, "msg_19_tail", text_tail),
+            "",
+            b"\xff\xfe not utf-8",
+            '{"message": "bare", "timestamp": "x"}',
+            '{"message": {"content": [{"type": "text", "text": "no role"}]}}',
+            '{"message": {"role": "", "content": []}}',
+            '{"message": {"role": "user"}}',
+            "garbagez",
+        ],
         # Variant where the final 'z' sits EXACTLY at the last viable match
         # start -- the candidate is window-compared, fails, and the scan
         # advances past the end (the loop-exhausted return).
-        "tail2.jsonl": [assistant_text(t1, "msg_19_tail2", text_tail2),
-                        "zqqq"],
+        "tail2.jsonl": [assistant_text(t1, "msg_19_tail2", text_tail2), "zqqq"],
         "hazard.jsonl": [assistant_text(t1, "msg_19_haz", text_hazard)],
         "tiny.jsonl": [],
     }
@@ -1644,19 +1919,25 @@ def scenario_19_prefilter_edges():
     combos = {
         "insensitive-one-hit": {
             "description": "Pattern present in one file; the rest are "
-                           "prefilter-skipped or parsed without a match.",
+            "prefilter-skipped or parsed without a match.",
             "pattern": "zebra",
             "flags": [],
-            "hits": [hit(
-                session_id="hit", cwd_slug=scenario, line_number=1,
-                timestamp=iso(t4), role="assistant", snippet=text_hit,
-                match_offsets=[[o_hit[0], o_hit[1]]],
-            )],
+            "hits": [
+                hit(
+                    session_id="hit",
+                    cwd_slug=scenario,
+                    line_number=1,
+                    timestamp=iso(t4),
+                    role="assistant",
+                    snippet=text_hit,
+                    match_offsets=[[o_hit[0], o_hit[1]]],
+                )
+            ],
             "summary": summary(hits=1, sessions_matched=1),
         },
         "fold-hazard-zero": {
             "description": "k/s pattern absent everywhere; the hazard file's "
-                           "0xC5/0xE2 lead bytes force a full parse anyway.",
+            "0xC5/0xE2 lead bytes force a full parse anyway.",
             "pattern": "kelvins",
             "flags": [],
             "hits": [],
@@ -1666,16 +1947,22 @@ def scenario_19_prefilter_edges():
             "description": "Pattern starting with a non-letter byte.",
             "pattern": "7zulu",
             "flags": [],
-            "hits": [hit(
-                session_id="digits", cwd_slug=scenario, line_number=1,
-                timestamp=iso(t3), role="assistant", snippet=text_digits,
-                match_offsets=[[o_dig[0], o_dig[1]]],
-            )],
+            "hits": [
+                hit(
+                    session_id="digits",
+                    cwd_slug=scenario,
+                    line_number=1,
+                    timestamp=iso(t3),
+                    role="assistant",
+                    snippet=text_digits,
+                    match_offsets=[[o_dig[0], o_dig[1]]],
+                )
+            ],
             "summary": summary(hits=1, sessions_matched=1),
         },
         "sensitive-miss": {
             "description": "Case-sensitive pattern that only differs by case "
-                           "-> zero hits via the sensitive prefilter path.",
+            "-> zero hits via the sensitive prefilter path.",
             "pattern": "Zebra",
             "flags": ["--case-sensitive"],
             "hits": [],
@@ -1700,11 +1987,17 @@ def scenario_20_nonascii_pattern():
             "description": "Case-insensitive multibyte literal pattern.",
             "pattern": "café",
             "flags": [],
-            "hits": [hit(
-                session_id="sid1", cwd_slug=scenario, line_number=1,
-                timestamp=iso(t1), role="assistant", snippet=snip,
-                match_offsets=offsets,
-            )],
+            "hits": [
+                hit(
+                    session_id="sid1",
+                    cwd_slug=scenario,
+                    line_number=1,
+                    timestamp=iso(t1),
+                    role="assistant",
+                    snippet=snip,
+                    match_offsets=offsets,
+                )
+            ],
             "summary": summary(hits=1, sessions_matched=1),
         },
     }
@@ -1718,21 +2011,29 @@ def scenario_21_snippet_escape_chars():
     escapes are correct, not their textual form."""
     scenario = "21-snippet-escape-chars"
     t1 = NOW_UNIX - 1000
-    text = ('alert "quoted" back\\slash bs\bspot form\ffeed '
-            'carriage\rreturn tab\there ctl\x01dot needle end')
+    text = (
+        'alert "quoted" back\\slash bs\bspot form\ffeed '
+        "carriage\rreturn tab\there ctl\x01dot needle end"
+    )
     files = {"sid1.jsonl": [assistant_text(t1, "msg_21_a1", text)]}
     o = find_offset(text, "needle")
     combos = {
         "default": {
             "description": "Control/escape characters in the snippet "
-                           "round-trip through the JSON writer.",
+            "round-trip through the JSON writer.",
             "pattern": "needle",
             "flags": [],
-            "hits": [hit(
-                session_id="sid1", cwd_slug=scenario, line_number=1,
-                timestamp=iso(t1), role="assistant", snippet=text,
-                match_offsets=[[o[0], o[1]]],
-            )],
+            "hits": [
+                hit(
+                    session_id="sid1",
+                    cwd_slug=scenario,
+                    line_number=1,
+                    timestamp=iso(t1),
+                    role="assistant",
+                    snippet=text,
+                    match_offsets=[[o[0], o[1]]],
+                )
+            ],
             "summary": summary(hits=1, sessions_matched=1),
         },
     }
@@ -1752,11 +2053,17 @@ def scenario_22_regex_fold_range():
             "description": "Insensitive class range matches mixed case.",
             "pattern": "[a-d]+",
             "flags": ["--regex"],
-            "hits": [hit(
-                session_id="sid1", cwd_slug=scenario, line_number=1,
-                timestamp=iso(t1), role="assistant", snippet=text,
-                match_offsets=[[0, 4]],
-            )],
+            "hits": [
+                hit(
+                    session_id="sid1",
+                    cwd_slug=scenario,
+                    line_number=1,
+                    timestamp=iso(t1),
+                    role="assistant",
+                    snippet=text,
+                    match_offsets=[[0, 4]],
+                )
+            ],
             "summary": summary(hits=1, sessions_matched=1),
         },
     }
@@ -1775,11 +2082,17 @@ def scenario_23_regex_fold_single():
             "description": "Insensitive class members match both cases.",
             "pattern": "[xy]+",
             "flags": ["--regex"],
-            "hits": [hit(
-                session_id="sid1", cwd_slug=scenario, line_number=1,
-                timestamp=iso(t1), role="assistant", snippet=text,
-                match_offsets=[[0, 2]],
-            )],
+            "hits": [
+                hit(
+                    session_id="sid1",
+                    cwd_slug=scenario,
+                    line_number=1,
+                    timestamp=iso(t1),
+                    role="assistant",
+                    snippet=text,
+                    match_offsets=[[0, 2]],
+                )
+            ],
             "summary": summary(hits=1, sessions_matched=1),
         },
     }
@@ -1798,14 +2111,20 @@ def scenario_24_snippet_no_whitespace():
     combos = {
         "default": {
             "description": "Cuts land mid-run; no whitespace within the "
-                           "20-byte nudge window on either side.",
+            "20-byte nudge window on either side.",
             "pattern": "needle",
             "flags": [],
-            "hits": [hit(
-                session_id="sid1", cwd_slug=scenario, line_number=1,
-                timestamp=iso(t1), role="assistant", snippet=snip,
-                match_offsets=offsets,
-            )],
+            "hits": [
+                hit(
+                    session_id="sid1",
+                    cwd_slug=scenario,
+                    line_number=1,
+                    timestamp=iso(t1),
+                    role="assistant",
+                    snippet=snip,
+                    match_offsets=offsets,
+                )
+            ],
             "summary": summary(hits=1, sessions_matched=1),
         },
     }
@@ -1817,9 +2136,14 @@ def scenario_25_context_rich():
     120 chars: exercises multi-entry context arrays (the JSONL comma arm) and
     the pretty renderer's long-context ellipsis truncation."""
     scenario = "25-context-rich"
-    t1, t2, t3, t4, t5 = (NOW_UNIX - 5000, NOW_UNIX - 4000, NOW_UNIX - 3000,
-                          NOW_UNIX - 2000, NOW_UNIX - 1000)
-    ctx1 = "context turn one " + "alpha " * 25   # > 120 chars
+    t1, t2, t3, t4, t5 = (
+        NOW_UNIX - 5000,
+        NOW_UNIX - 4000,
+        NOW_UNIX - 3000,
+        NOW_UNIX - 2000,
+        NOW_UNIX - 1000,
+    )
+    ctx1 = "context turn one " + "alpha " * 25  # > 120 chars
     ctx2 = "context turn two " + "bravo " * 25
     ctx4 = "context turn four " + "delta " * 25
     ctx5 = "context turn five " + "echo " * 30
@@ -1839,15 +2163,25 @@ def scenario_25_context_rich():
             "description": "Two long context turns on each side of one hit.",
             "pattern": "needle",
             "flags": ["--context", "2"],
-            "hits": [hit(
-                session_id="sid1", cwd_slug=scenario, line_number=3,
-                timestamp=iso(t3), role="assistant", snippet=text_hit,
-                match_offsets=[[o[0], o[1]]],
-                context_before=[ctx("assistant", ctx1, iso(t1)),
-                                ctx("assistant", ctx2, iso(t2))],
-                context_after=[ctx("assistant", ctx4, iso(t4)),
-                               ctx("assistant", ctx5, iso(t5))],
-            )],
+            "hits": [
+                hit(
+                    session_id="sid1",
+                    cwd_slug=scenario,
+                    line_number=3,
+                    timestamp=iso(t3),
+                    role="assistant",
+                    snippet=text_hit,
+                    match_offsets=[[o[0], o[1]]],
+                    context_before=[
+                        ctx("assistant", ctx1, iso(t1)),
+                        ctx("assistant", ctx2, iso(t2)),
+                    ],
+                    context_after=[
+                        ctx("assistant", ctx4, iso(t4)),
+                        ctx("assistant", ctx5, iso(t5)),
+                    ],
+                )
+            ],
             "summary": summary(hits=1, sessions_matched=1),
         },
     }
@@ -1870,13 +2204,21 @@ def multi_root_scenario_02_cwd_filter():
     o1 = find_offset(text_one, "needle")
     o2 = find_offset(text_two, "needle")
     hit_one = hit(
-        session_id="sid1", cwd_slug="slug-one", line_number=1,
-        timestamp=iso(t_one), role="assistant", snippet=text_one,
+        session_id="sid1",
+        cwd_slug="slug-one",
+        line_number=1,
+        timestamp=iso(t_one),
+        role="assistant",
+        snippet=text_one,
         match_offsets=[[o1[0], o1[1]]],
     )
     hit_two = hit(
-        session_id="sid2", cwd_slug="slug-two", line_number=1,
-        timestamp=iso(t_two), role="assistant", snippet=text_two,
+        session_id="sid2",
+        cwd_slug="slug-two",
+        line_number=1,
+        timestamp=iso(t_two),
+        role="assistant",
+        snippet=text_two,
         match_offsets=[[o2[0], o2[1]]],
     )
     combos = {
@@ -1922,8 +2264,12 @@ def scenario_26_dirty_with_pattern():
     }
     snip, offsets = snippet_and_offsets(text_hit, "dirtneedle", 240)
     the_hit = hit(
-        session_id="dirty", cwd_slug=scenario, line_number=1,
-        timestamp=iso(t1), role="assistant", snippet=snip,
+        session_id="dirty",
+        cwd_slug=scenario,
+        line_number=1,
+        timestamp=iso(t1),
+        role="assistant",
+        snippet=snip,
         match_offsets=offsets,
     )
     combos = {
@@ -1954,8 +2300,12 @@ def scenario_27_padded_time_args():
     files = {"sid1.jsonl": [assistant_text(t1, "msg_27_a1", text)]}
     o = find_offset(text, "padneedle")
     the_hit = hit(
-        session_id="sid1", cwd_slug=scenario, line_number=1,
-        timestamp=iso(t1), role="assistant", snippet=text,
+        session_id="sid1",
+        cwd_slug=scenario,
+        line_number=1,
+        timestamp=iso(t1),
+        role="assistant",
+        snippet=text,
         match_offsets=[[o[0], o[1]]],
     )
     combos = {
@@ -1993,11 +2343,17 @@ def scenario_28_regex_backtrack():
             "description": "Greedy + with a failing suffix forces backtracking.",
             "pattern": "al+x",
             "flags": ["--regex"],
-            "hits": [hit(
-                session_id="sid1", cwd_slug=scenario, line_number=1,
-                timestamp=iso(t1), role="assistant", snippet=text,
-                match_offsets=[[mstart, mstart + 4]],
-            )],
+            "hits": [
+                hit(
+                    session_id="sid1",
+                    cwd_slug=scenario,
+                    line_number=1,
+                    timestamp=iso(t1),
+                    role="assistant",
+                    snippet=text,
+                    match_offsets=[[mstart, mstart + 4]],
+                )
+            ],
             "summary": summary(hits=1, sessions_matched=1),
         },
     }
@@ -2016,9 +2372,7 @@ def scenario_29_discovery_oddities():
     text_sub = "subagent oddneedle line"
     files = {
         "main.jsonl": [assistant_text(t_parent, "msg_29_p1", text_parent)],
-        "main/subagents/agent-ok.jsonl": [
-            assistant_text(t_sub, "msg_29_s1", text_sub)
-        ],
+        "main/subagents/agent-ok.jsonl": [assistant_text(t_sub, "msg_29_s1", text_sub)],
         # Skipped: bad name in subagents, stray dir in subagents, session
         # dir without subagents, non-.jsonl file at slug level.
         "main/subagents/notanagent.txt": ["oddneedle in a non-agent file"],
@@ -2034,13 +2388,24 @@ def scenario_29_discovery_oddities():
             "pattern": "oddneedle",
             "flags": [],
             "hits": [
-                hit(session_id="main", cwd_slug=scenario, line_number=1,
-                    timestamp=iso(t_sub), role="assistant", snippet=text_sub,
-                    match_offsets=[[o_s[0], o_s[1]]]),
-                hit(session_id="main", cwd_slug=scenario, line_number=1,
-                    timestamp=iso(t_parent), role="assistant",
+                hit(
+                    session_id="main",
+                    cwd_slug=scenario,
+                    line_number=1,
+                    timestamp=iso(t_sub),
+                    role="assistant",
+                    snippet=text_sub,
+                    match_offsets=[[o_s[0], o_s[1]]],
+                ),
+                hit(
+                    session_id="main",
+                    cwd_slug=scenario,
+                    line_number=1,
+                    timestamp=iso(t_parent),
+                    role="assistant",
                     snippet=text_parent,
-                    match_offsets=[[o_p[0], o_p[1]]]),
+                    match_offsets=[[o_p[0], o_p[1]]],
+                ),
             ],
             "summary": summary(hits=2, sessions_matched=1),
         },
@@ -2149,7 +2514,9 @@ def main() -> None:
 
     print(f"Wrote {total_files} JSONL fixtures across {len(SCENARIOS)} scenarios")
     print(f"  under {CORPUS_SEARCH}")
-    print(f"Wrote {mr_files} JSONL fixtures across {len(MULTI_ROOT_SCENARIOS)} multi-root scenarios")
+    print(
+        f"Wrote {mr_files} JSONL fixtures across {len(MULTI_ROOT_SCENARIOS)} multi-root scenarios"
+    )
     print(f"  under {CORPUS_SEARCH_MULTI_ROOT}")
 
     if CORPUS_SEARCH_CODEX.exists():
@@ -2165,8 +2532,7 @@ def main() -> None:
     session_id = "019fb6bc-1111-7222-8333-444444444444"
     other_session_id = "019fb6bc-aaaa-7bbb-8ccc-dddddddddddd"
     codex_files = {
-        "2026/05/09/rollout-2026-05-09T11-00-00-"
-        f"{session_id}.jsonl": [
+        f"2026/05/09/rollout-2026-05-09T11-00-00-{session_id}.jsonl": [
             codex_session_meta(NOW_UNIX - 3600, session_id, codex_cwd),
             codex_event(NOW_UNIX - 3500, "user_message", "codexneedle from user"),
             codex_event(NOW_UNIX - 3400, "token_count", "codexneedle ignored"),
@@ -2174,10 +2540,12 @@ def main() -> None:
             codex_event(NOW_UNIX - 3200, "agent_message", {"not": "text"}),
             {"timestamp": iso(NOW_UNIX - 3100), "type": "event_msg"},
         ],
-        "2026/05/09/rollout-2026-05-09T10-00-00-"
-        f"{other_session_id}.jsonl": [
-            {"timestamp": iso(NOW_UNIX - 7200), "type": "session_meta",
-             "payload": {"id": other_session_id, "cwd": other_cwd}},
+        f"2026/05/09/rollout-2026-05-09T10-00-00-{other_session_id}.jsonl": [
+            {
+                "timestamp": iso(NOW_UNIX - 7200),
+                "type": "session_meta",
+                "payload": {"id": other_session_id, "cwd": other_cwd},
+            },
             codex_event(NOW_UNIX - 7100, "agent_message", "codexneedle other cwd"),
         ],
         "2026/05/09/not-a-rollout.jsonl": [
@@ -2217,12 +2585,17 @@ def main() -> None:
     for rel, lines in codex_files.items():
         write_jsonl(CORPUS_SEARCH_CODEX / rel, lines)
 
-    def codex_hit(session: str, cwd: str, line: int, timestamp: float,
-                  role: str, text: str) -> dict:
+    def codex_hit(
+        session: str, cwd: str, line: int, timestamp: float, role: str, text: str
+    ) -> dict:
         start = text.index("codexneedle")
         return hit(
-            session_id=session, cwd_slug=cwd, line_number=line,
-            timestamp=iso(timestamp), role=role, snippet=text,
+            session_id=session,
+            cwd_slug=cwd,
+            line_number=line,
+            timestamp=iso(timestamp),
+            role=role,
+            snippet=text,
             match_offsets=[[start, start + len("codexneedle")]],
         )
 
@@ -2232,21 +2605,51 @@ def main() -> None:
         "cwd": codex_cwd,
         "all": {
             "hits": [
-                codex_hit(session_id, codex_cwd, 4, NOW_UNIX - 3300,
-                          "assistant", "codexneedle from agent"),
-                codex_hit(session_id, codex_cwd, 2, NOW_UNIX - 3500,
-                          "user", "codexneedle from user"),
-                codex_hit(other_session_id, other_cwd, 2, NOW_UNIX - 7100,
-                          "assistant", "codexneedle other cwd"),
+                codex_hit(
+                    session_id,
+                    codex_cwd,
+                    4,
+                    NOW_UNIX - 3300,
+                    "assistant",
+                    "codexneedle from agent",
+                ),
+                codex_hit(
+                    session_id,
+                    codex_cwd,
+                    2,
+                    NOW_UNIX - 3500,
+                    "user",
+                    "codexneedle from user",
+                ),
+                codex_hit(
+                    other_session_id,
+                    other_cwd,
+                    2,
+                    NOW_UNIX - 7100,
+                    "assistant",
+                    "codexneedle other cwd",
+                ),
             ],
             "summary": summary(hits=3, sessions_matched=2, roots_walked=2),
         },
         "cwd_filtered": {
             "hits": [
-                codex_hit(session_id, codex_cwd, 4, NOW_UNIX - 3300,
-                          "assistant", "codexneedle from agent"),
-                codex_hit(session_id, codex_cwd, 2, NOW_UNIX - 3500,
-                          "user", "codexneedle from user"),
+                codex_hit(
+                    session_id,
+                    codex_cwd,
+                    4,
+                    NOW_UNIX - 3300,
+                    "assistant",
+                    "codexneedle from agent",
+                ),
+                codex_hit(
+                    session_id,
+                    codex_cwd,
+                    2,
+                    NOW_UNIX - 3500,
+                    "user",
+                    "codexneedle from user",
+                ),
             ],
             "summary": summary(hits=2, sessions_matched=1, roots_walked=2),
         },

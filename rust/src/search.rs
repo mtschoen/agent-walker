@@ -18,8 +18,6 @@ use crate::content::{
 use crate::walker_roots::{TranscriptFormat, TranscriptRoot};
 use crate::{current_unix, parse_iso8601, walker_roots};
 
-// === Flag types ===
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Role {
     User,
@@ -52,8 +50,6 @@ struct SearchArgs {
     extra_projects_roots: Vec<PathBuf>,
     read_config: bool,
 }
-
-// === Arg parsing ===
 
 fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
     let mut pattern: Option<String> = None;
@@ -232,8 +228,6 @@ fn parse_time_arg(s: &str, now: f64) -> Result<f64, String> {
     parse_iso8601(trimmed).ok_or_else(|| format!("not RFC3339 or relative: {trimmed}"))
 }
 
-// === Scan / file IO ===
-
 #[derive(Debug)]
 struct ScanMessage {
     line_number: u32,
@@ -388,8 +382,6 @@ fn scan_file(
     }
     out
 }
-
-// === Discovery ===
 
 struct DiscoveredFile {
     path: PathBuf,
@@ -601,8 +593,6 @@ fn codex_directory_entries(path: &Path) -> Vec<DirEntry> {
         .unwrap_or_default()
 }
 
-// === Pattern matching ===
-
 /// Raw-byte necessary-condition check for literal (non --regex) patterns,
 /// applied to a whole file's bytes before any JSON parsing. Sound because:
 /// - the pattern is restricted to ASCII without `"`, `\`, or control bytes,
@@ -715,8 +705,6 @@ fn find_all_matches(re: &Regex, text: &str) -> Vec<(usize, usize)> {
     re.find_iter(text).map(|m| (m.start(), m.end())).collect()
 }
 
-// === Snippet generation ===
-
 fn nudge_char_boundary(text: &str, mut idx: usize) -> usize {
     while idx < text.len() && !text.is_char_boundary(idx) {
         idx += 1;
@@ -772,8 +760,6 @@ fn make_snippet(text: &str, first_match: (usize, usize), snippet_chars: u32) -> 
     let hi = nudge_char_boundary(text, hi);
     text[lo..hi].to_string()
 }
-
-// === Hit assembly ===
 
 struct Hit {
     timestamp: f64, // for sorting; not emitted
@@ -903,8 +889,6 @@ fn process_file(
     hits
 }
 
-// === Output ===
-
 fn hit_to_json(h: &Hit) -> Value {
     json!({
         "type": "hit",
@@ -1014,8 +998,6 @@ fn truncate(s: &str, max: usize) -> String {
         format!("{}…", &s[..cut])
     }
 }
-
-// === Top-level run ===
 
 pub fn run(raw: &[String]) {
     let started = Instant::now();
@@ -1416,7 +1398,6 @@ mod tests {
         let root = tempdir_path("search-unreadable-slug");
         let bad_slug = root.join("bad-slug");
         fs::create_dir_all(&bad_slug).unwrap();
-        // Write a file inside the directory before locking it out.
         fs::write(bad_slug.join("session-x.jsonl"), b"").unwrap();
         fs::set_permissions(&bad_slug, fs::Permissions::from_mode(0o000)).unwrap();
         // chmod 000 does not block root (CI containers) or permissive
