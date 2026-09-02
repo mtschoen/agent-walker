@@ -5,7 +5,7 @@ Reads the cumulative coverage percent from coverage/summary.json (emitted by
 shared/coverage.py) and POSTs it as a Gitea commit status (context=
 pr-crew/coverage) on $GITHUB_SHA using the auto $GITHUB_TOKEN.
 
-Modeled on projdash/ci/post-coverage-status.py — same status-post shape so
+Modeled on projdash/ci/post-coverage-status.py - same status-post shape so
 the percent shows up as its own check line on the PR (the workflow job's
 own status line cannot be re-described per-run).
 
@@ -35,6 +35,11 @@ def _post(state: str, description: str) -> None:
     repository = os.environ["GITHUB_REPOSITORY"]
     sha = os.environ["GITHUB_SHA"]
     run_id = os.environ.get("GITHUB_RUN_ID", "")
+    api_url = os.environ.get("GITHUB_API_URL")
+    if api_url:
+        status_url = f"{api_url}/repos/{repository}/statuses/{sha}"
+    else:
+        status_url = f"{server}/api/v1/repos/{repository}/statuses/{sha}"
     body = json.dumps(
         {
             "context": "pr-crew/coverage",
@@ -44,7 +49,7 @@ def _post(state: str, description: str) -> None:
         }
     ).encode()
     request = urllib.request.Request(
-        f"{server}/api/v1/repos/{repository}/statuses/{sha}",
+        status_url,
         data=body,
         method="POST",
         headers={
@@ -70,9 +75,9 @@ def main(argv: list[str]) -> int:
     )
     arguments = parser.parse_args(argv[1:])
 
-    # Off-CI guard — running locally without GITHUB_* env should not crash.
+    # Off-CI guard - running locally without GITHUB_* env should not crash.
     if "GITHUB_SHA" not in os.environ or "GITHUB_TOKEN" not in os.environ:
-        print("post-coverage-status: GITHUB_* env not set — skipping (not in CI)")
+        print("post-coverage-status: GITHUB_* env not set - skipping (not in CI)")
         return 0
 
     try:

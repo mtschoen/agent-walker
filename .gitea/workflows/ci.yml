@@ -93,29 +93,23 @@ jobs:
           CURRENT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          python -m unittest ci.test_select_languages
+          python -m unittest discover -s ci
           selection_file="$(mktemp)"
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+          if [ "$EVENT_NAME" != "pull_request" ]; then
             python ci/select_languages.py --all < /dev/null > "$selection_file"
           else
-            if [ "$EVENT_NAME" = "pull_request" ]; then
-              BASE_SHA="$PULL_REQUEST_BASE_SHA"
-              HEAD_SHA="$PULL_REQUEST_HEAD_SHA"
-            else
-              BASE_SHA="$PUSH_BASE_SHA"
-              HEAD_SHA="$CURRENT_SHA"
-            fi
-          fi
-          if [ "$EVENT_NAME" != "workflow_dispatch" ] &&
-             { [ -z "$BASE_SHA" ] ||
+            BASE_SHA="$PULL_REQUEST_BASE_SHA"
+            HEAD_SHA="$PULL_REQUEST_HEAD_SHA"
+            if [ -z "$BASE_SHA" ] ||
                [[ "$BASE_SHA" =~ ^0+$ ]] ||
                ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null ||
-               ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; }; then
-            echo "::warning::change range unavailable; selecting all implementations"
-            python ci/select_languages.py --all < /dev/null > "$selection_file"
-          elif [ "$EVENT_NAME" != "workflow_dispatch" ]; then
-            git diff --name-only "$BASE_SHA" "$HEAD_SHA" |
-              python ci/select_languages.py > "$selection_file"
+               ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+              echo "::warning::change range unavailable; selecting all implementations"
+              python ci/select_languages.py --all < /dev/null > "$selection_file"
+            else
+              git diff --name-only "$BASE_SHA" "$HEAD_SHA" |
+                python ci/select_languages.py > "$selection_file"
+            fi
           fi
           cat "$selection_file"
           cat "$selection_file" >> "$GITHUB_OUTPUT"

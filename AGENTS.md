@@ -190,16 +190,16 @@ Current numbers, methodology, and optimization notes live in `PERF-RESULTS.md`.
 
 ## CI
 
-`.gitea/workflows/ci.yml` detects changed implementation directories and
-builds only those impls on `ubuntu-latest` + `windows-latest` (the llamabox
-Gitea Actions runners). Changes under `shared/`, `.gitea/`, or `ci/`, plus
-`SPEC.md`, select all four implementations. Unrecognized paths also select
+`.gitea/workflows/ci.yml` detects changed implementation directories on
+pull requests and builds only those impls on `ubuntu-latest` + `windows-latest`
+(the llamabox Gitea Actions runners). Changes under `shared/`, `.gitea/`, or `ci/`,
+plus `SPEC.md`, select all four implementations. Unrecognized paths also select
 all four so only changes confined to known implementation directories narrow
 the existing checks. A third `coverage-linux` job runs
 `python shared/coverage.py` for the same selection to gate per-impl regression
 against the documented baseline. Triggers on push to `main`, pull_request to
-`main`, and `workflow_dispatch`; manual dispatch selects all four
-implementations.
+`main`, and `workflow_dispatch`; pushes to `main` and manual dispatch select
+all four implementations so `main` HEAD always measures and posts full coverage.
 
 **Footgun:** `conformance.py` silently prints SKIP and exits 0 when
 a binary is missing — a misnamed output path would masquerade as a
@@ -219,18 +219,16 @@ also re-`install` it to `/etc/gitea-runner/` and `systemctl restart
 act_runner` on llamabox. The runner config option line lives in
 `/etc/gitea-runner/config.yaml` under `container.options`.
 
-**Coverage status posting (projdash).** After the gate runs,
+**Coverage status posting (projdash / pr-crew).** After the gate runs,
 `ci/post-coverage-status.py` reads `coverage/summary.json` (emitted by
 `shared/coverage.py` alongside `TEST-REPORT.md`) and POSTs a Gitea
 commit status. The context MUST be **`pr-crew/coverage`** — that's the
 fleet-wide convention projdash's `pr_crew/coverage_gate.py` strict-
 equals on. Do not rename it to `agent-walker/coverage` or similar —
 projdash silently filters non-matching contexts and the dashboard
-shows no coverage for the repo. The workflow opts into TLS-skip via
-`GITEA_TLS_INSECURE=1` because Python's urllib doesn't honor the
-runner's `GIT_SSL_NO_VERIFY` / `NODE_TLS_REJECT_UNAUTHORIZED` env;
-the script defaults to full verification and supports `GITEA_CA_BUNDLE`
-as the secure alternative.
+shows no coverage for the repo. The Gitea instance serves a
+publicly-trusted Let's Encrypt cert, so urllib's default verification
+validates it natively with no custom CA handling.
 
 ## macOS
 
