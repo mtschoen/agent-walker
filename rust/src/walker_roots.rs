@@ -19,12 +19,27 @@ use std::path::PathBuf;
 pub(crate) enum TranscriptFormat {
     ClaudeCode,
     Codex,
+    /// A directory of per-hostname claude-code layout trees written by
+    /// replica. Never walked directly; expanded by `archive::expand_archive_root`.
+    ClaudeArchive,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TranscriptRoot {
     pub(crate) path: PathBuf,
     pub(crate) format: TranscriptFormat,
+    /// True when this root is one `<archive>/<hostname>` directory produced by
+    /// expanding a claude-archive root. Only these roots report the
+    /// unrecognized-suffix count, so a status-line cost tick over the live
+    /// tree gains no new stderr. Not part of any dedup key.
+    pub(crate) from_archive: bool,
+}
+
+/// A resolved root for the non-search modes, which have no format to carry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedRoot {
+    pub path: PathBuf,
+    pub from_archive: bool,
 }
 
 /// Resolve the user's home directory the way every walker subcommand must.
@@ -50,6 +65,7 @@ pub fn walker_config_path() -> PathBuf {
     }
 }
 
+#[allow(dead_code)]
 pub fn read_extra_roots_from_config() -> Vec<PathBuf> {
     read_tagged_extra_roots_from_config()
         .into_iter()
@@ -101,6 +117,7 @@ pub(crate) fn read_tagged_extra_roots_from_config() -> Vec<TranscriptRoot> {
                 extras.push(TranscriptRoot {
                     path: PathBuf::from(s),
                     format: TranscriptFormat::ClaudeCode,
+                    from_archive: false,
                 });
             }
         } else if let Some(tagged) = element.as_object() {
@@ -110,12 +127,14 @@ pub(crate) fn read_tagged_extra_roots_from_config() -> Vec<TranscriptRoot> {
             let format = match tagged.get("format").and_then(Value::as_str) {
                 Some("claude-code") => TranscriptFormat::ClaudeCode,
                 Some("codex") => TranscriptFormat::Codex,
+                Some("claude-archive") => TranscriptFormat::ClaudeArchive,
                 _ => continue,
             };
             if !path.is_empty() {
                 extras.push(TranscriptRoot {
                     path: PathBuf::from(path),
                     format,
+                    from_archive: false,
                 });
             }
         }
@@ -130,32 +149,154 @@ pub(crate) fn default_codex_root() -> PathBuf {
     }
 }
 
-/// Resolve search roots with an explicit format tag. Existing CLI roots and
-/// string config entries remain Claude Code for backward compatibility. When
-/// the primary root is not overridden, the local Codex sessions root is added.
+/// Split one config read into the three format buckets. Reading the config
+/// exactly once per invocation matters: `read_tagged_extra_roots_from_config`
+/// prints the malformed-JSON diagnostic itself, so a second call would print
+/// it twice.
+fn config_roots_by_format(read_config: bool) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<TranscriptRoot>) {
+    if !read_config {
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+    let mut claude_code = Vec::new();
+    let mut archives = Vec::new();
+    let mut tagged = Vec::new();
+    for root in read_tagged_extra_roots_from_config() {
+        match root.format {
+            TranscriptFormat::ClaudeCode => claude_code.push(root.path.clone()),
+            TranscriptFormat::ClaudeArchive => archives.push(root.path.clone()),
+            TranscriptFormat::Codex => {}
+        }
+        tagged.push(root);
+    }
+    (claude_code, archives, tagged)
+}
+
+/// Archive roots in SPEC effective order (implicit, CLI, config), each already
+/// expanded into its `<archive>/<hostname>` claude-code roots. The implicit
+/// root is silent when absent (it is a convention, not a user request); a CLI
+/// or config root that is not a directory gets the standard diagnostic.
+fn archive_roots_in_effective_order(
+    primary_explicit: bool,
+    cli_archives: &[PathBuf],
+    config_archives: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut expanded = Vec::new();
+    if !primary_explicit {
+        let implicit = crate::archive::default_archive_root();
+        if implicit.is_dir() {
+            expanded.extend(crate::archive::expand_archive_root(&implicit));
+        }
+    }
+    for archive_path in cli_archives.iter().chain(config_archives.iter()) {
+        if !archive_path.is_dir() {
+            eprintln!(
+                "walker: archive root not a directory, skipping: {}",
+                archive_path.display()
+            );
+            continue;
+        }
+        expanded.extend(crate::archive::expand_archive_root(archive_path));
+    }
+    expanded
+}
+
+pub fn resolve_roots(
+    primary: Option<PathBuf>,
+    cli_extras: &[PathBuf],
+    cli_archives: &[PathBuf],
+    read_config: bool,
+) -> Vec<ResolvedRoot> {
+    let primary_explicit = primary.is_some();
+    let (config_extras, config_archives, _tagged) = config_roots_by_format(read_config);
+    // (path, is_primary, from_archive)
+    let mut combined: Vec<(PathBuf, bool, bool)> = vec![(
+        primary.unwrap_or_else(crate::default_projects_root),
+        true,
+        false,
+    )];
+    for path in cli_extras {
+        combined.push((path.clone(), false, false));
+    }
+    for path in config_extras {
+        combined.push((path, false, false));
+    }
+    // Archive hosts come last and are already known to be directories, so
+    // they never produce the extra-root diagnostic a second time.
+    for path in archive_roots_in_effective_order(primary_explicit, cli_archives, &config_archives) {
+        combined.push((path, false, true));
+    }
+
+    let mut result = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for (path, is_primary, from_archive) in combined {
+        if !path.exists() || !path.is_dir() {
+            if !is_primary {
+                eprintln!(
+                    "walker: extra root not a directory, skipping: {}",
+                    path.display()
+                );
+            }
+            continue;
+        }
+        // Dedup by canonical path (realpath) per SPEC, but WALK the original
+        // path. On Windows `fs::canonicalize` returns extended-length `\\?\`
+        // verbatim forms which the directory walk cannot enumerate.
+        // `from_archive` is deliberately absent from the key: two roots at the
+        // same place collapse to the first one seen, live or archived.
+        let key = fs::canonicalize(&path)
+            .map(|canonical| canonical.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+        if seen.insert(key) {
+            result.push(ResolvedRoot { path, from_archive });
+        }
+    }
+    result
+}
+
 pub(crate) fn resolve_search_roots(
     primary: Option<PathBuf>,
     cli_extras: &[PathBuf],
+    cli_archives: &[PathBuf],
     read_config: bool,
 ) -> Vec<TranscriptRoot> {
-    let using_defaults = primary.is_none();
+    let primary_explicit = primary.is_some();
+    let (_config_extras, config_archives, tagged) = config_roots_by_format(read_config);
     let mut combined = vec![TranscriptRoot {
         path: primary.unwrap_or_else(crate::default_projects_root),
         format: TranscriptFormat::ClaudeCode,
+        from_archive: false,
     }];
-    if using_defaults {
+    if !primary_explicit {
         combined.push(TranscriptRoot {
             path: default_codex_root(),
             format: TranscriptFormat::Codex,
+            from_archive: false,
         });
     }
     combined.extend(cli_extras.iter().cloned().map(|path| TranscriptRoot {
         path,
         format: TranscriptFormat::ClaudeCode,
+        from_archive: false,
     }));
-    if read_config {
-        combined.extend(read_tagged_extra_roots_from_config());
-    }
+    // Tagged config entries keep their order; archive entries are pulled out
+    // here because they belong at the end, after expansion.
+    combined.extend(
+        tagged
+            .into_iter()
+            .filter(|root| root.format != TranscriptFormat::ClaudeArchive),
+    );
+    // An expanded host directory IS a claude-code layout tree, so it keeps
+    // that format and the discovery dispatch is unchanged. Only from_archive
+    // distinguishes it, and only for the suffix counter.
+    combined.extend(
+        archive_roots_in_effective_order(primary_explicit, cli_archives, &config_archives)
+            .into_iter()
+            .map(|path| TranscriptRoot {
+                path,
+                format: TranscriptFormat::ClaudeCode,
+                from_archive: true,
+            }),
+    );
 
     let mut result = Vec::new();
     let mut seen: HashSet<(TranscriptFormat, String)> = HashSet::new();
@@ -174,46 +315,6 @@ pub(crate) fn resolve_search_roots(
             .unwrap_or_else(|_| root.path.to_string_lossy().into_owned());
         if seen.insert((root.format, key)) {
             result.push(root);
-        }
-    }
-    result
-}
-
-pub fn resolve_roots(primary: PathBuf, cli_extras: &[PathBuf], read_config: bool) -> Vec<PathBuf> {
-    let mut combined: Vec<(PathBuf, bool)> = Vec::new();
-    combined.push((primary, true));
-    for p in cli_extras {
-        combined.push((p.clone(), false));
-    }
-    if read_config {
-        for p in read_extra_roots_from_config() {
-            combined.push((p, false));
-        }
-    }
-
-    let mut result = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    for (path, is_primary) in combined {
-        if !path.exists() || !path.is_dir() {
-            if !is_primary {
-                eprintln!(
-                    "walker: extra root not a directory, skipping: {}",
-                    path.display()
-                );
-            }
-            continue;
-        }
-        // Dedup by canonical path (realpath) per SPEC, but WALK the original
-        // path. On Windows `fs::canonicalize` returns extended-length `\\?\`
-        // verbatim forms — and a mapped network drive (e.g. `Y:`) resolves to
-        // a UNC target — which the `glob`-based discovery in transcript.rs
-        // cannot enumerate, silently dropping the whole root. The canonical
-        // form is only needed to detect two roots pointing at the same place.
-        let key = fs::canonicalize(&path)
-            .map(|c| c.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| path.to_string_lossy().into_owned());
-        if seen.insert(key) {
-            result.push(path);
         }
     }
     result
@@ -357,11 +458,13 @@ mod tests {
                 vec![
                     TranscriptRoot {
                         path: PathBuf::from("/claude"),
-                        format: TranscriptFormat::ClaudeCode
+                        format: TranscriptFormat::ClaudeCode,
+                        from_archive: false,
                     },
                     TranscriptRoot {
                         path: PathBuf::from("/codex"),
-                        format: TranscriptFormat::Codex
+                        format: TranscriptFormat::Codex,
+                        from_archive: false,
                     },
                 ]
             );
@@ -379,15 +482,149 @@ mod tests {
         fs::create_dir(&primary).unwrap();
         let not_directory = tmp.join("not-directory");
         fs::write(&not_directory, b"x").unwrap();
-        let roots = resolve_search_roots(Some(primary.clone()), &[not_directory], false);
+        let roots = resolve_search_roots(Some(primary.clone()), &[not_directory], &[], false);
         assert_eq!(
             roots,
             vec![TranscriptRoot {
                 path: primary,
-                format: TranscriptFormat::ClaudeCode
+                format: TranscriptFormat::ClaudeCode,
+                from_archive: false,
             }]
         );
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn tagged_config_parses_claude_archive_format() {
+        let temporary = tempdir_path("walker-cfg-archive");
+        let claude_directory = temporary.join(".claude");
+        fs::create_dir_all(&claude_directory).unwrap();
+        fs::write(
+            claude_directory.join("walker-roots.json"),
+            br#"{"extra_roots":[{"path":"/store","format":"claude-archive"},{"path":"/nope","format":"bogus"}]}"#,
+        )
+        .unwrap();
+        with_home_env(Some(temporary.to_str().unwrap()), None, || {
+            assert_eq!(
+                read_tagged_extra_roots_from_config(),
+                vec![TranscriptRoot {
+                    path: PathBuf::from("/store"),
+                    format: TranscriptFormat::ClaudeArchive,
+                    from_archive: false,
+                }]
+            );
+        });
+        let _ = fs::remove_dir_all(&temporary);
+    }
+
+    #[test]
+    fn resolve_roots_appends_expanded_archive_hosts_last() {
+        let temporary = tempdir_path("walker-roots-archive-order");
+        let primary = temporary.join("primary");
+        let extra = temporary.join("extra");
+        let archive = temporary.join("archive");
+        fs::create_dir_all(&primary).unwrap();
+        fs::create_dir_all(&extra).unwrap();
+        fs::create_dir_all(archive.join("llamabox")).unwrap();
+        fs::create_dir_all(archive.join("chonkers")).unwrap();
+
+        let roots = resolve_roots(
+            Some(primary.clone()),
+            std::slice::from_ref(&extra),
+            std::slice::from_ref(&archive),
+            false,
+        );
+        assert_eq!(
+            roots,
+            vec![
+                ResolvedRoot { path: primary, from_archive: false },
+                ResolvedRoot { path: extra, from_archive: false },
+                ResolvedRoot { path: archive.join("chonkers"), from_archive: true },
+                ResolvedRoot { path: archive.join("llamabox"), from_archive: true },
+            ]
+        );
+        let _ = fs::remove_dir_all(&temporary);
+    }
+
+    #[test]
+    fn resolve_roots_adds_the_implicit_archive_only_without_an_explicit_primary() {
+        let home = tempdir_path("walker-roots-implicit");
+        fs::create_dir_all(home.join(".claude").join("projects")).unwrap();
+        fs::create_dir_all(home.join("claude-archive").join("chonkers")).unwrap();
+        with_home_env(Some(home.to_str().unwrap()), Some(home.to_str().unwrap()), || {
+            let implicit = resolve_roots(None, &[], &[], false);
+            assert!(
+                implicit.contains(&ResolvedRoot {
+                    path: home.join("claude-archive").join("chonkers"),
+                    from_archive: true,
+                }),
+                "implicit archive host missing from {implicit:?}"
+            );
+            let explicit = resolve_roots(
+                Some(home.join(".claude").join("projects")),
+                &[],
+                &[],
+                false,
+            );
+            assert_eq!(
+                explicit,
+                vec![ResolvedRoot {
+                    path: home.join(".claude").join("projects"),
+                    from_archive: false,
+                }]
+            );
+        });
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn resolve_roots_diagnoses_a_missing_cli_archive_root() {
+        let temporary = tempdir_path("walker-roots-missing-archive");
+        let primary = temporary.join("primary");
+        fs::create_dir_all(&primary).unwrap();
+        let missing = temporary.join("no-such-archive");
+        let roots = resolve_roots(
+            Some(primary.clone()),
+            &[],
+            std::slice::from_ref(&missing),
+            false,
+        );
+        assert_eq!(
+            roots,
+            vec![ResolvedRoot { path: primary, from_archive: false }]
+        );
+        let _ = fs::remove_dir_all(&temporary);
+    }
+
+    #[test]
+    fn resolve_search_roots_keeps_codex_before_archives() {
+        let temporary = tempdir_path("walker-search-roots-archive");
+        let primary = temporary.join("primary");
+        let archive = temporary.join("archive");
+        fs::create_dir_all(&primary).unwrap();
+        fs::create_dir_all(archive.join("chonkers")).unwrap();
+        let roots = resolve_search_roots(
+            Some(primary.clone()),
+            &[],
+            std::slice::from_ref(&archive),
+            false,
+        );
+        assert_eq!(
+            roots,
+            vec![
+                TranscriptRoot {
+                    path: primary,
+                    format: TranscriptFormat::ClaudeCode,
+                    from_archive: false,
+                },
+                TranscriptRoot {
+                    path: archive.join("chonkers"),
+                    format: TranscriptFormat::ClaudeCode,
+                    from_archive: true,
+                },
+            ]
+        );
+        let _ = fs::remove_dir_all(&temporary);
     }
 
     fn tempdir_path(suffix: &str) -> PathBuf {

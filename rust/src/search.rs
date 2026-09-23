@@ -1021,6 +1021,7 @@ pub fn run(raw: &[String]) {
     let roots = walker_roots::resolve_search_roots(
         args.projects_root.clone(),
         &args.extra_projects_roots,
+        &[],
         args.read_config,
     );
     let files = discover_files(&roots, args.since, args.cwd.as_deref());
@@ -1285,6 +1286,7 @@ mod tests {
         let tagged = TranscriptRoot {
             path: root.clone(),
             format: TranscriptFormat::ClaudeCode,
+            from_archive: false,
         };
         let files = discover_files(std::slice::from_ref(&tagged), Some(far_future), None);
         assert!(files.is_empty());
@@ -1363,6 +1365,7 @@ mod tests {
         let tagged = TranscriptRoot {
             path: root.clone(),
             format: TranscriptFormat::ClaudeCode,
+            from_archive: false,
         };
         let files = discover_files(std::slice::from_ref(&tagged), None, None);
         fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
@@ -1381,6 +1384,7 @@ mod tests {
         let tagged = TranscriptRoot {
             path: root.clone(),
             format: TranscriptFormat::ClaudeCode,
+            from_archive: false,
         };
         let files = discover_files(std::slice::from_ref(&tagged), None, None);
         let _ = fs::remove_dir_all(&root);
@@ -1417,6 +1421,7 @@ mod tests {
         let tagged = TranscriptRoot {
             path: root.clone(),
             format: TranscriptFormat::ClaudeCode,
+            from_archive: false,
         };
         let files = discover_files(std::slice::from_ref(&tagged), None, None);
 
@@ -1448,6 +1453,7 @@ mod tests {
         let tagged = TranscriptRoot {
             path: root.clone(),
             format: TranscriptFormat::ClaudeCode,
+            from_archive: false,
         };
         let files = discover_files(std::slice::from_ref(&tagged), None, None);
         let _ = fs::remove_dir_all(&root);

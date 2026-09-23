@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::content::{extract_text, user_content_is_tool_result};
-use crate::{current_unix, default_projects_root, parse_iso8601, walker_roots};
+use crate::{current_unix, parse_iso8601, walker_roots};
 
 #[derive(Deserialize)]
 struct Entry {
@@ -357,14 +357,18 @@ pub fn run_latest(args: &[String]) {
             std::process::exit(2);
         }
     };
-    let primary = parsed.projects_root.unwrap_or_else(default_projects_root);
-    let roots =
-        walker_roots::resolve_roots(primary, &parsed.extra_projects_roots, parsed.read_config);
+    let roots = walker_roots::resolve_roots(
+        parsed.projects_root.clone(),
+        &parsed.extra_projects_roots,
+        &[],
+        parsed.read_config,
+    );
+    let root_paths: Vec<PathBuf> = roots.iter().map(|root| root.path.clone()).collect();
     let now_unix = parsed.now_unix.unwrap_or_else(current_unix);
 
     // Try parent transcript first, then any subagent transcript, across
     // every resolved root.
-    let paths = discover_latest_paths(&roots, &parsed.session_id);
+    let paths = discover_latest_paths(&root_paths, &parsed.session_id);
 
     let re = beacon_re();
     let result = paths
@@ -493,13 +497,17 @@ pub fn run_history(args: &[String]) {
     // Beacons before window_lo are dropped; pairing runs on the survivors, so
     // a pair requires its begin (and end) timestamp inside the window.
     let window_lo = period_cutoff.max(parsed.win_start_unix);
-    let primary = parsed.projects_root.unwrap_or_else(default_projects_root);
-    let roots =
-        walker_roots::resolve_roots(primary, &parsed.extra_projects_roots, parsed.read_config);
+    let roots = walker_roots::resolve_roots(
+        parsed.projects_root.clone(),
+        &parsed.extra_projects_roots,
+        &[],
+        parsed.read_config,
+    );
+    let root_paths: Vec<PathBuf> = roots.iter().map(|root| root.path.clone()).collect();
 
     // Same discovery as cost/events, with the mtime prune disabled: history
     // pairing must see every transcript regardless of age.
-    let groups = crate::transcript::discover_groups(&roots, f64::NEG_INFINITY);
+    let groups = crate::transcript::discover_groups(&root_paths, f64::NEG_INFINITY);
     let session_count = groups.len();
     let re = beacon_re();
 

@@ -303,11 +303,15 @@ fn run_cost(args: &[String]) {
     let now_unix = parsed.now_unix.unwrap_or_else(current_unix);
     let period_cutoff = now_unix - parsed.period_seconds as f64;
     let earliest = period_cutoff.min(parsed.win_start_unix);
-    let primary = parsed.projects_root.unwrap_or_else(default_projects_root);
-    let roots =
-        walker_roots::resolve_roots(primary, &parsed.extra_projects_roots, parsed.read_config);
+    let roots = walker_roots::resolve_roots(
+        parsed.projects_root.clone(),
+        &parsed.extra_projects_roots,
+        &[],
+        parsed.read_config,
+    );
+    let root_paths: Vec<PathBuf> = roots.iter().map(|root| root.path.clone()).collect();
 
-    let groups = discover_groups(&roots, earliest);
+    let groups = discover_groups(&root_paths, earliest);
     let total_files: usize = groups.values().map(|v| v.len()).sum();
     let total_groups = groups.len();
 

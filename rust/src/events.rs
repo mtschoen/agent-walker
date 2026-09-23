@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 
 use crate::transcript::{cost_for, discover_groups, Entry};
-use crate::{current_unix, default_projects_root, parse_iso8601, walker_roots};
+use crate::{current_unix, parse_iso8601, walker_roots};
 
 // ── Output record ─────────────────────────────────────────────────────────────
 
@@ -33,7 +33,7 @@ pub(crate) struct EventsArgs {
     /// Defaults to `now - period` when not supplied by the caller.
     pub(crate) win_start_unix: f64,
     pub(crate) now_unix: f64,
-    pub(crate) projects_root: PathBuf,
+    pub(crate) projects_root: Option<PathBuf>,
     pub(crate) extra_projects_roots: Vec<PathBuf>,
     pub(crate) read_config: bool,
 }
@@ -106,7 +106,7 @@ pub(crate) fn parse_events_args(raw: &[String]) -> Result<EventsArgs, String> {
         period_seconds,
         win_start_unix,
         now_unix,
-        projects_root: projects_root.unwrap_or_else(default_projects_root),
+        projects_root,
         extra_projects_roots,
         read_config,
     })
@@ -214,6 +214,7 @@ pub(crate) fn run(raw: &[String]) -> i32 {
     let roots = walker_roots::resolve_roots(
         args.projects_root,
         &args.extra_projects_roots,
+        &[],
         args.read_config,
     );
 
@@ -223,8 +224,9 @@ pub(crate) fn run(raw: &[String]) -> i32 {
         return 0;
     }
 
+    let root_paths: Vec<PathBuf> = roots.iter().map(|root| root.path.clone()).collect();
     // discover_groups applies the mtime prune using the same cutoff.
-    let groups = discover_groups(&roots, cutoff);
+    let groups = discover_groups(&root_paths, cutoff);
 
     // Convert to an owned vec of (key, paths) so rayon can par_iter over it.
     let group_list: Vec<((String, String), Vec<PathBuf>)> = groups.into_iter().collect();
@@ -386,7 +388,7 @@ mod tests {
             s("50.0"),
         ])
         .unwrap();
-        assert_eq!(r.projects_root, PathBuf::from("/tmp/p"));
+        assert_eq!(r.projects_root, Some(PathBuf::from("/tmp/p")));
         assert_eq!(r.extra_projects_roots, vec![PathBuf::from("/tmp/q")]);
         assert_eq!(r.win_start_unix, 50.0);
     }
