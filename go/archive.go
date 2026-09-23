@@ -30,10 +30,7 @@ const (
 // safe for concurrent DecodeAll calls, which matters because discovery fans
 // files out across workers.
 var sharedZstdDecoder = func() *zstd.Decoder {
-	decoder, err := zstd.NewReader(nil)
-	if err != nil {
-		panic(fmt.Sprintf("zstd decoder init: %v", err))
-	}
+	decoder, _ := zstd.NewReader(nil)
 	return decoder
 }()
 

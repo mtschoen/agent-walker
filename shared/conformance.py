@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -1647,6 +1648,12 @@ def check_cli_argument_matrix(lang: str, binary: Path) -> bool:
             "--extra-projects-root",
         ),
         (
+            "cost: --archive-root missing value",
+            ["--period", "60", "--win-start", "0", "--archive-root"],
+            2,
+            "--archive-root",
+        ),
+        (
             "cost: missing --win-start",
             ["--period", "60", "--no-config"],
             2,
@@ -1703,6 +1710,12 @@ def check_cli_argument_matrix(lang: str, binary: Path) -> bool:
             "--extra-projects-root",
         ),
         (
+            "events: --archive-root missing value",
+            ["events", "--period", "60", "--archive-root"],
+            2,
+            "--archive-root",
+        ),
+        (
             "beacons-latest: missing --session-id",
             ["beacons-latest", "--no-config"],
             2,
@@ -1756,6 +1769,12 @@ def check_cli_argument_matrix(lang: str, binary: Path) -> bool:
             ["beacons-latest", "--session-id", "deadbeef", "--extra-projects-root"],
             2,
             "--extra-projects-root",
+        ),
+        (
+            "beacons-latest: --archive-root missing value",
+            ["beacons-latest", "--session-id", "deadbeef", "--archive-root"],
+            2,
+            "--archive-root",
         ),
         (
             "beacons-history: missing --period",
@@ -1816,6 +1835,12 @@ def check_cli_argument_matrix(lang: str, binary: Path) -> bool:
             ["beacons-history", "--period", "60", "--extra-projects-root"],
             2,
             "--extra-projects-root",
+        ),
+        (
+            "beacons-history: --archive-root missing value",
+            ["beacons-history", "--period", "60", "--archive-root"],
+            2,
+            "--archive-root",
         ),
         ("search: missing pattern", ["search", "--no-config"], 2, None),
         ("search: empty pattern", ["search", "", "--no-config"], 2, None),
@@ -1927,6 +1952,12 @@ def check_cli_argument_matrix(lang: str, binary: Path) -> bool:
             ["search", "hello", "--extra-projects-root"],
             2,
             "--extra-projects-root",
+        ),
+        (
+            "search: --archive-root missing value",
+            ["search", "hello", "--archive-root"],
+            2,
+            "--archive-root",
         ),
         # Invalid-numeric rows: each targets the per-flag parse-failure branch.
         (
@@ -3286,6 +3317,196 @@ def check_archive_mtime_prune(lang: str, binary: Path) -> bool:
     return ok
 
 
+def check_archive_missing_root_diagnostic(lang: str, binary: Path) -> bool:
+    """Nonexistent --archive-root paths emit a diagnostic to stderr and are skipped."""
+    label = "archive: missing root diagnostic"
+    with tempfile.TemporaryDirectory(prefix="walker-archive-missing-") as tmp:
+        empty = Path(tmp) / "empty"
+        empty.mkdir()
+        nonexistent = str(Path(tmp) / "does-not-exist")
+        result = run_captured(
+            [
+                str(binary),
+                "--period", "60",
+                "--win-start", "0",
+                "--now", "100",
+                "--projects-root", str(empty),
+                "--archive-root", nonexistent,
+                "--no-config",
+            ],
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+        )
+        expected_msg = f"walker: archive root not a directory, skipping: {nonexistent}\n"
+        ok = result.returncode == 0 and expected_msg in (result.stderr or "")
+        print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
+        if not ok:
+            print(f"        exit={result.returncode} stderr={result.stderr!r}")
+        return ok
+
+
+def check_archive_dedup_and_subcommands(lang: str, binary: Path) -> bool:
+    """Exercises --archive-root and subagent dedup across search, cost, events,
+    and beacons subcommands."""
+    all_ok = True
+    def compress(data: bytes) -> bytes:
+        return subprocess.run(
+            ["zstd", "-q", "-c"],
+            input=data,
+            capture_output=True,
+            check=True,
+        ).stdout
+
+    now = 1774000000.0
+    with tempfile.TemporaryDirectory(prefix="walker-archive-subcommands-") as tmp:
+        tmp_path = Path(tmp)
+        live = tmp_path / "live"
+        archive = tmp_path / "archive"
+        live_slug = live / "my-slug"
+        live_sub = live_slug / "my-sess" / "subagents"
+        live_sub.mkdir(parents=True)
+
+        archive_host = archive / "host1"
+        archive_slug = archive_host / "my-slug"
+        archive_sub = archive_slug / "my-sess" / "subagents"
+        archive_sub.mkdir(parents=True)
+
+        parent_line = json.dumps({
+            "timestamp": "2026-03-20T10:00:00Z",
+            "message": {
+                "role": "user",
+                "content": "target pattern in parent",
+            },
+            "costUSD": 0.01,
+        }) + "\n"
+
+        subagent_line = json.dumps({
+            "timestamp": "2026-03-20T10:05:00Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "target pattern in subagent <progress-beacon>{\"version\":\"1.0.0\",\"operation\":\"test\",\"status\":\"in_progress\",\"begin_eta\":200,\"actual_elapsed\":100}</progress-beacon>"},
+                ],
+            },
+            "costUSD": 0.02,
+        }) + "\n"
+
+        (live_slug / "my-sess.jsonl").write_text(parent_line, encoding="utf-8")
+        (live_sub / "agent-sub1.jsonl").write_text(subagent_line, encoding="utf-8")
+
+        (archive_slug / "my-sess.jsonl.zst").write_bytes(compress(parent_line.encode("utf-8")))
+        (archive_sub / "agent-sub1.jsonl.zst").write_bytes(compress(subagent_line.encode("utf-8")))
+        (archive_slug / "ignored.xyz").write_text("skip me\n", encoding="utf-8")
+
+        label = "archive: search subagent dedup"
+        res = run_captured(
+            [
+                str(binary),
+                "search",
+                "target pattern",
+                "--projects-root", str(live),
+                "--archive-root", str(archive),
+                "--format", "jsonl",
+                "--no-config",
+            ],
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+        )
+        raw_lines = [json.loads(line) for line in res.stdout.strip().splitlines() if line] if res.returncode == 0 else []
+        hits = [entry for entry in raw_lines if entry.get("type") == "hit"]
+        ok = res.returncode == 0 and len(hits) == 2
+        print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
+        if not ok:
+            all_ok = False
+            print(f"        exit={res.returncode} hits={len(hits)} stdout={res.stdout!r}")
+
+        label = "archive: cost subagent dedup"
+        res = run_captured(
+            [
+                str(binary),
+                "--period", "86400",
+                "--win-start", "0",
+                "--now", repr(now),
+                "--projects-root", str(live),
+                "--archive-root", str(archive),
+                "--no-config",
+            ],
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+        )
+        ok = res.returncode == 0
+        print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
+        if not ok:
+            all_ok = False
+
+        label = "archive: events subcommand"
+        res = run_captured(
+            [
+                str(binary),
+                "events",
+                "--period", "86400",
+                "--win-start", "0",
+                "--now", repr(now),
+                "--projects-root", str(live),
+                "--archive-root", str(archive),
+                "--no-config",
+            ],
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+        )
+        ok = res.returncode == 0
+        print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
+        if not ok:
+            all_ok = False
+
+        label = "archive: beacons-latest subcommand"
+        res = run_captured(
+            [
+                str(binary),
+                "beacons-latest",
+                "--session-id", "my-sess",
+                "--projects-root", str(live),
+                "--archive-root", str(archive),
+                "--now", repr(now),
+                "--no-config",
+            ],
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+        )
+        ok = res.returncode == 0
+        print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
+        if not ok:
+            all_ok = False
+
+        label = "archive: beacons-history subcommand"
+        res = run_captured(
+            [
+                str(binary),
+                "beacons-history",
+                "--period", "86400",
+                "--win-start", "0",
+                "--now", repr(now),
+                "--projects-root", str(live),
+                "--archive-root", str(archive),
+                "--no-config",
+            ],
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+        )
+        ok = res.returncode == 0
+        print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
+        if not ok:
+            all_ok = False
+
+    return all_ok
+
+
 def check_search_tool_blocks_rich(lang: str, binary: Path) -> bool:
     """--include-tool-blocks over rich tool_use/tool_result shapes (nested
     objects, arrays, numbers, bools, nulls, string inputs, blocks without a
@@ -3678,6 +3899,10 @@ def main():
         if not check_archive_config_root(lang, binary):
             overall_ok = False
         if not check_archive_mtime_prune(lang, binary):
+            overall_ok = False
+        if not check_archive_missing_root_diagnostic(lang, binary):
+            overall_ok = False
+        if not check_archive_dedup_and_subcommands(lang, binary):
             overall_ok = False
         if not check_search_tool_blocks_rich(lang, binary):
             overall_ok = False

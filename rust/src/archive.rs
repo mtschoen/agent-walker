@@ -240,4 +240,26 @@ mod tests {
         assert!(open_transcript(&root.join("nope.jsonl")).is_none());
         let _ = fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn transcript_reader_read_trait() {
+        use std::io::Read;
+        let root = temporary_directory("reader_read");
+        let plain = root.join("session.jsonl");
+        fs::write(&plain, b"hello").unwrap();
+        let compressed_path = root.join("session.jsonl.zst");
+        fs::write(
+            &compressed_path,
+            zstd::encode_all(&b"world"[..], 10).unwrap(),
+        )
+        .unwrap();
+
+        for (path, expected) in [(&plain, b"hello"), (&compressed_path, b"world")] {
+            let mut reader = open_transcript(path).expect("opened");
+            let mut buf = [0u8; 16];
+            let n = reader.read(&mut buf).unwrap();
+            assert_eq!(&buf[..n], expected);
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
 }

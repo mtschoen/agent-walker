@@ -87,4 +87,30 @@ func TestReadTranscriptInflatesAndRejects(t *testing.T) {
 	if _, err := readTranscript(brokenPath); err == nil {
 		t.Fatal("readTranscript accepted a corrupt frame")
 	}
+
+	if _, err := readTranscript(filepath.Join(root, "missing.jsonl")); err == nil {
+		t.Fatal("readTranscript accepted a nonexistent file")
+	}
+}
+
+func TestDiscoverHistoryGroupsDanglingSymlink(t *testing.T) {
+	root := t.TempDir()
+	slugDir := filepath.Join(root, "slug-a")
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	danglingParent := filepath.Join(slugDir, "dangling.jsonl")
+	_ = os.Symlink("/no/such/target.jsonl", danglingParent)
+
+	subDir := filepath.Join(slugDir, "sess", "subagents")
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	danglingAgent := filepath.Join(subDir, "agent-dang.jsonl")
+	_ = os.Symlink("/no/such/agent.jsonl", danglingAgent)
+
+	groups := discoverHistoryGroups([]resolvedRoot{{Path: root, FromArchive: false}})
+	if len(groups) != 0 {
+		t.Fatalf("expected empty groups, got %v", groups)
+	}
 }
