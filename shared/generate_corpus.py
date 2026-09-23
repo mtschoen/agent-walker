@@ -139,6 +139,33 @@ def write_jsonl(path: Path, entries: list[dict | str | bytes]) -> None:
             f.write(b"\n")
 
 
+# Replica compresses transcripts at zstd level 10 (packages/replica/replica/
+# compress.py::ZSTD_LEVEL). Fixtures use the same level so a committed
+# .jsonl.zst is representative of a real archive file. The generator is
+# deterministic: the same entries at the same level produce the same bytes
+# from a given zstandard build, and a different build still decodes to the
+# same plaintext, which is all conformance compares.
+ZSTD_LEVEL = 10
+
+
+def write_jsonl_zst(path: Path, entries: list) -> None:
+    """Encode `entries` exactly as write_jsonl does, then zstd-compress the
+    whole buffer into `path`. `path` must already end in `.jsonl.zst`."""
+    import zstandard
+
+    buffer = bytearray()
+    for entry in entries:
+        if isinstance(entry, bytes):
+            buffer += entry
+        else:
+            text = entry if isinstance(entry, str) else json.dumps(entry)
+            buffer += text.encode("utf-8")
+        buffer += b"\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    compressor = zstandard.ZstdCompressor(level=ZSTD_LEVEL)
+    path.write_bytes(compressor.compress(bytes(buffer)))
+
+
 # Build fixtures and walk them inline to compute expected outputs.
 # Each fixture entry: (group_key, files_dict). files_dict maps relative path
 # (under CORPUS) to its list of JSONL entries (dicts or raw strings for
@@ -922,6 +949,137 @@ def fixture_17_sonnet45_noncollision():
     return slug, {f"{sid}.jsonl": turns}
 
 
+CORPUS_COST_ARCHIVE = ROOT / "corpus" / "cost_archive"
+
+# Each archive scenario is
+#   (name, live_files, archive_files, expect_stderr, forbid_stderr).
+# `live_files` maps a path relative to <scenario>/live/ to its entry list.
+# `archive_files` maps a path relative to <scenario>/archive/ to a
+# (entry_list, compressed) pair; compressed=False writes a plain .jsonl so a
+# scenario can mix both inside one archive host directory.
+# `expect_stderr` tokens MUST appear in stderr; `forbid_stderr` tokens MUST
+# NOT. The forbid list is what pins "live roots stay silent about stray
+# files" - without it, an impl that counts suffixes on every root passes.
+
+
+def archive_turn(msg_id: str, ts_unix: float) -> dict:
+    """One priced assistant turn: 1M input tokens of sonnet = $3.00 exactly."""
+    return turn("claude-sonnet-4-5", ts_unix, msg_id=msg_id, input_tokens=1_000_000)
+
+
+def cost_archive_01_archive_only():
+    """A session that exists ONLY in the archive still contributes cost."""
+    live = {"live-slug/live-session.jsonl": [archive_turn("live-1", FRESH)]}
+    archive = {
+        "chonkers/archived-slug/archived-session.jsonl.zst": (
+            [archive_turn("archived-1", FRESH)],
+            True,
+        ),
+    }
+    return "01-archive-only", live, archive, [], []
+
+
+def cost_archive_02_live_shadows_archive():
+    """Same (slug, session_id) live and archived: the live file wins and the
+    turn is counted once. The archive copy carries a DIFFERENT message id and
+    a second turn, so double counting would show up as 2x the expected cost
+    even though message-id dedup is per group."""
+    live = {"shared-slug/shared-session.jsonl": [archive_turn("live-a", FRESH)]}
+    archive = {
+        "chonkers/shared-slug/shared-session.jsonl.zst": (
+            [archive_turn("archive-a", FRESH), archive_turn("archive-b", FRESH)],
+            True,
+        ),
+    }
+    return "02-live-shadows-archive", live, archive, [], []
+
+
+def cost_archive_03_two_hosts():
+    """One archive root, two hostname subdirectories, both contribute."""
+    live = {}
+    archive = {
+        "chonkers/host-slug/session-one.jsonl.zst": (
+            [archive_turn("chonkers-1", FRESH)],
+            True,
+        ),
+        "llamabox/host-slug/session-two.jsonl.zst": (
+            [archive_turn("llamabox-1", FRESH)],
+            True,
+        ),
+    }
+    return "03-two-hosts", live, archive, [], []
+
+
+def cost_archive_04_subagent():
+    """A compressed subagent transcript under an archived session."""
+    live = {}
+    archive = {
+        "chonkers/sub-slug/sub-session.jsonl.zst": (
+            [archive_turn("parent-1", FRESH)],
+            True,
+        ),
+        "chonkers/sub-slug/sub-session/subagents/agent-aaa.jsonl.zst": (
+            [archive_turn("agent-1", FRESH)],
+            True,
+        ),
+    }
+    return "04-subagent", live, archive, [], []
+
+
+def cost_archive_05_corrupt():
+    """A .jsonl.zst that is not a zstd frame is skipped with one stderr line;
+    the sibling good archive file still counts."""
+    live = {}
+    archive = {
+        "chonkers/corrupt-slug/good-session.jsonl.zst": (
+            [archive_turn("good-1", FRESH)],
+            True,
+        ),
+    }
+    return (
+        "05-corrupt",
+        live,
+        archive,
+        ["walker: unreadable archive file, skipping:"],
+        [],
+    )
+
+
+def cost_archive_06_unrelated_suffix():
+    """An archive host root reports its skipped count once on stderr; a LIVE
+    root with the same kind of stray files stays silent.
+
+    Both sides get exactly two stray files, so the only way to pass is to
+    count archive-expanded roots and not live ones: an impl that counts every
+    root reports 4 (or emits two lines), and an impl that counts none reports
+    nothing at all.
+    """
+    live = {"suffix-slug/live-session.jsonl": [archive_turn("live-1", FRESH)]}
+    archive = {
+        "chonkers/suffix-slug/kept-session.jsonl.zst": (
+            [archive_turn("kept-1", FRESH)],
+            True,
+        ),
+    }
+    return (
+        "06-unrelated-suffix",
+        live,
+        archive,
+        ["skipped 2 files with an unrecognized suffix"],
+        ["live: skipped", "skipped 4 files with an unrecognized suffix"],
+    )
+
+
+COST_ARCHIVE_SCENARIOS = [
+    cost_archive_01_archive_only,
+    cost_archive_02_live_shadows_archive,
+    cost_archive_03_two_hosts,
+    cost_archive_04_subagent,
+    cost_archive_05_corrupt,
+    cost_archive_06_unrelated_suffix,
+]
+
+
 FIXTURES = [
     fixture_01_single_parent,
     fixture_02_parent_acompact,
@@ -1055,6 +1213,79 @@ def main():
     with open(EXPECTED_PATH, "w", encoding="utf-8") as f:
         json.dump(expected, f, indent=2)
         f.write("\n")
+
+    # Archive scenarios live in their own sibling tree so the cost-fixture
+    # wipe above cannot touch them and vice versa.
+    if CORPUS_COST_ARCHIVE.exists():
+        for path in sorted(CORPUS_COST_ARCHIVE.rglob("*"), reverse=True):
+            if path.is_file():
+                path.unlink()
+            else:
+                path.rmdir()
+        CORPUS_COST_ARCHIVE.rmdir()
+
+    archive_expected = {
+        "_meta": {
+            "now_unix": NOW_UNIX,
+            "period_seconds": PERIOD_SECONDS,
+            "win_start_unix": WIN_START_UNIX,
+            "note": "Generated by generate_corpus.py. Do not hand-edit.",
+        },
+        "scenarios": {},
+    }
+    for build in COST_ARCHIVE_SCENARIOS:
+        name, live_files, archive_files, expect_stderr, forbid_stderr = build()
+        scenario_dir = CORPUS_COST_ARCHIVE / name
+        counted: dict[str, list] = {}
+        # An empty live root must still exist on disk: a nonexistent primary
+        # is the empty-fleet case and would change the resolved root list.
+        (scenario_dir / "live").mkdir(parents=True, exist_ok=True)
+        for rel, entries in live_files.items():
+            write_jsonl(scenario_dir / "live" / rel, entries)
+            counted[f"live/{rel}"] = entries
+        for rel, (entries, compressed) in archive_files.items():
+            target = scenario_dir / "archive" / rel
+            if compressed:
+                write_jsonl_zst(target, entries)
+            else:
+                write_jsonl(target, entries)
+            counted[f"archive/{rel}"] = entries
+        # Scenario-specific extra files that carry no countable cost.
+        if name == "05-corrupt":
+            broken = (
+                scenario_dir
+                / "archive"
+                / "chonkers"
+                / "corrupt-slug"
+                / "broken-session.jsonl.zst"
+            )
+            broken.parent.mkdir(parents=True, exist_ok=True)
+            broken.write_bytes(b"this is not a zstd frame")
+        if name == "06-unrelated-suffix":
+            # Two strays on each side. The archive root must report "skipped
+            # 2"; the live root must report nothing.
+            for slug_dir in (
+                scenario_dir / "archive" / "chonkers" / "suffix-slug",
+                scenario_dir / "live" / "suffix-slug",
+            ):
+                slug_dir.mkdir(parents=True, exist_ok=True)
+                (slug_dir / "ignored.jsonl.gz").write_bytes(b"\x1f\x8b")
+                (slug_dir / "notes.txt").write_text("ignored\n", encoding="utf-8")
+        # 02 counts the live file only; every other scenario counts all files.
+        if name == "02-live-shadows-archive":
+            counted = {k: v for k, v in counted.items() if k.startswith("live/")}
+        trailing, window = walk_group(counted)
+        archive_expected["scenarios"][name] = {
+            "trailing_usd": round(trailing, 6),
+            "window_usd": round(window, 6),
+            "expect_stderr": expect_stderr,
+            "forbid_stderr": forbid_stderr,
+        }
+
+    (CORPUS_COST_ARCHIVE / "expected.json").write_text(
+        json.dumps(archive_expected, indent=2) + "\n", encoding="utf-8"
+    )
+    print(f"Wrote cost archive scenarios under {CORPUS_COST_ARCHIVE}")
 
     print(f"Wrote {file_count} fixture files under {CORPUS}")
     print(f"Wrote {EXPECTED_PATH}")
