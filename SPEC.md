@@ -97,6 +97,7 @@ COST OPTIONS (default mode):
     --win-start <unix>            Required. Cost-window start (unix epoch).
     --projects-root <path>        Transcript root (default: ~/.claude/projects).
     --extra-projects-root <path>  Additional root; repeatable.
+    --archive-root <path>         Compressed archive root; repeatable.
     --no-config                   Skip ~/.claude/walker-roots.json extras.
     --now <unix>                  Pin "now" (default: wall clock; for tests).
 
@@ -109,9 +110,19 @@ Full contract: SPEC.md in the source tree.
 
 ## Roots
 
-Every root carries a transcript format tag: `claude-code` or `codex`.
-Cost, events, and beacon modes accept only Claude Code roots. Search accepts
-both formats and selects discovery and parsing from the tag.
+Every root carries a transcript format tag: `claude-code`, `codex`, or
+`claude-archive`. Cost, events, and beacon modes accept `claude-code` and
+`claude-archive` roots. Search accepts all three and selects discovery and
+parsing from the tag.
+
+An archive root at `<path>` is not walked directly. It contributes one
+`claude-code` layout root per immediate subdirectory `<path>/<hostname>/`,
+taken as found in ascending byte order of the directory name; no hostname
+validation is performed. A missing or unreadable `<path>` supplied on the CLI
+or in the config is skipped with the stderr line
+`walker: archive root not a directory, skipping: <path>` and is never an
+error. The implicit `~/claude-archive` root is skipped silently when it does
+not exist.
 
 Every subcommand walks an effective set of project roots assembled as:
 
@@ -120,12 +131,27 @@ Every subcommand walks an effective set of project roots assembled as:
 2. **CLI extras.** Zero or more `--extra-projects-root <path>` flags.
 3. **Config extras.** Read from `~/.claude/walker-roots.json` unless
    `--no-config` is passed.
+4. **Archive roots**, expanded per the rule above and appended after every
+   root from 1-3, in the order: implicit, CLI, config.
+   - **Implicit.** When `--projects-root` is omitted, `~/claude-archive` is
+     added as a `claude-archive` root if the directory exists. This holds for
+     every mode, mirroring how search adds `~/.codex/sessions`. Supplying
+     `--projects-root` keeps single-primary behavior and adds no archive root.
+   - **CLI.** `--archive-root <path>`, repeatable, on every subcommand.
+   - **Config.** A tagged object in `~/.claude/walker-roots.json`:
+     `{"path": "...", "format": "claude-archive"}`. `--no-config` skips it as
+     it skips every config extra.
+
+Dedup by canonical path applies to the expanded `<path>/<hostname>/` roots,
+not to the archive root itself, so an archive root that overlaps a live extra
+root is handled by session-key dedup in `## Discovery` rather than by path.
 
 For search only, when `--projects-root` is omitted, a second implicit root is
 added with path `~/.codex/sessions` and format `codex`. Supplying
 `--projects-root` preserves the historical single-primary behavior and tags
 that path `claude-code`. CLI extra roots are also `claude-code`; use a tagged
-config object for an additional Codex root.
+config object for an additional Codex root. The implicit Codex root is inserted
+directly after the primary root; archive roots still come last.
 
 ### Home directory
 
@@ -149,6 +175,10 @@ path (`~/.claude/walker-roots.json`) resolves identically across subcommands:
     {
       "path": "/mnt/chonkers/Users/mtsch/.codex/sessions",
       "format": "codex"
+    },
+    {
+      "path": "/mnt/llamabox/home/schoen/claude-archive",
+      "format": "claude-archive"
     }
   ]
 }
@@ -157,10 +187,9 @@ path (`~/.claude/walker-roots.json`) resolves identically across subcommands:
 Single key `extra_roots`: array of absolute path strings or tagged root
 objects. A string is backward-compatible shorthand for
 `{"path":"...","format":"claude-code"}`. Object `format` is exactly
-`claude-code` or `codex`; malformed objects and unknown formats are skipped.
-Per-host; NOT synced via memory-sync. Missing file → no extras. Malformed JSON
-→ stderr diagnostic, treat as no extras (must NOT error). Non-search modes
-ignore `codex` roots.
+`claude-code`, `codex`, or `claude-archive`; malformed objects and unknown
+formats are skipped. Non-search modes ignore `codex` roots but DO honor
+`claude-archive` roots.
 
 ### Resolution
 
@@ -184,10 +213,38 @@ mtime filter is unchanged. All applied uniformly across roots.
 
 ## Discovery
 
-Glob `<projects-root>/*/*.jsonl` for parents and
-`<projects-root>/*/*/subagents/agent-*.jsonl` for subagents. Group by
-`(parent_dir_name, session_id)` where `session_id` is the parent file's
-stem or the subagent's grandparent dir name.
+Within any claude-code layout root, live or expanded from an archive, a
+parent qualifies when its name is `<session_id>.jsonl` or
+`<session_id>.jsonl.zst`, and a subagent when it is `agent-<agent_id>.jsonl`
+or `agent-<agent_id>.jsonl.zst` under `<session_id>/subagents/`. The session
+id is the file name with both suffixes stripped; the agent id is the same
+with the leading `agent-` also stripped. Any other suffix is ignored.
+
+A root expanded from a `claude-archive` root counts the files it ignored and
+emits one stderr line per root,
+`walker: <root>: skipped <N> files with an unrecognized suffix`, and only when
+`N > 0`. A live `claude-code` root ignores stray files silently, as it always
+has: the status line runs cost mode on every tick against the live tree, and a
+stray file there must not add stderr to every invocation. `beacons-latest`
+probes exact filenames instead of enumerating and emits no such line at all.
+
+Group by `(parent_dir_name, session_id)` where `session_id` is the parent
+file's stem or the subagent's grandparent dir name.
+
+Every discovered file carries a session key:
+
+- parent: `(slug, session_id)`
+- subagent: `(slug, session_id, agent_id)`
+
+Discovery runs root by root in effective order and keeps the first file to
+claim a key. Later duplicates are dropped before any file is opened. Live
+roots precede archive roots, so a session present in both is read once from
+its live `.jsonl` and no archive is inflated only to be discarded by the
+existing `message.id` dedup. Two archive roots offering the same session
+resolve the same way: first root wins.
+
+The mtime prune below runs BEFORE the session-key claim: a file the prune
+skips does not claim its key.
 
 ## Filters
 
@@ -196,6 +253,21 @@ stem or the subagent's grandparent dir name.
 Skip any file where `mtime < min(now - period, win_start)`. Prunes the
 ~80% of historical transcripts that can't possibly contain in-range
 entries.
+
+### File-level (compressed transcripts)
+
+A file whose name ends in `.zst` is read whole into memory and decoded as a
+single zstd frame sequence into a byte buffer; the existing per-line parser
+then runs on that buffer instead of the raw file bytes. Streaming
+decompression is out of scope: transcripts are single-digit MB and whole-file
+inflate matches how all four impls already read live files.
+
+A file that fails to decode (truncated, not zstd, out of memory) is skipped
+with the single stderr line
+`walker: unreadable archive file, skipping: <path>`; the walk continues and
+the exit code stays 0. This mirrors the existing "unreadable file errs on the
+side of exclusion, malformed line is skipped silently" posture: a bad archive
+file must never fail a statusline tick.
 
 ### Line-level
 
@@ -434,6 +506,7 @@ Flag summary:
 | `--projects-root`       | no       | path    | `~/.claude/projects` |
 | `--no-config`           | no       | bool    | false                |
 | `--extra-projects-root` | no       | path[]  | (empty)              |
+| `--archive-root`        | no       | path[]  | (empty)              |
 | `--now`                 | no       | f64     | current wall clock   |
 
 `--no-config` suppresses loading `~/.claude/walker-roots.json`.
@@ -502,6 +575,7 @@ pattern is an error.
 | `--include-queue-ops` | false | Also index content-bearing `queue-operation` entries as `role: user`. |
 | `--format <pretty\|jsonl>` | pretty | `jsonl` is agent-consumable (one record per line). |
 | `--snippet-chars <N>` | 240 | Max snippet preview chars per hit. |
+| `--archive-root <path>` | none | Compressed archive root; repeatable. Adds a `claude-archive` root. |
 
 **Discovery.** For `claude-code` roots, search walks parent transcripts
 (`<root>/<slug>/<sid>.jsonl`) AND subagent transcripts
@@ -670,6 +744,14 @@ structurally compares the JSONL hit/summary records, ignoring `elapsed_ms` and
 `files_walked` (they vary per run). The harness
 invokes each binary against the corpus and asserts agreement to
 ±$0.01 for cost and ±0.001 for `bias_factor`.
+
+Archive fixtures live under `shared/corpus/cost_archive/<scenario>/` and
+`shared/corpus/search_archive/<scenario>/`. Each scenario holds a `live/`
+subtree (passed as `--projects-root`) and an `archive/` subtree (passed as
+`--archive-root`), plus a sibling `expected.json`. The `.jsonl.zst` files are
+committed binaries written by `shared/generate_corpus.py` and
+`shared/generate_search_corpus.py` using the Python `zstandard` module at
+compression level 10 (replica's `ZSTD_LEVEL`).
 
 ## Versioning
 
