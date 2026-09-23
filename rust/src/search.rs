@@ -48,6 +48,7 @@ struct SearchArgs {
     snippet_chars: u32,
     projects_root: Option<PathBuf>,
     extra_projects_roots: Vec<PathBuf>,
+    archive_roots: Vec<PathBuf>,
     read_config: bool,
 }
 
@@ -69,6 +70,7 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
     let mut snippet_chars: u32 = 240;
     let mut projects_root: Option<PathBuf> = None;
     let mut extra_projects_roots: Vec<PathBuf> = Vec::new();
+    let mut archive_roots: Vec<PathBuf> = Vec::new();
     let mut read_config = true;
     let mut now_override: Option<f64> = None;
 
@@ -140,6 +142,11 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
                     iter.next().ok_or("--extra-projects-root needs a value")?,
                 ));
             }
+            "--archive-root" => {
+                archive_roots.push(PathBuf::from(
+                    iter.next().ok_or("--archive-root needs a value")?,
+                ));
+            }
             "--no-config" => {
                 read_config = false;
             }
@@ -200,6 +207,7 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
         snippet_chars,
         projects_root,
         extra_projects_roots,
+        archive_roots,
         read_config,
     })
 }
@@ -1045,7 +1053,7 @@ pub fn run(raw: &[String]) {
     let roots = walker_roots::resolve_search_roots(
         args.projects_root.clone(),
         &args.extra_projects_roots,
-        &[],
+        &args.archive_roots,
         args.read_config,
     );
     let files = discover_files(&roots, args.since, args.cwd.as_deref());
@@ -1509,5 +1517,17 @@ mod tests {
             contains_ascii_ci(b"1ab", b"1ab"),
             "should find pattern at index 0"
         );
+    }
+
+    #[test]
+    fn parse_search_args_collects_archive_roots() {
+        let parsed = parse_args(&[
+            "needle".to_string(),
+            "--archive-root".to_string(),
+            "/path/to/archive".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.archive_roots, vec![PathBuf::from("/path/to/archive")]);
+        assert!(parse_args(&["needle".to_string(), "--archive-root".to_string()]).is_err());
     }
 }

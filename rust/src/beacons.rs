@@ -247,6 +247,7 @@ struct LatestArgs {
     session_id: String,
     projects_root: Option<PathBuf>,
     extra_projects_roots: Vec<PathBuf>,
+    archive_roots: Vec<PathBuf>,
     read_config: bool,
     now_unix: Option<f64>,
 }
@@ -255,6 +256,7 @@ fn parse_latest_args(args: &[String]) -> Result<LatestArgs, String> {
     let mut session_id: Option<String> = None;
     let mut projects_root: Option<PathBuf> = None;
     let mut extra_projects_roots: Vec<PathBuf> = Vec::new();
+    let mut archive_roots: Vec<PathBuf> = Vec::new();
     let mut read_config = true;
     let mut now_unix: Option<f64> = None;
     let mut iter = args.iter();
@@ -271,6 +273,11 @@ fn parse_latest_args(args: &[String]) -> Result<LatestArgs, String> {
             "--extra-projects-root" => {
                 extra_projects_roots.push(PathBuf::from(
                     iter.next().ok_or("--extra-projects-root needs a value")?,
+                ));
+            }
+            "--archive-root" => {
+                archive_roots.push(PathBuf::from(
+                    iter.next().ok_or("--archive-root needs a value")?,
                 ));
             }
             "--no-config" => {
@@ -292,6 +299,7 @@ fn parse_latest_args(args: &[String]) -> Result<LatestArgs, String> {
         session_id,
         projects_root,
         extra_projects_roots,
+        archive_roots,
         read_config,
         now_unix,
     })
@@ -367,7 +375,7 @@ pub fn run_latest(args: &[String]) {
     let roots = walker_roots::resolve_roots(
         parsed.projects_root.clone(),
         &parsed.extra_projects_roots,
-        &[],
+        &parsed.archive_roots,
         parsed.read_config,
     );
     let now_unix = parsed.now_unix.unwrap_or_else(current_unix);
@@ -404,6 +412,7 @@ struct HistoryArgs {
     win_start_unix: f64,
     projects_root: Option<PathBuf>,
     extra_projects_roots: Vec<PathBuf>,
+    archive_roots: Vec<PathBuf>,
     read_config: bool,
     now_unix: Option<f64>,
 }
@@ -413,6 +422,7 @@ fn parse_history_args(args: &[String]) -> Result<HistoryArgs, String> {
     let mut win_start_unix: Option<f64> = None;
     let mut projects_root: Option<PathBuf> = None;
     let mut extra_projects_roots: Vec<PathBuf> = Vec::new();
+    let mut archive_roots: Vec<PathBuf> = Vec::new();
     let mut read_config = true;
     let mut now_unix: Option<f64> = None;
     let mut iter = args.iter();
@@ -444,6 +454,11 @@ fn parse_history_args(args: &[String]) -> Result<HistoryArgs, String> {
                     iter.next().ok_or("--extra-projects-root needs a value")?,
                 ));
             }
+            "--archive-root" => {
+                archive_roots.push(PathBuf::from(
+                    iter.next().ok_or("--archive-root needs a value")?,
+                ));
+            }
             "--no-config" => {
                 read_config = false;
             }
@@ -463,6 +478,7 @@ fn parse_history_args(args: &[String]) -> Result<HistoryArgs, String> {
         win_start_unix: win_start_unix.unwrap_or(0.0),
         projects_root,
         extra_projects_roots,
+        archive_roots,
         read_config,
         now_unix,
     })
@@ -506,7 +522,7 @@ pub fn run_history(args: &[String]) {
     let roots = walker_roots::resolve_roots(
         parsed.projects_root.clone(),
         &parsed.extra_projects_roots,
-        &[],
+        &parsed.archive_roots,
         parsed.read_config,
     );
 
@@ -734,6 +750,7 @@ mod tests {
         assert_eq!(r.session_id, "abc");
         assert_eq!(r.projects_root, Some(PathBuf::from("/tmp/p")));
         assert_eq!(r.extra_projects_roots, vec![PathBuf::from("/tmp/q")]);
+        assert_eq!(r.archive_roots, Vec::<PathBuf>::new());
         assert!(!r.read_config);
         assert_eq!(r.now_unix, Some(1.5));
     }
@@ -757,6 +774,7 @@ mod tests {
             "--win-start",
             "--projects-root",
             "--extra-projects-root",
+            "--archive-root",
             "--now",
         ] {
             assert!(

@@ -44,6 +44,7 @@ COST OPTIONS (default mode):
     --win-start <unix>            Required. Cost-window start (unix epoch).
     --projects-root <path>        Transcript root (default: ~/.claude/projects).
     --extra-projects-root <path>  Additional root; repeatable.
+    --archive-root <path>         Compressed archive root; repeatable.
     --no-config                   Skip ~/.claude/walker-roots.json extras.
     --now <unix>                  Pin "now" (default: wall clock; for tests).
 
@@ -82,6 +83,7 @@ struct Args {
     now_unix: Option<f64>,
     projects_root: Option<PathBuf>,
     extra_projects_roots: Vec<PathBuf>,
+    archive_roots: Vec<PathBuf>,
     read_config: bool,
 }
 
@@ -125,6 +127,11 @@ fn parse_cost_args(args: &[String]) -> Result<Args, String> {
             "--extra-projects-root" => {
                 result.extra_projects_roots.push(PathBuf::from(
                     iter.next().ok_or("--extra-projects-root needs a value")?,
+                ));
+            }
+            "--archive-root" => {
+                result.archive_roots.push(PathBuf::from(
+                    iter.next().ok_or("--archive-root needs a value")?,
                 ));
             }
             "--no-config" => {
@@ -304,7 +311,7 @@ fn run_cost(args: &[String]) {
     let roots = walker_roots::resolve_roots(
         parsed.projects_root.clone(),
         &parsed.extra_projects_roots,
-        &[],
+        &parsed.archive_roots,
         parsed.read_config,
     );
 
@@ -609,5 +616,25 @@ mod tests {
         assert_eq!(result.trailing, 0.0);
         assert_eq!(result.window, 0.0);
         let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn parse_cost_args_collects_repeated_archive_roots() {
+        let parsed = parse_cost_args(&[
+            s("--period"),
+            s("60"),
+            s("--win-start"),
+            s("0"),
+            s("--archive-root"),
+            s("/one"),
+            s("--archive-root"),
+            s("/two"),
+        ])
+        .unwrap();
+        assert_eq!(
+            parsed.archive_roots,
+            vec![PathBuf::from("/one"), PathBuf::from("/two")]
+        );
+        assert!(parse_cost_args(&[s("--period"), s("60"), s("--win-start"), s("0"), s("--archive-root")]).is_err());
     }
 }

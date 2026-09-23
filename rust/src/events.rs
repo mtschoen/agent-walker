@@ -34,6 +34,7 @@ pub(crate) struct EventsArgs {
     pub(crate) now_unix: f64,
     pub(crate) projects_root: Option<PathBuf>,
     pub(crate) extra_projects_roots: Vec<PathBuf>,
+    pub(crate) archive_roots: Vec<PathBuf>,
     pub(crate) read_config: bool,
 }
 
@@ -43,6 +44,7 @@ pub(crate) fn parse_events_args(raw: &[String]) -> Result<EventsArgs, String> {
     let mut now_raw: Option<f64> = None;
     let mut projects_root: Option<PathBuf> = None;
     let mut extra_projects_roots: Vec<PathBuf> = Vec::new();
+    let mut archive_roots: Vec<PathBuf> = Vec::new();
     let mut read_config = true;
 
     let mut iter = raw.iter();
@@ -81,6 +83,11 @@ pub(crate) fn parse_events_args(raw: &[String]) -> Result<EventsArgs, String> {
                     iter.next().ok_or("--extra-projects-root needs a value")?,
                 ));
             }
+            "--archive-root" => {
+                archive_roots.push(PathBuf::from(
+                    iter.next().ok_or("--archive-root needs a value")?,
+                ));
+            }
             "--no-config" => {
                 read_config = false;
             }
@@ -107,6 +114,7 @@ pub(crate) fn parse_events_args(raw: &[String]) -> Result<EventsArgs, String> {
         now_unix,
         projects_root,
         extra_projects_roots,
+        archive_roots,
         read_config,
     })
 }
@@ -212,7 +220,7 @@ pub(crate) fn run(raw: &[String]) -> i32 {
     let roots = walker_roots::resolve_roots(
         args.projects_root,
         &args.extra_projects_roots,
-        &[],
+        &args.archive_roots,
         args.read_config,
     );
 
@@ -340,6 +348,7 @@ mod tests {
             "--now",
             "--projects-root",
             "--extra-projects-root",
+            "--archive-root",
         ] {
             assert!(
                 parse_events_args(&[s("--period"), s("60"), s(flag)]).is_err(),
@@ -387,6 +396,7 @@ mod tests {
         .unwrap();
         assert_eq!(r.projects_root, Some(PathBuf::from("/tmp/p")));
         assert_eq!(r.extra_projects_roots, vec![PathBuf::from("/tmp/q")]);
+        assert_eq!(r.archive_roots, Vec::<PathBuf>::new());
         assert_eq!(r.win_start_unix, 50.0);
     }
 
