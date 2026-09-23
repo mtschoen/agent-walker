@@ -42,6 +42,8 @@ MULTI_ROOT_CORPUS = ROOT / "shared" / "corpus" / "multi_root"
 SEARCH_CORPUS = ROOT / "shared" / "corpus" / "search"
 SEARCH_MULTI_ROOT_CORPUS = ROOT / "shared" / "corpus" / "search_multi_root"
 SEARCH_CODEX_CORPUS = ROOT / "shared" / "corpus" / "search_codex"
+COST_ARCHIVE_CORPUS = ROOT / "shared" / "corpus" / "cost_archive"
+SEARCH_ARCHIVE_CORPUS = ROOT / "shared" / "corpus" / "search_archive"
 EVENTS_CORPUS = ROOT / "shared" / "corpus" / "events"
 EVENTS_EXPECTED = EVENTS_CORPUS / "expected_events.json"
 EXPECTED_LATEST = BEACON_CORPUS / "expected_latest.json"
@@ -2935,6 +2937,355 @@ def check_search_mtime_prune(lang: str, binary: Path) -> bool:
     return ok
 
 
+def check_cost_archive(lang: str, binary: Path) -> bool:
+    """SPEC Roots + Discovery: --archive-root expands one claude-code root per
+    immediate subdirectory, .jsonl.zst files are inflated and priced, a live
+    file shadows its archive twin by session key, a corrupt archive file is
+    skipped with one stderr line, and an unrecognized suffix is counted once
+    per ARCHIVE-EXPANDED root on stderr while live roots stay silent.
+
+    The forbid_stderr list is what pins the live-root silence: scenario
+    06-unrelated-suffix plants two stray files on each side, so an impl that
+    counts every root emits either a second line naming the `live` root or a
+    single "skipped 4" line, and both are forbidden tokens.
+    """
+    expected_file = COST_ARCHIVE_CORPUS / "expected.json"
+    if not expected_file.is_file():
+        return True
+    data = json.loads(expected_file.read_text(encoding="utf-8"))
+    meta = data["_meta"]
+    all_ok = True
+    for name, want in sorted(data["scenarios"].items()):
+        scenario_dir = COST_ARCHIVE_CORPUS / name
+        label = f"cost-archive/{name}"
+        command = [
+            str(binary),
+            "--period",
+            str(meta["period_seconds"]),
+            "--win-start",
+            repr(meta["win_start_unix"]),
+            "--now",
+            repr(meta["now_unix"]),
+            "--projects-root",
+            str(scenario_dir / "live"),
+            "--archive-root",
+            str(scenario_dir / "archive"),
+            "--no-config",
+        ]
+        result = run_captured(command, text=True, encoding="utf-8", timeout=10)
+        problems: list[str] = []
+        if result.returncode != 0:
+            problems.append(f"exit={result.returncode}")
+        else:
+            got = json.loads(result.stdout.strip().splitlines()[-1])
+            ok, delta_trailing, delta_window = within_tolerance(got, want)
+            if not ok:
+                problems.append(
+                    f"trailing={got.get('trailing_usd')} (d={delta_trailing:+.6f}) "
+                    f"window={got.get('window_usd')} (d={delta_window:+.6f})"
+                )
+        for token in want["expect_stderr"]:
+            if token not in result.stderr:
+                problems.append(f"stderr missing {token!r}")
+        for token in want["forbid_stderr"]:
+            if token in result.stderr:
+                problems.append(f"stderr must not contain {token!r}")
+        # Every suffix-count line must name a root under the scenario's
+        # archive/ tree. This catches the live root reporting under any
+        # wording, not just the two tokens forbid_stderr spells out.
+        archive_prefix = str(scenario_dir / "archive")
+        for line in result.stderr.splitlines():
+            if "unrecognized suffix" in line and archive_prefix not in line:
+                problems.append(f"suffix count from a non-archive root: {line!r}")
+        badge = "FAIL" if problems else " OK "
+        print(f"  [{lang:>4s}] {label:38s} {badge}")
+        if problems:
+            print(f"        {'; '.join(problems)}")
+            print(f"        stderr={result.stderr.strip()[:300]!r}")
+            all_ok = False
+    return all_ok
+
+
+def check_search_archive(lang: str, binary: Path) -> bool:
+    """Search over compressed archive roots: hits report the .jsonl.zst path,
+    roots_walked counts expanded host roots, and a live file shadows its
+    archive twin."""
+    if not SEARCH_ARCHIVE_CORPUS.is_dir() or lang not in IMPLS_WITH_SEARCH:
+        return True
+    all_ok = True
+    for scenario_dir in sorted(SEARCH_ARCHIVE_CORPUS.iterdir()):
+        expected_file = scenario_dir / "expected.json"
+        if not expected_file.is_file():
+            continue
+        data = json.loads(expected_file.read_text(encoding="utf-8"))
+        now_unix = data["_meta"]["now_unix"]
+        for combo_name, combo in data["combos"].items():
+            label = f"search-archive/{scenario_dir.name}/{combo_name}"
+            command = [
+                str(binary),
+                "search",
+                combo["pattern"],
+                "--projects-root",
+                str(scenario_dir / "live"),
+                "--archive-root",
+                str(scenario_dir / "archive"),
+                "--now",
+                repr(now_unix),
+                "--format",
+                "jsonl",
+                "--no-config",
+                *combo["flags"],
+            ]
+            result = run_captured(command, text=True, encoding="utf-8", timeout=10)
+            if result.returncode != 0:
+                print(
+                    f"  [{lang:>4s}] {label:48s} FAIL  exit={result.returncode} "
+                    f"stderr={result.stderr.strip()[:200]!r}"
+                )
+                all_ok = False
+                continue
+            got_hits: list[dict] = []
+            got_summary: dict | None = None
+            archive_paths: list[str] = []
+            for line in result.stdout.splitlines():
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if record.get("type") == "hit":
+                    if record.get("file_path", "").endswith(".jsonl.zst"):
+                        archive_paths.append(record["file_path"])
+                    for key in SEARCH_HIT_STRIP_KEYS:
+                        record.pop(key, None)
+                    got_hits.append(record)
+                else:
+                    for key in SEARCH_SUMMARY_STRIP_KEYS:
+                        record.pop(key, None)
+                    got_summary = record
+            problems = []
+            if got_hits != combo["hits"]:
+                problems.append(
+                    f"hits: got {json.dumps(got_hits, sort_keys=True)} "
+                    f"expected {json.dumps(combo['hits'], sort_keys=True)}"
+                )
+            if got_summary != combo["summary"]:
+                problems.append(
+                    f"summary: got {got_summary!r} expected {combo['summary']!r}"
+                )
+            # 02 must read the LIVE file, so no hit may name a .jsonl.zst.
+            if scenario_dir.name.startswith("02-") and archive_paths:
+                problems.append(f"live file did not shadow archive: {archive_paths}")
+            # 01/03/04 hits must all come from .jsonl.zst files.
+            if not scenario_dir.name.startswith("02-") and len(archive_paths) != len(
+                got_hits
+            ):
+                problems.append(
+                    f"expected every hit to name a .jsonl.zst, got {archive_paths}"
+                )
+            badge = "FAIL" if problems else " OK "
+            print(f"  [{lang:>4s}] {label:48s} {badge}  hits={len(got_hits)}")
+            if problems:
+                for problem in problems:
+                    print(f"        {problem}")
+                all_ok = False
+    return all_ok
+
+
+def check_archive_implicit_root(lang: str, binary: Path) -> bool:
+    """SPEC Roots item 4: ~/claude-archive is added implicitly when
+    --projects-root is OMITTED, and NOT added when it is supplied. Lay out a
+    fake home carrying both a live fixture and an archived one, then run cost
+    mode twice under a controlled home.
+
+    Reuses the cost_archive 01-archive-only scenario as the substrate: the
+    live half goes under <home>/.claude/projects and the archive half under
+    <home>/claude-archive, so the implicit-root sum is the scenario total and
+    the explicit-root sum is the live half alone.
+    """
+    expected_file = COST_ARCHIVE_CORPUS / "expected.json"
+    if not expected_file.is_file():
+        return True
+    data = json.loads(expected_file.read_text(encoding="utf-8"))
+    meta = data["_meta"]
+    scenario_dir = COST_ARCHIVE_CORPUS / "01-archive-only"
+    both = data["scenarios"]["01-archive-only"]
+    # The live half of 01-archive-only is one turn at the same rate as the
+    # archived half, so half the total is the live-only target.
+    live_only = {
+        "trailing_usd": both["trailing_usd"] / 2.0,
+        "window_usd": both["window_usd"] / 2.0,
+    }
+    all_ok = True
+    with (
+        tempfile.TemporaryDirectory(prefix="walker-implicit-archive-") as home,
+        tempfile.TemporaryDirectory(prefix="walker-implicit-bogus-") as bogus,
+    ):
+        home_path = Path(home)
+        shutil.copytree(scenario_dir / "live", home_path / ".claude" / "projects")
+        shutil.copytree(scenario_dir / "archive", home_path / "claude-archive")
+        environment = dict(os.environ)
+        if sys.platform == "win32":
+            environment["USERPROFILE"], environment["HOME"] = str(home_path), str(bogus)
+        else:
+            environment["HOME"], environment["USERPROFILE"] = str(home_path), str(bogus)
+        base = [
+            str(binary),
+            "--period",
+            str(meta["period_seconds"]),
+            "--win-start",
+            repr(meta["win_start_unix"]),
+            "--now",
+            repr(meta["now_unix"]),
+            "--no-config",
+        ]
+        for label, extra_args, target in (
+            ("archive: implicit root added", [], both),
+            (
+                "archive: explicit root suppresses",
+                ["--projects-root", str(home_path / ".claude" / "projects")],
+                live_only,
+            ),
+        ):
+            result = run_captured(
+                base + extra_args,
+                text=True,
+                encoding="utf-8",
+                timeout=10,
+                env=environment,
+            )
+            ok = result.returncode == 0
+            if ok:
+                got = json.loads(result.stdout.strip().splitlines()[-1])
+                ok, _, _ = within_tolerance(got, target)
+            print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
+            if not ok:
+                print(f"        exit={result.returncode} stdout={result.stdout!r}")
+                all_ok = False
+    return all_ok
+
+
+def check_archive_config_root(lang: str, binary: Path) -> bool:
+    """A tagged {"path": ..., "format": "claude-archive"} entry in
+    ~/.claude/walker-roots.json contributes archive roots to a NON-search
+    mode, and --no-config suppresses it."""
+    expected_file = COST_ARCHIVE_CORPUS / "expected.json"
+    if not expected_file.is_file():
+        return True
+    data = json.loads(expected_file.read_text(encoding="utf-8"))
+    meta = data["_meta"]
+    scenario_dir = COST_ARCHIVE_CORPUS / "01-archive-only"
+    both = data["scenarios"]["01-archive-only"]
+    live_only = {
+        "trailing_usd": both["trailing_usd"] / 2.0,
+        "window_usd": both["window_usd"] / 2.0,
+    }
+    all_ok = True
+    with (
+        tempfile.TemporaryDirectory(prefix="walker-archive-config-") as home,
+        tempfile.TemporaryDirectory(prefix="walker-archive-store-") as store,
+        tempfile.TemporaryDirectory(prefix="walker-archive-bogus-") as bogus,
+    ):
+        home_path, store_path = Path(home), Path(store)
+        claude_dir = home_path / ".claude"
+        shutil.copytree(scenario_dir / "live", claude_dir / "projects")
+        shutil.copytree(scenario_dir / "archive", store_path / "archive")
+        (claude_dir / "walker-roots.json").write_text(
+            json.dumps(
+                {
+                    "extra_roots": [
+                        {
+                            "path": str(store_path / "archive"),
+                            "format": "claude-archive",
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        environment = dict(os.environ)
+        if sys.platform == "win32":
+            environment["USERPROFILE"], environment["HOME"] = str(home_path), str(bogus)
+        else:
+            environment["HOME"], environment["USERPROFILE"] = str(home_path), str(bogus)
+        base = [
+            str(binary),
+            "--period",
+            str(meta["period_seconds"]),
+            "--win-start",
+            repr(meta["win_start_unix"]),
+            "--now",
+            repr(meta["now_unix"]),
+            "--projects-root",
+            str(claude_dir / "projects"),
+        ]
+        for label, extra_args, target in (
+            ("archive: config root honored", [], both),
+            ("archive: --no-config suppresses", ["--no-config"], live_only),
+        ):
+            result = run_captured(
+                base + extra_args,
+                text=True,
+                encoding="utf-8",
+                timeout=10,
+                env=environment,
+            )
+            ok = result.returncode == 0
+            if ok:
+                got = json.loads(result.stdout.strip().splitlines()[-1])
+                ok, _, _ = within_tolerance(got, target)
+            print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
+            if not ok:
+                print(f"        exit={result.returncode} stdout={result.stdout!r}")
+                all_ok = False
+    return all_ok
+
+
+def check_archive_mtime_prune(lang: str, binary: Path) -> bool:
+    """The mtime prune applies to .jsonl.zst exactly as to .jsonl, and runs
+    before the session-key claim. Age the archived transcript of
+    01-archive-only far before the pinned cutoff: its cost must vanish."""
+    expected_file = COST_ARCHIVE_CORPUS / "expected.json"
+    if not expected_file.is_file():
+        return True
+    data = json.loads(expected_file.read_text(encoding="utf-8"))
+    meta = data["_meta"]
+    both = data["scenarios"]["01-archive-only"]
+    target = {
+        "trailing_usd": both["trailing_usd"] / 2.0,
+        "window_usd": both["window_usd"] / 2.0,
+    }
+    cutoff = min(meta["now_unix"] - meta["period_seconds"], meta["win_start_unix"])
+    aged = (cutoff - 30 * 86400, cutoff - 30 * 86400)
+    label = "archive: mtime prune"
+    with tempfile.TemporaryDirectory(prefix="walker-archive-prune-") as tmp:
+        scenario = Path(tmp) / "01-archive-only"
+        shutil.copytree(COST_ARCHIVE_CORPUS / "01-archive-only", scenario)
+        for compressed in scenario.rglob("*.jsonl.zst"):
+            os.utime(compressed, aged)
+        command = [
+            str(binary),
+            "--period",
+            str(meta["period_seconds"]),
+            "--win-start",
+            repr(meta["win_start_unix"]),
+            "--now",
+            repr(meta["now_unix"]),
+            "--projects-root",
+            str(scenario / "live"),
+            "--archive-root",
+            str(scenario / "archive"),
+            "--no-config",
+        ]
+        result = run_captured(command, text=True, encoding="utf-8", timeout=10)
+        ok = result.returncode == 0
+        if ok:
+            got = json.loads(result.stdout.strip().splitlines()[-1])
+            ok, _, _ = within_tolerance(got, target)
+    print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
+    if not ok:
+        print(f"        exit={result.returncode} stdout={result.stdout!r}")
+    return ok
+
+
 def check_search_tool_blocks_rich(lang: str, binary: Path) -> bool:
     """--include-tool-blocks over rich tool_use/tool_result shapes (nested
     objects, arrays, numbers, bools, nulls, string inputs, blocks without a
@@ -3317,6 +3668,16 @@ def main():
         if not check_mtime_prune(lang, binary, expected):
             overall_ok = False
         if not check_search_mtime_prune(lang, binary):
+            overall_ok = False
+        if not check_cost_archive(lang, binary):
+            overall_ok = False
+        if not check_search_archive(lang, binary):
+            overall_ok = False
+        if not check_archive_implicit_root(lang, binary):
+            overall_ok = False
+        if not check_archive_config_root(lang, binary):
+            overall_ok = False
+        if not check_archive_mtime_prune(lang, binary):
             overall_ok = False
         if not check_search_tool_blocks_rich(lang, binary):
             overall_ok = False
