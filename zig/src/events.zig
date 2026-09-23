@@ -17,7 +17,9 @@ const EventsArgs = struct {
     win_start: f64,
     now_unix: f64,
     projects_root: []const u8,
+    projects_root_explicit: bool = false,
     extra_roots: [][]const u8,
+    archive_roots: [][]const u8 = &.{},
     read_config: bool,
 };
 
@@ -27,6 +29,7 @@ fn parseArgs(alloc: Allocator, raw: [][]const u8) !EventsArgs {
     var now_override: ?f64 = null;
     var projects_root: ?[]const u8 = null;
     var extra_roots: std.ArrayList([]const u8) = .empty;
+    var archive_roots: std.ArrayList([]const u8) = .empty;
     var read_config = true;
 
     var i: usize = 0;
@@ -43,6 +46,8 @@ fn parseArgs(alloc: Allocator, raw: [][]const u8) !EventsArgs {
             projects_root = main.grab(raw, &i, "--projects-root");
         } else if (std.mem.eql(u8, flag, "--extra-projects-root")) {
             try extra_roots.append(alloc, main.grab(raw, &i, "--extra-projects-root"));
+        } else if (std.mem.eql(u8, flag, "--archive-root")) {
+            try archive_roots.append(alloc, main.grab(raw, &i, "--archive-root"));
         } else if (std.mem.eql(u8, flag, "--no-config")) {
             read_config = false;
         } else if (std.mem.eql(u8, flag, "--version")) {
@@ -66,7 +71,9 @@ fn parseArgs(alloc: Allocator, raw: [][]const u8) !EventsArgs {
         .win_start = win_start,
         .now_unix = now,
         .projects_root = projects_root orelse try main.defaultRoot(alloc),
+        .projects_root_explicit = projects_root != null,
         .extra_roots = try extra_roots.toOwnedSlice(alloc),
+        .archive_roots = try archive_roots.toOwnedSlice(alloc),
         .read_config = read_config,
     };
 }
@@ -318,7 +325,7 @@ pub fn run(gpa: Allocator, argv: [][]const u8) !void {
     const period_cutoff = args.now_unix - @as(f64, @floatFromInt(args.period));
     const cutoff = @min(period_cutoff, args.win_start);
 
-    const roots = try walker_roots.resolveRoots(alloc, args.projects_root, args.extra_roots, args.read_config);
+    const roots = try walker_roots.resolveRoots(alloc, args.projects_root, args.projects_root_explicit, args.extra_roots, args.archive_roots, args.read_config);
     if (roots.len == 0) {
         // Primary root doesn't exist — emit nothing, exit 0 (consistent with
         // cost-mode's empty-fleet case).

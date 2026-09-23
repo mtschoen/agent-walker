@@ -13,6 +13,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const main = @import("main.zig");
+const archive = @import("archive.zig");
 
 const is_windows = main.is_windows;
 const is_darwin = main.is_darwin;
@@ -21,11 +22,15 @@ const PATH_SEP = main.PATH_SEP;
 pub const TranscriptFormat = enum {
     claude_code,
     codex,
+    /// A directory of per-hostname claude-code layout trees written by
+    /// replica. Never walked directly; expanded by archive.expandArchiveRoot.
+    claude_archive,
 };
 
 pub const TranscriptRoot = struct {
     path: []const u8,
     format: TranscriptFormat,
+    from_archive: bool = false,
 };
 
 /// Return the path to ~/.claude/walker-roots.json (USERPROFILE on Windows).
@@ -120,6 +125,8 @@ pub fn readTaggedExtraRootsFromConfig(alloc: Allocator) ![]TranscriptRoot {
                     .claude_code
                 else if (std.mem.eql(u8, format_string, "codex"))
                     .codex
+                else if (std.mem.eql(u8, format_string, "claude-archive"))
+                    .claude_archive
                 else
                     continue;
                 try out.append(alloc, .{
@@ -141,14 +148,82 @@ pub fn defaultCodexRoot(alloc: Allocator) ![]const u8 {
     return alloc.dupe(u8, ".codex/sessions");
 }
 
+pub const ConfigRoots = struct {
+    claude_code: [][]const u8,
+    archives: [][]const u8,
+    tagged: []TranscriptRoot,
+};
+
+pub fn configRootsByFormat(alloc: Allocator, read_config: bool) !ConfigRoots {
+    var claude_code: std.ArrayList([]const u8) = .empty;
+    var archives: std.ArrayList([]const u8) = .empty;
+    if (!read_config) {
+        return .{
+            .claude_code = try claude_code.toOwnedSlice(alloc),
+            .archives = try archives.toOwnedSlice(alloc),
+            .tagged = &.{},
+        };
+    }
+    const tagged = try readTaggedExtraRootsFromConfig(alloc);
+    for (tagged) |root| {
+        switch (root.format) {
+            .claude_code => try claude_code.append(alloc, root.path),
+            .claude_archive => try archives.append(alloc, root.path),
+            .codex => {},
+        }
+    }
+    return .{
+        .claude_code = try claude_code.toOwnedSlice(alloc),
+        .archives = try archives.toOwnedSlice(alloc),
+        .tagged = tagged,
+    };
+}
+
+/// Archive roots in SPEC effective order (implicit, CLI, config), each already
+/// expanded into its <archive>/<hostname> claude-code roots. The implicit root
+/// is silent when absent; a CLI or config root that is not a directory gets
+/// the standard diagnostic.
+pub fn archiveRootsInEffectiveOrder(
+    alloc: Allocator,
+    primary_explicit: bool,
+    cli_archives: []const []const u8,
+    config_archives: []const []const u8,
+) ![][]const u8 {
+    var expanded: std.ArrayList([]const u8) = .empty;
+    if (!primary_explicit) {
+        const implicit = try archive.defaultArchiveRoot(alloc);
+        if (main.isDirectory(implicit)) {
+            try expanded.appendSlice(alloc, try archive.expandArchiveRoot(alloc, implicit));
+        }
+    }
+    for ([_][]const []const u8{ cli_archives, config_archives }) |group| {
+        for (group) |archive_path| {
+            if (!main.isDirectory(archive_path)) {
+                const message = try std.fmt.allocPrint(
+                    alloc,
+                    "walker: archive root not a directory, skipping: {s}\n",
+                    .{archive_path},
+                );
+                main.writeStderr(message);
+                continue;
+            }
+            try expanded.appendSlice(alloc, try archive.expandArchiveRoot(alloc, archive_path));
+        }
+    }
+    return expanded.toOwnedSlice(alloc);
+}
+
 /// Resolve search roots with transcript format tags. An implicit primary adds
 /// both local Claude Code and Codex defaults. CLI extras remain Claude Code.
 pub fn resolveSearchRoots(
     alloc: Allocator,
     primary: ?[]const u8,
     cli_extras: []const []const u8,
+    cli_archives: []const []const u8,
     read_config: bool,
 ) ![]TranscriptRoot {
+    const primary_explicit = primary != null;
+    const cfg = try configRootsByFormat(alloc, read_config);
     const Entry = struct {
         root: TranscriptRoot,
         report_missing: bool,
@@ -158,29 +233,37 @@ pub fn resolveSearchRoots(
         .root = .{
             .path = primary orelse try main.defaultRoot(alloc),
             .format = .claude_code,
+            .from_archive = false,
         },
         .report_missing = false,
     });
-    if (primary == null) {
+    if (!primary_explicit) {
         try combined.append(alloc, .{
             .root = .{
                 .path = try defaultCodexRoot(alloc),
                 .format = .codex,
+                .from_archive = false,
             },
             .report_missing = false,
         });
     }
     for (cli_extras) |path| {
         try combined.append(alloc, .{
-            .root = .{ .path = path, .format = .claude_code },
+            .root = .{ .path = path, .format = .claude_code, .from_archive = false },
             .report_missing = true,
         });
     }
-    if (read_config) {
-        const config_extras = readTaggedExtraRootsFromConfig(alloc) catch &.{};
-        for (config_extras) |root| {
+    for (cfg.tagged) |root| {
+        if (root.format != .claude_archive) {
             try combined.append(alloc, .{ .root = root, .report_missing = true });
         }
+    }
+    const expanded_archives = try archiveRootsInEffectiveOrder(alloc, primary_explicit, cli_archives, cfg.archives);
+    for (expanded_archives) |host| {
+        try combined.append(alloc, .{
+            .root = .{ .path = host, .format = .claude_code, .from_archive = true },
+            .report_missing = false,
+        });
     }
 
     var seen = std.StringHashMap(void).init(alloc);
@@ -203,6 +286,7 @@ pub fn resolveSearchRoots(
         const format_prefix = switch (entry.root.format) {
             .claude_code => "claude-code:",
             .codex => "codex:",
+            .claude_archive => "claude-archive:",
         };
         const key = try std.fmt.allocPrint(alloc, "{s}{s}", .{ format_prefix, canonical });
         const entry_result = try seen.getOrPut(key);
@@ -214,43 +298,47 @@ pub fn resolveSearchRoots(
         try result.append(alloc, .{
             .path = canonical,
             .format = entry.root.format,
+            .from_archive = entry.root.from_archive,
         });
     }
     return result.toOwnedSlice(alloc);
 }
 
 /// Resolve the effective root list:
-///   [primary] + cli_extras + (config extras if read_config)
+///   [primary] + cli_extras + (config extras if read_config) + expanded archive roots
 ///   -> dedup via realpath (fallback to raw path)
 ///   -> filter to existing directories
 /// Returned slice + entries are arena-allocated.
 pub fn resolveRoots(
     alloc: Allocator,
     primary: []const u8,
+    primary_explicit: bool,
     cli_extras: []const []const u8,
+    cli_archives: []const []const u8,
     read_config: bool,
-) ![][]const u8 {
-    // Combined list of (path, is_primary) pairs in spec-mandated order.
-    const Entry = struct { path: []const u8, is_primary: bool };
+) ![]main.ResolvedRoot {
+    const cfg = try configRootsByFormat(alloc, read_config);
+    const Entry = struct { path: []const u8, is_primary: bool, from_archive: bool };
     var combined: std.ArrayList(Entry) = .empty;
-    try combined.append(alloc, .{ .path = primary, .is_primary = true });
+    try combined.append(alloc, .{ .path = primary, .is_primary = true, .from_archive = false });
     for (cli_extras) |p| {
-        try combined.append(alloc, .{ .path = p, .is_primary = false });
+        try combined.append(alloc, .{ .path = p, .is_primary = false, .from_archive = false });
     }
-    if (read_config) {
-        const config_extras = readExtraRootsFromConfig(alloc) catch &.{};
-        for (config_extras) |p| {
-            try combined.append(alloc, .{ .path = p, .is_primary = false });
-        }
+    for (cfg.claude_code) |p| {
+        try combined.append(alloc, .{ .path = p, .is_primary = false, .from_archive = false });
+    }
+    const expanded_archives = try archiveRootsInEffectiveOrder(alloc, primary_explicit, cli_archives, cfg.archives);
+    for (expanded_archives) |p| {
+        try combined.append(alloc, .{ .path = p, .is_primary = false, .from_archive = true });
     }
 
     var seen = std.StringHashMap(void).init(alloc);
     defer seen.deinit();
-    var result: std.ArrayList([]const u8) = .empty;
+    var result: std.ArrayList(main.ResolvedRoot) = .empty;
 
     for (combined.items) |entry| {
         if (!isExistingDir(alloc, entry.path)) {
-            if (!entry.is_primary) {
+            if (!entry.is_primary and !entry.from_archive) {
                 const msg = try std.fmt.allocPrint(
                     alloc,
                     "walker: extra root not a directory, skipping: {s}\n",
@@ -261,7 +349,7 @@ pub fn resolveRoots(
             continue;
         }
         // Canonicalization (realpath) isn't available in zig's manual-syscall
-        // style — std.fs is not part of this binary's deps. Strip a single
+        // style - std.fs is not part of this binary's deps. Strip a single
         // trailing path separator so "/a/b" and "/a/b/" dedup; otherwise rely
         // on raw-path identity. Conformance fixtures don't exercise symlink-
         // based dedup, so this is sufficient.
@@ -274,7 +362,7 @@ pub fn resolveRoots(
             alloc.free(canonical);
             continue;
         }
-        try result.append(alloc, canonical);
+        try result.append(alloc, .{ .path = canonical, .from_archive = entry.from_archive });
     }
     return result.toOwnedSlice(alloc);
 }

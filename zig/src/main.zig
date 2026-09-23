@@ -11,10 +11,16 @@ const beacons = @import("beacons.zig");
 const search = @import("search.zig");
 const events = @import("events.zig");
 const walker_roots = @import("walker_roots.zig");
+const archive = @import("archive.zig");
 
 pub const VERSION = "zig/0.1.1";
 pub const is_windows = builtin.os.tag == .windows;
 pub const is_darwin = builtin.os.tag == .macos;
+
+pub const ResolvedRoot = struct {
+    path: []const u8,
+    from_archive: bool = false,
+};
 
 // ─── Platform abstraction ────────────────────────────────────────────────────
 
@@ -238,7 +244,7 @@ fn fileRead(fd: PlatformFd, buf: []u8) !usize {
     }
 }
 
-pub fn readEntireFile(alloc: Allocator, path: []const u8) ![]u8 {
+pub fn readEntireFileRaw(alloc: Allocator, path: []const u8) ![]u8 {
     const fd = try fileOpen(alloc, path);
     defer fileClose(fd);
     var buf: std.ArrayList(u8) = .empty;
@@ -249,6 +255,21 @@ pub fn readEntireFile(alloc: Allocator, path: []const u8) ![]u8 {
         buf.appendSlice(alloc, read_buf[0..n]) catch break;
     }
     return buf.toOwnedSlice(alloc) catch buf.items;
+}
+
+pub fn readEntireFile(alloc: Allocator, path: []const u8) ![]u8 {
+    const raw = try readEntireFileRaw(alloc, path);
+    if (!archive.isCompressedTranscript(path)) return raw;
+    defer alloc.free(raw);
+    return archive.inflate(alloc, raw) orelse {
+        const message = try std.fmt.allocPrint(
+            alloc,
+            "walker: unreadable archive file, skipping: {s}\n",
+            .{path},
+        );
+        writeStderr(message);
+        return error.DecodeFailed;
+    };
 }
 
 const FirstLineReader = struct {
@@ -513,12 +534,14 @@ const Cli = struct {
     now: ?f64 = null,
     root: ?[]const u8 = null,
     extra_roots: [][]const u8 = &.{},
+    archive_roots: [][]const u8 = &.{},
     read_config: bool = true,
 };
 
 fn parseCli(alloc: Allocator, argv: [][]const u8) !Cli {
     var cli = Cli{};
     var extras: std.ArrayList([]const u8) = .empty;
+    var archive_roots: std.ArrayList([]const u8) = .empty;
     var win_start_set = false;
     var i: usize = 0;
     while (i < argv.len) {
@@ -535,6 +558,8 @@ fn parseCli(alloc: Allocator, argv: [][]const u8) !Cli {
             cli.root = grab(argv, &i, "--projects-root");
         } else if (std.mem.eql(u8, flag, "--extra-projects-root")) {
             try extras.append(alloc, grab(argv, &i, "--extra-projects-root"));
+        } else if (std.mem.eql(u8, flag, "--archive-root")) {
+            try archive_roots.append(alloc, grab(argv, &i, "--archive-root"));
         } else if (std.mem.eql(u8, flag, "--no-config")) {
             cli.read_config = false;
         } else if (std.mem.eql(u8, flag, "--version")) {
@@ -549,6 +574,7 @@ fn parseCli(alloc: Allocator, argv: [][]const u8) !Cli {
     if (cli.period == 0) die("--period is required");
     if (!win_start_set) die("--win-start is required");
     cli.extra_roots = try extras.toOwnedSlice(alloc);
+    cli.archive_roots = try archive_roots.toOwnedSlice(alloc);
     return cli;
 }
 
@@ -592,6 +618,7 @@ const HELP =
     \\    --win-start <unix>            Required. Cost-window start (unix epoch).
     \\    --projects-root <path>        Transcript root (default: ~/.claude/projects).
     \\    --extra-projects-root <path>  Additional root; repeatable.
+    \\    --archive-root <path>         Compressed archive root; repeatable.
     \\    --no-config                   Skip ~/.claude/walker-roots.json extras.
     \\    --now <unix>                  Pin "now" (default: wall clock; for tests).
     \\
@@ -996,54 +1023,150 @@ pub fn defaultRoot(alloc: Allocator) ![]const u8 {
     return alloc.dupe(u8, ".claude/projects");
 }
 
+pub fn isDirectory(path: []const u8) bool {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    if (is_windows) {
+        const wpath = std.unicode.utf8ToUtf16LeAllocZ(alloc, path) catch return false;
+        defer alloc.free(wpath);
+        var info: platform.WIN32_FILE_ATTRIBUTE_DATA = undefined;
+        if (platform.GetFileAttributesExW(wpath.ptr, 0, &info) == 0) return false;
+        return (info.dwFileAttributes & platform.FILE_ATTRIBUTE_DIRECTORY) != 0;
+    } else if (is_darwin) {
+        const zpath = alloc.dupeZ(u8, path) catch return false;
+        defer alloc.free(zpath);
+        var st: std.c.Stat = undefined;
+        if (std.c.fstatat(std.c.AT.FDCWD, zpath, &st, 0) != 0) return false;
+        return (st.mode & 0o170000) == 0o040000;
+    } else {
+        const linux = platform.linux;
+        const zpath = alloc.dupeZ(u8, path) catch return false;
+        defer alloc.free(zpath);
+        var statx_buf: linux.Statx = std.mem.zeroes(linux.Statx);
+        const ret = linux.statx(linux.AT.FDCWD, zpath, 0, .{}, &statx_buf);
+        const signed: isize = @bitCast(ret);
+        if (signed < 0) return false;
+        return (statx_buf.mode & 0o170000) == 0o040000;
+    }
+}
+
+pub fn listSubdirectories(alloc: Allocator, path: []const u8) ![][]const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    if (is_windows) {
+        const pat = try std.fmt.allocPrint(alloc, "{s}\\*", .{path});
+        defer alloc.free(pat);
+        const entries = try findFilesWin(alloc, pat);
+        for (entries.items) |e| {
+            if (e.dwFileAttributes & platform.FILE_ATTRIBUTE_DIRECTORY == 0) continue;
+            const name_w = std.mem.span(@as([*:0]const u16, @ptrCast(&e.cFileName)));
+            if (name_w.len == 0) continue;
+            if (name_w.len == 1 and name_w[0] == '.') continue;
+            if (name_w.len == 2 and name_w[0] == '.' and name_w[1] == '.') continue;
+            const name = try std.unicode.utf16LeToUtf8Alloc(alloc, name_w);
+            defer alloc.free(name);
+            const sub = try std.fmt.allocPrint(alloc, "{s}\\{s}", .{ path, name });
+            try list.append(alloc, sub);
+        }
+    } else if (is_darwin) {
+        const path_z = try alloc.dupeZ(u8, path);
+        defer alloc.free(path_z);
+        const dir = std.c.opendir(path_z) orelse return error.OpenFailed;
+        defer _ = std.c.closedir(dir);
+        while (std.c.readdir(dir)) |ent| {
+            if (ent.type != std.c.DT.DIR) continue;
+            const name_ptr: [*:0]const u8 = @ptrCast(&ent.name);
+            const name = std.mem.span(name_ptr);
+            if (name.len == 0) continue;
+            if (name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.'))) continue;
+            const sub = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ path, name });
+            try list.append(alloc, sub);
+        }
+    } else {
+        const linux = platform.linux;
+        const path_z = try alloc.dupeZ(u8, path);
+        defer alloc.free(path_z);
+        const fd_ret = linux.openat(linux.AT.FDCWD, path_z, .{ .DIRECTORY = true }, 0);
+        const fd: i32 = @bitCast(@as(u32, @truncate(fd_ret)));
+        if (fd < 0) return error.OpenFailed;
+        defer _ = linux.close(fd);
+        var dent_buf: [8192]u8 = undefined;
+        while (true) {
+            const n = linux.getdents64(fd, &dent_buf, dent_buf.len);
+            const signed: isize = @bitCast(n);
+            if (signed <= 0) break;
+            var offset: usize = 0;
+            while (offset < n) {
+                const entry = @as(*align(1) const linux.dirent64, @ptrCast(&dent_buf[offset]));
+                offset += entry.reclen;
+                if (entry.type != linux.DT.DIR) continue;
+                const name_ptr: [*:0]const u8 = @ptrCast(&entry.name);
+                const name = std.mem.span(name_ptr);
+                if (name.len == 0) continue;
+                if (name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.'))) continue;
+                const sub = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ path, name });
+                try list.append(alloc, sub);
+            }
+        }
+    }
+    return list.toOwnedSlice(alloc);
+}
+
 /// Multi-root discovery: walk every resolved root and merge entries into
 /// one (slug,sid) -> [paths] map. Groups from different roots that share a
 /// (slug,sid) are merged (seen_ids dedup at walk_group time handles
 /// duplicate entries).
-pub fn discover(alloc: Allocator, roots: []const []const u8, earliest: f64) !FileMap {
+pub fn discover(alloc: Allocator, roots: []const ResolvedRoot, earliest: f64) !FileMap {
     var map = FileMap.init(alloc);
-    for (roots) |root_path| {
-        var per_root = if (is_windows)
-            discoverWindows(alloc, root_path, earliest) catch continue
-        else if (is_darwin)
-            discoverDarwin(alloc, root_path, earliest) catch continue
-        else
-            discoverLinux(alloc, root_path, earliest) catch continue;
+    var claimed = std.StringHashMap(void).init(alloc);
+    for (roots) |root| {
+        const root_path = root.path;
+        var skipped_suffixes: u64 = 0;
+        var per_root = discoverOneRoot(alloc, root_path, earliest, &skipped_suffixes) catch continue;
         defer per_root.deinit();
 
         var it = per_root.iterator();
         while (it.next()) |kv| {
-            // Need to give the merged map ownership of a fresh key string so
-            // it remains valid after per_root deinits its keys.
-            const new_key = try alloc.dupe(u8, kv.key_ptr.*);
-            // alloc is arena-backed: when the slug already exists the
-            // duplicate key is reclaimed at arena deinit, no manual free.
-            const gop = try map.getOrPut(new_key);
-            if (!gop.found_existing) {
-                gop.value_ptr.* = .empty;
+            // per_root keys are already "slug\x00sid"; the claim key appends
+            // the agent id so a parent and its subagents claim separately.
+            for (kv.value_ptr.*.items) |path| {
+                const base = std.fs.path.basename(path);
+                const agent_id = archive.subagentAgentId(base) orelse "";
+                const claim_key = try std.fmt.allocPrint(alloc, "{s}\x00{s}", .{ kv.key_ptr.*, agent_id });
+                if (claimed.contains(claim_key)) continue;
+                try claimed.put(claim_key, {});
+                const new_key = try alloc.dupe(u8, kv.key_ptr.*);
+                const gop = try map.getOrPut(new_key);
+                if (!gop.found_existing) gop.value_ptr.* = .empty;
+                try gop.value_ptr.*.append(alloc, path);
             }
-            try gop.value_ptr.*.appendSlice(alloc, kv.value_ptr.*.items);
+        }
+        if (root.from_archive and skipped_suffixes > 0) {
+            const message = try std.fmt.allocPrint(
+                alloc,
+                "walker: {s}: skipped {d} files with an unrecognized suffix\n",
+                .{ root_path, skipped_suffixes },
+            );
+            writeStderr(message);
         }
     }
     return map;
 }
 
-/// Single-root discovery (used by both the multi-root wrapper above and by
-/// callers in beacons.zig that want explicit single-root semantics for
-/// some operations).
-pub fn discoverOneRoot(alloc: Allocator, root_path: []const u8, earliest: f64) !FileMap {
+/// Single-root discovery.
+pub fn discoverOneRoot(alloc: Allocator, root_path: []const u8, earliest: f64, skipped_suffixes: *u64) !FileMap {
     if (is_windows) {
-        return discoverWindows(alloc, root_path, earliest);
+        return discoverWindows(alloc, root_path, earliest, skipped_suffixes);
     } else if (is_darwin) {
-        return discoverDarwin(alloc, root_path, earliest);
+        return discoverDarwin(alloc, root_path, earliest, skipped_suffixes);
     } else {
-        return discoverLinux(alloc, root_path, earliest);
+        return discoverLinux(alloc, root_path, earliest, skipped_suffixes);
     }
 }
 
 // Darwin directory walk uses libc opendir/readdir/closedir.
 // Mirrors the structure of discoverLinux below.
-fn discoverDarwin(alloc: Allocator, root_path: []const u8, earliest: f64) !FileMap {
+fn discoverDarwin(alloc: Allocator, root_path: []const u8, earliest: f64, skipped_suffixes: *u64) !FileMap {
     var map = FileMap.init(alloc);
     const root_z = try alloc.dupeZ(u8, root_path);
     defer alloc.free(root_z);
@@ -1058,12 +1181,12 @@ fn discoverDarwin(alloc: Allocator, root_path: []const u8, earliest: f64) !FileM
         if (slug[0] == '.' and (slug.len == 1 or (slug.len == 2 and slug[1] == '.'))) continue;
 
         const slug_dir = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ root_path, slug });
-        try scanSlugDirDarwin(alloc, &map, slug, slug_dir, earliest);
+        try scanSlugDirDarwin(alloc, &map, slug, slug_dir, earliest, skipped_suffixes);
     }
     return map;
 }
 
-fn scanSlugDirDarwin(alloc: Allocator, map: *FileMap, slug: []const u8, slug_dir: []const u8, earliest: f64) !void {
+fn scanSlugDirDarwin(alloc: Allocator, map: *FileMap, slug: []const u8, slug_dir: []const u8, earliest: f64, skipped_suffixes: *u64) !void {
     const slug_z = try alloc.dupeZ(u8, slug_dir);
     defer alloc.free(slug_z);
     const dir = std.c.opendir(slug_z) orelse return;
@@ -1076,23 +1199,24 @@ fn scanSlugDirDarwin(alloc: Allocator, map: *FileMap, slug: []const u8, slug_dir
         if (name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.'))) continue;
 
         if (ent.type == std.c.DT.REG or ent.type == std.c.DT.UNKNOWN) {
-            if (std.mem.endsWith(u8, name, ".jsonl")) {
-                const sid = name[0 .. name.len - 6];
+            if (archive.parentSessionId(name)) |sid| {
                 const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ slug_dir, name });
                 if (!mtimeOk(alloc, path, earliest)) {
                     alloc.free(path);
                     continue;
                 }
                 try addFile(alloc, map, slug, sid, path);
+            } else {
+                skipped_suffixes.* += 1;
             }
         } else if (ent.type == std.c.DT.DIR) {
             const subagents_dir = try std.fmt.allocPrint(alloc, "{s}/{s}/subagents", .{ slug_dir, name });
-            try scanSubagentsDarwin(alloc, map, slug, name, subagents_dir, earliest);
+            try scanSubagentsDarwin(alloc, map, slug, name, subagents_dir, earliest, skipped_suffixes);
         }
     }
 }
 
-fn scanSubagentsDarwin(alloc: Allocator, map: *FileMap, slug: []const u8, sid: []const u8, subagents_dir: []const u8, earliest: f64) !void {
+fn scanSubagentsDarwin(alloc: Allocator, map: *FileMap, slug: []const u8, sid: []const u8, subagents_dir: []const u8, earliest: f64, skipped_suffixes: *u64) !void {
     const sub_z = try alloc.dupeZ(u8, subagents_dir);
     defer alloc.free(sub_z);
     const dir = std.c.opendir(sub_z) orelse return;
@@ -1102,8 +1226,11 @@ fn scanSubagentsDarwin(alloc: Allocator, map: *FileMap, slug: []const u8, sid: [
         if (ent.type != std.c.DT.REG and ent.type != std.c.DT.UNKNOWN) continue;
         const name_ptr: [*:0]const u8 = @ptrCast(&ent.name);
         const aname = std.mem.span(name_ptr);
-        if (!std.mem.startsWith(u8, aname, "agent-")) continue;
-        if (!std.mem.endsWith(u8, aname, ".jsonl")) continue;
+        const agent_id = archive.subagentAgentId(aname) orelse {
+            skipped_suffixes.* += 1;
+            continue;
+        };
+        _ = agent_id;
 
         const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ subagents_dir, aname });
         if (!mtimeOk(alloc, path, earliest)) {
@@ -1114,7 +1241,7 @@ fn scanSubagentsDarwin(alloc: Allocator, map: *FileMap, slug: []const u8, sid: [
     }
 }
 
-fn discoverLinux(alloc: Allocator, root_path: []const u8, earliest: f64) !FileMap {
+fn discoverLinux(alloc: Allocator, root_path: []const u8, earliest: f64, skipped_suffixes: *u64) !FileMap {
     const linux = platform.linux;
     var map = FileMap.init(alloc);
 
@@ -1146,13 +1273,13 @@ fn discoverLinux(alloc: Allocator, root_path: []const u8, earliest: f64) !FileMa
             const slug_dir = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ root_path, slug });
 
             // Scan for parent .jsonl files and session dirs
-            try scanSlugDir(alloc, &map, slug, slug_dir, earliest);
+            try scanSlugDir(alloc, &map, slug, slug_dir, earliest, skipped_suffixes);
         }
     }
     return map;
 }
 
-fn scanSlugDir(alloc: Allocator, map: *FileMap, slug: []const u8, slug_dir: []const u8, earliest: f64) !void {
+fn scanSlugDir(alloc: Allocator, map: *FileMap, slug: []const u8, slug_dir: []const u8, earliest: f64, skipped_suffixes: *u64) !void {
     const linux = platform.linux;
     const slug_z = try alloc.dupeZ(u8, slug_dir);
     defer alloc.free(slug_z);
@@ -1177,25 +1304,26 @@ fn scanSlugDir(alloc: Allocator, map: *FileMap, slug: []const u8, slug_dir: []co
             if (name[0] == '.' and (name.len == 1 or (name.len == 2 and name[1] == '.'))) continue;
 
             if (entry.type == linux.DT.REG or entry.type == linux.DT.UNKNOWN) {
-                if (std.mem.endsWith(u8, name, ".jsonl")) {
-                    const sid = name[0 .. name.len - 6];
+                if (archive.parentSessionId(name)) |sid| {
                     const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ slug_dir, name });
                     if (!mtimeOk(alloc, path, earliest)) {
                         alloc.free(path);
                         continue;
                     }
                     try addFile(alloc, map, slug, sid, path);
+                } else {
+                    skipped_suffixes.* += 1;
                 }
             } else if (entry.type == linux.DT.DIR) {
                 const sid = name;
                 const subagents_dir = try std.fmt.allocPrint(alloc, "{s}/{s}/subagents", .{ slug_dir, sid });
-                try scanSubagents(alloc, map, slug, sid, subagents_dir, earliest);
+                try scanSubagents(alloc, map, slug, sid, subagents_dir, earliest, skipped_suffixes);
             }
         }
     }
 }
 
-fn scanSubagents(alloc: Allocator, map: *FileMap, slug: []const u8, sid: []const u8, subagents_dir: []const u8, earliest: f64) !void {
+fn scanSubagents(alloc: Allocator, map: *FileMap, slug: []const u8, sid: []const u8, subagents_dir: []const u8, earliest: f64, skipped_suffixes: *u64) !void {
     const linux = platform.linux;
     const sub_z = try alloc.dupeZ(u8, subagents_dir);
     defer alloc.free(sub_z);
@@ -1219,8 +1347,11 @@ fn scanSubagents(alloc: Allocator, map: *FileMap, slug: []const u8, sid: []const
             }
             const name_ptr: [*:0]const u8 = @ptrCast(&entry.name);
             const aname = std.mem.span(name_ptr);
-            if (!std.mem.startsWith(u8, aname, "agent-")) continue;
-            if (!std.mem.endsWith(u8, aname, ".jsonl")) continue;
+            const agent_id = archive.subagentAgentId(aname) orelse {
+                skipped_suffixes.* += 1;
+                continue;
+            };
+            _ = agent_id;
 
             const path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ subagents_dir, aname });
             if (!mtimeOk(alloc, path, earliest)) {
@@ -1232,7 +1363,7 @@ fn scanSubagents(alloc: Allocator, map: *FileMap, slug: []const u8, sid: []const
     }
 }
 
-fn discoverWindows(alloc: Allocator, root_path: []const u8, earliest: f64) !FileMap {
+fn discoverWindows(alloc: Allocator, root_path: []const u8, earliest: f64, skipped_suffixes: *u64) !FileMap {
     var map = FileMap.init(alloc);
 
     const slug_pattern = try std.fmt.allocPrint(alloc, "{s}\\*", .{root_path});
@@ -1248,19 +1379,23 @@ fn discoverWindows(alloc: Allocator, root_path: []const u8, earliest: f64) !File
         const slug_dir = try std.fmt.allocPrint(alloc, "{s}\\{s}", .{ root_path, slug });
 
         {
-            const pat = try std.fmt.allocPrint(alloc, "{s}\\*.jsonl", .{slug_dir});
+            const pat = try std.fmt.allocPrint(alloc, "{s}\\*", .{slug_dir});
             const entries = try findFilesWin(alloc, pat);
             for (entries.items) |e| {
                 if (e.dwFileAttributes & platform.FILE_ATTRIBUTE_DIRECTORY != 0) continue;
                 const name_w = std.mem.span(@as([*:0]const u16, @ptrCast(&e.cFileName)));
                 const name = try std.unicode.utf16LeToUtf8Alloc(alloc, name_w);
-                const sid = name[0 .. name.len - 6];
-                const path = try std.fmt.allocPrint(alloc, "{s}\\{s}", .{ slug_dir, name });
-                if (!mtimeOk(alloc, path, earliest)) {
-                    alloc.free(path);
-                    continue;
+                defer alloc.free(name);
+                if (archive.parentSessionId(name)) |sid| {
+                    const path = try std.fmt.allocPrint(alloc, "{s}\\{s}", .{ slug_dir, name });
+                    if (!mtimeOk(alloc, path, earliest)) {
+                        alloc.free(path);
+                        continue;
+                    }
+                    try addFile(alloc, &map, slug, sid, path);
+                } else {
+                    skipped_suffixes.* += 1;
                 }
-                try addFile(alloc, &map, slug, sid, path);
             }
         }
         {
@@ -1273,12 +1408,18 @@ fn discoverWindows(alloc: Allocator, root_path: []const u8, earliest: f64) !File
                 if (sid_w.len == 1 and sid_w[0] == '.') continue;
                 if (sid_w.len == 2 and sid_w[0] == '.' and sid_w[1] == '.') continue;
                 const sid = try std.unicode.utf16LeToUtf8Alloc(alloc, sid_w);
-                const sub_pat = try std.fmt.allocPrint(alloc, "{s}\\{s}\\subagents\\agent-*.jsonl", .{ slug_dir, sid });
+                const sub_pat = try std.fmt.allocPrint(alloc, "{s}\\{s}\\subagents\\agent-*", .{ slug_dir, sid });
                 const sub_entries = try findFilesWin(alloc, sub_pat);
                 for (sub_entries.items) |ae| {
                     if (ae.dwFileAttributes & platform.FILE_ATTRIBUTE_DIRECTORY != 0) continue;
                     const aname_w = std.mem.span(@as([*:0]const u16, @ptrCast(&ae.cFileName)));
                     const aname = try std.unicode.utf16LeToUtf8Alloc(alloc, aname_w);
+                    defer alloc.free(aname);
+                    const agent_id = archive.subagentAgentId(aname) orelse {
+                        skipped_suffixes.* += 1;
+                        continue;
+                    };
+                    _ = agent_id;
                     const path = try std.fmt.allocPrint(alloc, "{s}\\{s}\\subagents\\{s}", .{ slug_dir, sid, aname });
                     if (!mtimeOk(alloc, path, earliest)) {
                         alloc.free(path);
@@ -1420,7 +1561,7 @@ fn runCost(gpa: Allocator, args: [][]const u8) !void {
     const earliest = @min(pc, cli.win_start);
 
     const primary = if (cli.root) |r| try alloc.dupe(u8, r) else try defaultRoot(alloc);
-    const roots = try walker_roots.resolveRoots(alloc, primary, cli.extra_roots, cli.read_config);
+    const roots = try walker_roots.resolveRoots(alloc, primary, cli.root != null, cli.extra_roots, cli.archive_roots, cli.read_config);
 
     var grp_map = try discover(alloc, roots, earliest);
 
