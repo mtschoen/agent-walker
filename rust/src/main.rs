@@ -10,6 +10,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::transcript::{cost_for, discover_groups, Entry};
 
+mod archive;
 mod beacons;
 mod content;
 mod events;
