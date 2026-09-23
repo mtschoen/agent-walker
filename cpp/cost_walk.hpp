@@ -5,6 +5,7 @@
 #ifndef WALKER_COST_WALK_HPP
 #define WALKER_COST_WALK_HPP
 
+#include "archive.hpp"
 #include "common.hpp"
 #include "pricing.hpp"
 
@@ -45,9 +46,10 @@ inline GroupResult walk_group(const std::vector<fs::path> &paths,
   simdjson::ondemand::parser parser;
 
   for (const auto &path : paths) {
-    simdjson::padded_string data;
-    if (simdjson::padded_string::load(path.string()).get(data) != simdjson::SUCCESS)
+    auto loaded = walker::load_transcript(path);
+    if (!loaded)
       continue;
+    simdjson::padded_string &data = *loaded;
 
     std::string_view buffer(data);
     size_t pos = 0;

@@ -22,11 +22,13 @@
 //     inside the window. Bare-string content counts as a real user prompt.
 
 #include "beacons.hpp"
+#include "archive.hpp"
 #include "common.hpp"
 #include "discovery.hpp"
 #include "walker_roots.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -189,9 +191,10 @@ std::optional<Beacon> parse_beacon_body(std::string_view body) {
 // other errors. Used by beacons-latest (no need for user events).
 template <typename Callback>
 void walk_assistant_entries(const fs::path &path, Callback &&cb) {
-  sj::padded_string data;
-  if (sj::padded_string::load(path.string()).get(data) != sj::SUCCESS)
+  auto loaded = walker::load_transcript(path);
+  if (!loaded)
     return;
+  sj::padded_string &data = *loaded;
   sj::ondemand::parser parser;
 
   // Reused across lines: clearing keeps the heap capacity, so a transcript
@@ -347,9 +350,10 @@ struct EventRow {
 template <typename AssistantCb, typename EventCb>
 void walk_entries_for_history(const fs::path &path, AssistantCb &&assistant_cb,
                               EventCb &&event_cb) {
-  sj::padded_string data;
-  if (sj::padded_string::load(path.string()).get(data) != sj::SUCCESS)
+  auto loaded = walker::load_transcript(path);
+  if (!loaded)
     return;
+  sj::padded_string &data = *loaded;
   sj::ondemand::parser parser;
 
   // Reused across lines (see walk_assistant_entries) — clearing keeps the
@@ -625,6 +629,7 @@ struct LatestArgs {
   std::string session_id;
   std::optional<fs::path> projects_root;
   std::vector<fs::path> extra_projects_roots;
+  std::vector<fs::path> archive_roots;
   bool read_config = true;
   std::optional<double> now_unix;
 };
@@ -668,6 +673,11 @@ parse_latest_args(const std::vector<std::string> &args, std::string &err) {
       if (!v)
         return std::nullopt;
       out.extra_projects_roots.emplace_back(*v);
+    } else if (flag == "--archive-root") {
+      auto v = need_value(flag);
+      if (!v)
+        return std::nullopt;
+      out.archive_roots.emplace_back(*v);
     } else if (flag == "--no-config") {
       out.read_config = false;
     } else {
@@ -688,6 +698,7 @@ struct HistoryArgs {
   double win_start_unix = 0.0;
   std::optional<fs::path> projects_root;
   std::vector<fs::path> extra_projects_roots;
+  std::vector<fs::path> archive_roots;
   bool read_config = true;
   std::optional<double> now_unix;
 };
@@ -745,6 +756,11 @@ parse_history_args(const std::vector<std::string> &args, std::string &err) {
       if (!v)
         return std::nullopt;
       out.extra_projects_roots.emplace_back(*v);
+    } else if (flag == "--archive-root") {
+      auto v = need_value(flag);
+      if (!v)
+        return std::nullopt;
+      out.archive_roots.emplace_back(*v);
     } else if (flag == "--no-config") {
       out.read_config = false;
     } else {
@@ -791,26 +807,30 @@ int run_latest(const std::vector<std::string> &args) {
     return 2;
   }
   LatestArgs parsed = std::move(*parsed_opt);
-  fs::path primary =
-      parsed.projects_root.value_or(walker::default_projects_root());
-  std::vector<fs::path> roots = walker::resolve_roots(
-      primary, parsed.extra_projects_roots, parsed.read_config);
+  std::vector<walker::ResolvedRoot> roots = walker::resolve_roots(
+      parsed.projects_root, parsed.extra_projects_roots, parsed.archive_roots,
+      parsed.read_config);
   double now_unix = parsed.now_unix.value_or(walker::current_unix());
 
   std::vector<fs::path> paths;
-  std::string parent_filename = parsed.session_id + ".jsonl";
-  std::string subagent_filename = "agent-" + parsed.session_id + ".jsonl";
+  const std::array<std::string, 2> parent_filenames = {
+      parsed.session_id + ".jsonl", parsed.session_id + ".jsonl.zst"};
+  const std::array<std::string, 2> subagent_filenames = {
+      "agent-" + parsed.session_id + ".jsonl",
+      "agent-" + parsed.session_id + ".jsonl.zst"};
 
-  for (const fs::path &root : roots) {
+  for (const walker::ResolvedRoot &resolved : roots) {
     // resolve_roots only returns existing directories; if one vanishes in a
     // race, directory_iterator(root, ec) yields an empty range.
     std::error_code ec;
-    for (auto &slug_entry : fs::directory_iterator(root, ec)) {
+    for (auto &slug_entry : fs::directory_iterator(resolved.path, ec)) {
       if (!slug_entry.is_directory())
         continue;
-      fs::path candidate = slug_entry.path() / parent_filename;
-      if (fs::is_regular_file(candidate, ec))
-        paths.push_back(candidate);
+      for (const std::string &parent_filename : parent_filenames) {
+        fs::path candidate = slug_entry.path() / parent_filename;
+        if (fs::is_regular_file(candidate, ec))
+          paths.push_back(candidate);
+      }
 
       for (auto &session_entry :
            fs::directory_iterator(slug_entry.path(), ec)) {
@@ -819,9 +839,11 @@ int run_latest(const std::vector<std::string> &args) {
         fs::path subdir = session_entry.path() / "subagents";
         if (!fs::is_directory(subdir, ec))
           continue;
-        fs::path scan = subdir / subagent_filename;
-        if (fs::is_regular_file(scan, ec))
-          paths.push_back(scan);
+        for (const std::string &subagent_filename : subagent_filenames) {
+          fs::path scan = subdir / subagent_filename;
+          if (fs::is_regular_file(scan, ec))
+            paths.push_back(scan);
+        }
       }
     }
   }
@@ -909,10 +931,9 @@ int run_history(const std::vector<std::string> &args) {
   double now_unix = parsed.now_unix.value_or(walker::current_unix());
   double period_cutoff = now_unix - static_cast<double>(parsed.period_seconds);
   double window_lo = std::max(period_cutoff, parsed.win_start_unix);
-  fs::path primary =
-      parsed.projects_root.value_or(walker::default_projects_root());
-  std::vector<fs::path> roots = walker::resolve_roots(
-      primary, parsed.extra_projects_roots, parsed.read_config);
+  std::vector<walker::ResolvedRoot> roots = walker::resolve_roots(
+      parsed.projects_root, parsed.extra_projects_roots, parsed.archive_roots,
+      parsed.read_config);
   // Shared discovery (discovery.hpp) with the mtime prune disabled: history
   // pairing must see every transcript regardless of age.
   walker::GroupMap groups =
