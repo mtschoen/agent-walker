@@ -3,8 +3,7 @@
 
 use chrono::DateTime;
 use rayon::prelude::*;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -175,11 +174,10 @@ fn walk_group(paths: &[PathBuf], period_cutoff: f64, win_start_unix: f64) -> Gro
     // a multi-hundred-MB fleet. read_line() retains capacity across clear().
     let mut line = String::with_capacity(8 * 1024);
     for path in paths {
-        let file = match File::open(path) {
-            Ok(f) => f,
-            Err(_) => continue,
+        let mut reader = match crate::archive::open_transcript(path) {
+            Some(reader) => reader,
+            None => continue,
         };
-        let mut reader = BufReader::new(file);
         loop {
             line.clear();
             match reader.read_line(&mut line) {
@@ -309,9 +307,8 @@ fn run_cost(args: &[String]) {
         &[],
         parsed.read_config,
     );
-    let root_paths: Vec<PathBuf> = roots.iter().map(|root| root.path.clone()).collect();
 
-    let groups = discover_groups(&root_paths, earliest);
+    let groups = discover_groups(&roots, earliest);
     let total_files: usize = groups.values().map(|v| v.len()).sum();
     let total_groups = groups.len();
 
@@ -586,5 +583,31 @@ mod tests {
         };
         let t: (f64, f64) = g.into();
         assert_eq!(t, (1.0, 2.0));
+    }
+
+    #[test]
+    fn walk_group_reads_a_compressed_transcript() {
+        let directory = tempdir_path("walk-group-zst");
+        let path = directory.join("session.jsonl.zst");
+        let body = concat!(
+            r#"{"timestamp":"2025-01-01T00:00:01Z","message":{"role":"assistant","id":"z1","model":"sonnet","usage":{"input_tokens":1000000}}}"#,
+            "\n"
+        );
+        fs::write(&path, zstd::encode_all(body.as_bytes(), 10).unwrap()).unwrap();
+        let result = walk_group(&[path], 0.0, 0.0);
+        // 1M input tokens at the generic sonnet rate ($3.00 / MTok).
+        assert!((result.trailing - 3.0).abs() < 1e-6);
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn walk_group_skips_a_corrupt_compressed_transcript() {
+        let directory = tempdir_path("walk-group-corrupt");
+        let path = directory.join("session.jsonl.zst");
+        fs::write(&path, b"this is not a zstd frame").unwrap();
+        let result = walk_group(&[path], 0.0, 0.0);
+        assert_eq!(result.trailing, 0.0);
+        assert_eq!(result.window, 0.0);
+        let _ = fs::remove_dir_all(&directory);
     }
 }

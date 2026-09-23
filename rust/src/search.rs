@@ -247,13 +247,15 @@ fn scan_file(
     prefilter: Option<&PreFilter>,
 ) -> Vec<ScanMessage> {
     let mut out: Vec<ScanMessage> = Vec::new();
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => return out,
+    let data = match crate::archive::read_transcript(path) {
+        Some(data) => data,
+        None => return out,
     };
-    // File-level literal pre-filter: when the pattern is a plain literal whose
-    // bytes survive JSON string-escaping unchanged, a transcript whose raw
-    // bytes never contain it cannot produce a hit; skip all JSON parsing.
+    // File-level literal pre-filter: runs on the inflated plaintext bytes, so
+    // a compressed .jsonl.zst is searched after decompression just like .jsonl.
+    // When the pattern is a plain literal whose bytes survive JSON string-escaping
+    // unchanged, a transcript whose raw bytes never contain it cannot produce a hit;
+    // skip all JSON parsing.
     // Context turns are only emitted for files WITH hits, so whole-file
     // skipping cannot change any output.
     if let Some(pf) = prefilter {
@@ -419,11 +421,13 @@ fn discover_files(
     cwd_slug: Option<&str>,
 ) -> Vec<DiscoveredFile> {
     let mut files: Vec<DiscoveredFile> = Vec::new();
+    let mut claimed: HashSet<crate::transcript::SessionKey> = HashSet::new();
     for root in roots {
         if root.format == TranscriptFormat::Codex {
             discover_codex_files(root, since, cwd_slug, &mut files);
             continue;
         }
+        let mut skipped_suffixes: u64 = 0;
         let host_root = root.path.display().to_string();
         let slug_entries = match read_dir(&root.path) {
             Ok(e) => e,
@@ -452,17 +456,21 @@ fn discover_files(
                 if file_type.is_file() {
                     let name = entry.file_name();
                     let name = name.to_string_lossy();
-                    let stem = match name.strip_suffix(".jsonl") {
-                        Some(s) => s,
-                        None => continue,
+                    let Some(session_id) = crate::archive::parent_session_id(&name) else {
+                        skipped_suffixes += 1;
+                        continue;
                     };
                     if mtime_pruned(&entry, since) {
+                        continue;
+                    }
+                    let key = (slug.clone(), session_id.to_string(), None);
+                    if !claimed.insert(key) {
                         continue;
                     }
                     files.push(DiscoveredFile {
                         path: entry.path(),
                         slug: slug.clone(),
-                        session_id: stem.to_string(),
+                        session_id: session_id.to_string(),
                         host_root: host_root.clone(),
                         format: TranscriptFormat::ClaudeCode,
                     });
@@ -478,10 +486,19 @@ fn discover_files(
                         }
                         let sub_name = sub.file_name();
                         let sub_name = sub_name.to_string_lossy();
-                        if !sub_name.starts_with("agent-") || !sub_name.ends_with(".jsonl") {
+                        let Some(agent_id) = crate::archive::subagent_agent_id(&sub_name) else {
+                            skipped_suffixes += 1;
+                            continue;
+                        };
+                        if mtime_pruned(&sub, since) {
                             continue;
                         }
-                        if mtime_pruned(&sub, since) {
+                        let key = (
+                            slug.clone(),
+                            sid.clone(),
+                            Some(agent_id.to_string()),
+                        );
+                        if !claimed.insert(key) {
                             continue;
                         }
                         files.push(DiscoveredFile {
@@ -494,6 +511,13 @@ fn discover_files(
                     }
                 }
             }
+        }
+        if root.from_archive && skipped_suffixes > 0 {
+            eprintln!(
+                "walker: {}: skipped {} files with an unrecognized suffix",
+                root.path.display(),
+                skipped_suffixes
+            );
         }
     }
     files

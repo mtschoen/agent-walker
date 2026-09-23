@@ -5,8 +5,7 @@
 
 use rayon::prelude::*;
 use serde::Serialize;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use crate::transcript::{cost_for, discover_groups, Entry};
@@ -129,11 +128,10 @@ fn walk_group_events(
     // Reused line buffer; see walk_group in main.rs for the rationale.
     let mut line = String::with_capacity(8 * 1024);
     for path in paths {
-        let file = match File::open(path) {
-            Ok(f) => f,
-            Err(_) => continue,
+        let mut reader = match crate::archive::open_transcript(path) {
+            Some(reader) => reader,
+            None => continue,
         };
-        let mut reader = BufReader::new(file);
         loop {
             line.clear();
             match reader.read_line(&mut line) {
@@ -224,9 +222,8 @@ pub(crate) fn run(raw: &[String]) -> i32 {
         return 0;
     }
 
-    let root_paths: Vec<PathBuf> = roots.iter().map(|root| root.path.clone()).collect();
     // discover_groups applies the mtime prune using the same cutoff.
-    let groups = discover_groups(&root_paths, cutoff);
+    let groups = discover_groups(&roots, cutoff);
 
     // Convert to an owned vec of (key, paths) so rayon can par_iter over it.
     let group_list: Vec<((String, String), Vec<PathBuf>)> = groups.into_iter().collect();
