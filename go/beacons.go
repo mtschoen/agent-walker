@@ -153,7 +153,7 @@ type event struct {
 }
 
 func findLatestInPath(path string) (*beaconWithTimestamp, bool) {
-	file, err := os.Open(path)
+	file, err := openTranscript(path)
 	if err != nil {
 		return nil, false
 	}
@@ -225,7 +225,7 @@ type sessionEvents struct {
 // concatenate across the session group and sort once.
 func collectSessionEventsInPath(path string) sessionEvents {
 	var out sessionEvents
-	file, err := os.Open(path)
+	file, err := openTranscript(path)
 	if err != nil {
 		return out
 	}
@@ -312,6 +312,7 @@ type latestArguments struct {
 	sessionID          string
 	projectsRoot       string
 	extraProjectsRoots []string
+	archiveRoots       []string
 	readConfig         bool
 	nowUnix            float64
 	nowSet             bool
@@ -340,6 +341,12 @@ func parseLatestArguments(args []string) (latestArguments, error) {
 				return parsed, fmt.Errorf("--extra-projects-root needs a value")
 			}
 			parsed.extraProjectsRoots = append(parsed.extraProjectsRoots, args[i+1])
+			i += 2
+		case "--archive-root":
+			if i+1 >= len(args) {
+				return parsed, fmt.Errorf("--archive-root needs a value")
+			}
+			parsed.archiveRoots = append(parsed.archiveRoots, args[i+1])
 			i += 2
 		case "--no-config":
 			parsed.readConfig = false
@@ -376,11 +383,15 @@ func parseLatestArguments(args []string) (latestArguments, error) {
 // listing each slug dir's contents the way filepath.Glob does, which is the
 // bulk of the win on a large fleet. Result order is irrelevant: the caller
 // keeps the highest-timestamp beacon.
-func discoverLatestPaths(roots []string, sessionID string) []string {
-	parentName := sessionID + ".jsonl"
-	subName := "agent-" + sessionID + ".jsonl"
+func discoverLatestPaths(roots []resolvedRoot, sessionID string) []string {
+	parentNames := []string{sessionID + ".jsonl", sessionID + ".jsonl.zst"}
+	subNames := []string{
+		"agent-" + sessionID + ".jsonl",
+		"agent-" + sessionID + ".jsonl.zst",
+	}
 	var paths []string
-	for _, root := range roots {
+	for _, resolved := range roots {
+		root := resolved.Path
 		slugEntries, err := os.ReadDir(root)
 		if err != nil {
 			continue
@@ -390,10 +401,12 @@ func discoverLatestPaths(roots []string, sessionID string) []string {
 				continue
 			}
 			slugPath := filepath.Join(root, slugEntry.Name())
-			// Parent transcript: <root>/<slug>/<session_id>.jsonl
-			parent := filepath.Join(slugPath, parentName)
-			if info, err := os.Stat(parent); err == nil && !info.IsDir() {
-				paths = append(paths, parent)
+			// Parent transcript: <root>/<slug>/<session_id>.jsonl[.zst]
+			for _, parentName := range parentNames {
+				parent := filepath.Join(slugPath, parentName)
+				if info, err := os.Stat(parent); err == nil && !info.IsDir() {
+					paths = append(paths, parent)
+				}
 			}
 			// Subagent transcripts live one level deeper, under each session
 			// directory's subagents/ folder.
@@ -405,9 +418,11 @@ func discoverLatestPaths(roots []string, sessionID string) []string {
 				if !sessionEntry.IsDir() {
 					continue
 				}
-				sub := filepath.Join(slugPath, sessionEntry.Name(), "subagents", subName)
-				if info, err := os.Stat(sub); err == nil && !info.IsDir() {
-					paths = append(paths, sub)
+				for _, subName := range subNames {
+					sub := filepath.Join(slugPath, sessionEntry.Name(), "subagents", subName)
+					if info, err := os.Stat(sub); err == nil && !info.IsDir() {
+						paths = append(paths, sub)
+					}
 				}
 			}
 		}
@@ -422,6 +437,7 @@ func runBeaconsLatest(args []string) {
 		fmt.Fprintf(os.Stderr, "walker: beacons-latest: %v\n", err)
 		os.Exit(2)
 	}
+	primaryExplicit := parsed.projectsRoot != ""
 	primary := parsed.projectsRoot
 	if primary == "" {
 		primary = defaultProjectsRoot()
@@ -431,7 +447,8 @@ func runBeaconsLatest(args []string) {
 		nowUnix = float64(time.Now().UnixNano()) / 1e9
 	}
 
-	roots := ResolveRoots(primary, parsed.extraProjectsRoots, parsed.readConfig)
+	roots := ResolveRoots(primary, primaryExplicit, parsed.extraProjectsRoots,
+		parsed.archiveRoots, parsed.readConfig)
 	paths := discoverLatestPaths(roots, parsed.sessionID)
 
 	var best *beaconWithTimestamp
@@ -473,6 +490,7 @@ type historyArguments struct {
 	winStartUnix       float64
 	projectsRoot       string
 	extraProjectsRoots []string
+	archiveRoots       []string
 	readConfig         bool
 	nowUnix            float64
 	nowSet             bool
@@ -518,6 +536,12 @@ func parseHistoryArguments(args []string) (historyArguments, error) {
 			}
 			parsed.extraProjectsRoots = append(parsed.extraProjectsRoots, args[i+1])
 			i += 2
+		case "--archive-root":
+			if i+1 >= len(args) {
+				return parsed, fmt.Errorf("--archive-root needs a value")
+			}
+			parsed.archiveRoots = append(parsed.archiveRoots, args[i+1])
+			i += 2
 		case "--no-config":
 			parsed.readConfig = false
 			i++
@@ -545,27 +569,13 @@ func parseHistoryArguments(args []string) (historyArguments, error) {
 // discoverHistoryGroups groups transcripts by (slug, session_id) across all
 // roots without the mtime filter -- beacon entries can sit deep in a long
 // transcript. Same (slug, session_id) on two roots merges into one group.
-func discoverHistoryGroups(roots []string) map[groupKey][]string {
+func discoverHistoryGroups(roots []resolvedRoot) map[groupKey][]string {
 	groups := make(map[groupKey][]string)
+	claimed := make(map[string]struct{})
 
-	for _, root := range roots {
-		parentGlob := filepath.Join(root, "*", "*.jsonl")
-		parentMatches, err := filepath.Glob(parentGlob)
-		if err == nil {
-			for _, path := range parentMatches {
-				// Glob matches directories named *.jsonl too; parents must
-				// be regular files (SPEC Discovery).
-				info, statErr := os.Stat(path)
-				if statErr != nil || !info.Mode().IsRegular() {
-					continue
-				}
-				slug := filepath.Base(filepath.Dir(path))
-				sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
-				key := groupKey{slug: slug, sessionID: sessionID}
-				groups[key] = append(groups[key], path)
-			}
-		}
-
+	for _, resolved := range roots {
+		root := resolved.Path
+		skippedSuffixes := 0
 		slugEntries, err := os.ReadDir(root)
 		if err != nil {
 			continue
@@ -574,33 +584,67 @@ func discoverHistoryGroups(roots []string) map[groupKey][]string {
 			if !slugEntry.IsDir() {
 				continue
 			}
-			slugPath := filepath.Join(root, slugEntry.Name())
-			sessionEntries, err := os.ReadDir(slugPath)
+			slug := slugEntry.Name()
+			slugDir := filepath.Join(root, slug)
+			entries, err := os.ReadDir(slugDir)
 			if err != nil {
 				continue
 			}
-			for _, sessionEntry := range sessionEntries {
-				if !sessionEntry.IsDir() {
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					sessionID, ok := parentSessionID(entry.Name())
+					if !ok {
+						skippedSuffixes++
+						continue
+					}
+					path := filepath.Join(slugDir, entry.Name())
+					info, err := entry.Info()
+					if err != nil || !info.Mode().IsRegular() {
+						continue
+					}
+					key := slug + "\x00" + sessionID + "\x00"
+					if _, exists := claimed[key]; exists {
+						continue
+					}
+					claimed[key] = struct{}{}
+					group := groupKey{slug: slug, sessionID: sessionID}
+					groups[group] = append(groups[group], path)
 					continue
 				}
-				subagentsDir := filepath.Join(slugPath, sessionEntry.Name(), "subagents")
+				sessionID := entry.Name()
+				subagentsDir := filepath.Join(slugDir, sessionID, "subagents")
 				subEntries, err := os.ReadDir(subagentsDir)
 				if err != nil {
 					continue
 				}
 				for _, subEntry := range subEntries {
-					name := subEntry.Name()
-					if subEntry.IsDir() || !strings.HasPrefix(name, "agent-") || !strings.HasSuffix(name, ".jsonl") {
+					if subEntry.IsDir() {
 						continue
 					}
-					path := filepath.Join(subagentsDir, name)
-					key := groupKey{
-						slug:      slugEntry.Name(),
-						sessionID: sessionEntry.Name(),
+					agentID, ok := subagentAgentID(subEntry.Name())
+					if !ok {
+						skippedSuffixes++
+						continue
 					}
-					groups[key] = append(groups[key], path)
+					info, err := subEntry.Info()
+					if err != nil || !info.Mode().IsRegular() {
+						continue
+					}
+					key := slug + "\x00" + sessionID + "\x00" + agentID
+					if _, exists := claimed[key]; exists {
+						continue
+					}
+					claimed[key] = struct{}{}
+					group := groupKey{slug: slug, sessionID: sessionID}
+					groups[group] = append(groups[group],
+						filepath.Join(subagentsDir, subEntry.Name()))
 				}
 			}
+		}
+		if resolved.FromArchive && skippedSuffixes > 0 {
+			fmt.Fprintf(os.Stderr,
+				"walker: %s: skipped %d files with an unrecognized suffix\n",
+				root, skippedSuffixes)
 		}
 	}
 
@@ -654,11 +698,13 @@ func runBeaconsHistory(args []string) {
 	if parsed.winStartUnix > windowLo {
 		windowLo = parsed.winStartUnix
 	}
+	primaryExplicit := parsed.projectsRoot != ""
 	primary := parsed.projectsRoot
 	if primary == "" {
 		primary = defaultProjectsRoot()
 	}
-	roots := ResolveRoots(primary, parsed.extraProjectsRoots, parsed.readConfig)
+	roots := ResolveRoots(primary, primaryExplicit, parsed.extraProjectsRoots,
+		parsed.archiveRoots, parsed.readConfig)
 
 	groups := discoverHistoryGroups(roots)
 	sessionCount := uint64(len(groups))

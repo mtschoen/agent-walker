@@ -35,13 +35,20 @@ func WalkerConfigPath() string {
 type transcriptFormat string
 
 const (
-	transcriptFormatClaudeCode transcriptFormat = "claude-code"
-	transcriptFormatCodex      transcriptFormat = "codex"
+	transcriptFormatClaudeCode    transcriptFormat = "claude-code"
+	transcriptFormatCodex         transcriptFormat = "codex"
+	transcriptFormatClaudeArchive transcriptFormat = "claude-archive"
 )
 
 type transcriptRoot struct {
-	Path   string
-	Format transcriptFormat
+	Path        string
+	Format      transcriptFormat
+	FromArchive bool
+}
+
+type resolvedRoot struct {
+	Path        string
+	FromArchive bool
 }
 
 type walkerConfig struct {
@@ -108,11 +115,58 @@ func readTaggedExtraRootsFromConfig() []transcriptRoot {
 		if err := json.Unmarshal(value, &tagged); err != nil || tagged.Path == "" {
 			continue
 		}
-		if tagged.Format == transcriptFormatClaudeCode || tagged.Format == transcriptFormatCodex {
+		if tagged.Format == transcriptFormatClaudeCode || tagged.Format == transcriptFormatCodex || tagged.Format == transcriptFormatClaudeArchive {
 			extras = append(extras, transcriptRoot{Path: tagged.Path, Format: tagged.Format})
 		}
 	}
 	return extras
+}
+
+type configRoots struct {
+	claudeCode []string
+	archives   []string
+	tagged     []transcriptRoot
+}
+
+func configRootsByFormat(readConfig bool) configRoots {
+	var split configRoots
+	if !readConfig {
+		return split
+	}
+	for _, root := range readTaggedExtraRootsFromConfig() {
+		switch root.Format {
+		case transcriptFormatClaudeCode:
+			split.claudeCode = append(split.claudeCode, root.Path)
+		case transcriptFormatClaudeArchive:
+			split.archives = append(split.archives, root.Path)
+		}
+		split.tagged = append(split.tagged, root)
+	}
+	return split
+}
+
+// Archive roots in SPEC effective order (implicit, CLI, config), each already
+// expanded into its <archive>/<hostname> claude-code roots. The implicit root
+// is silent when absent; a CLI or config root that is not a directory gets the
+// standard diagnostic.
+func archiveRootsInEffectiveOrder(primaryExplicit bool, cliArchives, configArchives []string) []string {
+	var expanded []string
+	if !primaryExplicit {
+		implicit := defaultArchiveRoot()
+		if info, err := os.Stat(implicit); err == nil && info.IsDir() {
+			expanded = append(expanded, expandArchiveRoot(implicit)...)
+		}
+	}
+	for _, archivePath := range append(append([]string{}, cliArchives...), configArchives...) {
+		info, err := os.Stat(archivePath)
+		if err != nil || !info.IsDir() {
+			fmt.Fprintf(os.Stderr,
+				"walker: archive root not a directory, skipping: %s\n", archivePath)
+			continue
+		}
+		expanded = append(expanded, expandArchiveRoot(archivePath)...)
+	}
+	return expanded
 }
 
 func defaultCodexRoot() string {
@@ -125,29 +179,36 @@ func defaultCodexRoot() string {
 // ResolveSearchRoots preserves the format associated with every search root.
 // CLI extras and string config entries are Claude Code roots. The default
 // Codex sessions root is included only when --projects-root was not explicit.
-func ResolveSearchRoots(primary string, primaryExplicit bool, cliExtras []string, readConfig bool) []transcriptRoot {
+func ResolveSearchRoots(primary string, primaryExplicit bool, cliExtras, cliArchives []string, readConfig bool) []transcriptRoot {
 	type candidate struct {
 		root            transcriptRoot
 		diagnoseInvalid bool
 	}
+	config := configRootsByFormat(readConfig)
 	combined := []candidate{{
-		root: transcriptRoot{Path: primary, Format: transcriptFormatClaudeCode},
+		root: transcriptRoot{Path: primary, Format: transcriptFormatClaudeCode, FromArchive: false},
 	}}
 	if !primaryExplicit {
 		combined = append(combined, candidate{
-			root: transcriptRoot{Path: defaultCodexRoot(), Format: transcriptFormatCodex},
+			root: transcriptRoot{Path: defaultCodexRoot(), Format: transcriptFormatCodex, FromArchive: false},
 		})
 	}
 	for _, path := range cliExtras {
 		combined = append(combined, candidate{
-			root:            transcriptRoot{Path: path, Format: transcriptFormatClaudeCode},
+			root:            transcriptRoot{Path: path, Format: transcriptFormatClaudeCode, FromArchive: false},
 			diagnoseInvalid: true,
 		})
 	}
-	if readConfig {
-		for _, root := range readTaggedExtraRootsFromConfig() {
+	for _, root := range config.tagged {
+		if root.Format != transcriptFormatClaudeArchive {
 			combined = append(combined, candidate{root: root, diagnoseInvalid: true})
 		}
+	}
+	for _, hostPath := range archiveRootsInEffectiveOrder(primaryExplicit, cliArchives, config.archives) {
+		combined = append(combined, candidate{
+			root:            transcriptRoot{Path: hostPath, Format: transcriptFormatClaudeCode, FromArchive: true},
+			diagnoseInvalid: false,
+		})
 	}
 
 	var result []transcriptRoot
@@ -177,35 +238,34 @@ func ResolveSearchRoots(primary string, primaryExplicit bool, cliExtras []string
 
 // ResolveRoots assembles the effective root list:
 //
-//	[primary] + cliExtras + (config extras if readConfig)
+//	[primary] + cliExtras + config extras + archive roots
 //	-> dedup via canonical (EvalSymlinks, fall back to Clean)
 //	-> filter to existing directories
 //
 // Primary is allowed to not exist (empty-fleet case) and emits no diagnostic
 // in that scenario. Extras that fail the existence/directory check are
 // skipped with a stderr diagnostic matching cpp/rust output.
-func ResolveRoots(primary string, cliExtras []string, readConfig bool) []string {
+func ResolveRoots(primary string, primaryExplicit bool, cliExtras, cliArchives []string, readConfig bool) []resolvedRoot {
 	type candidate struct {
-		path      string
-		isPrimary bool
+		path        string
+		isPrimary   bool
+		fromArchive bool
 	}
-	combined := []candidate{{path: primary, isPrimary: true}}
+	config := configRootsByFormat(readConfig)
+	combined := []candidate{{path: primary, isPrimary: true, fromArchive: false}}
 	for _, p := range cliExtras {
-		combined = append(combined, candidate{path: p})
+		combined = append(combined, candidate{path: p, fromArchive: false})
 	}
-	if readConfig {
-		for _, p := range ReadExtraRootsFromConfig() {
-			combined = append(combined, candidate{path: p})
-		}
+	for _, p := range config.claudeCode {
+		combined = append(combined, candidate{path: p, fromArchive: false})
+	}
+	for _, p := range archiveRootsInEffectiveOrder(primaryExplicit, cliArchives, config.archives) {
+		combined = append(combined, candidate{path: p, fromArchive: true})
 	}
 
-	var result []string
+	var result []resolvedRoot
 	seen := make(map[string]struct{})
 	for _, c := range combined {
-		// Dedup key per SPEC "Resolution": canonical form, falling back to
-		// the lexically-normalized path when canonicalization fails (e.g.
-		// a nonexistent extra). Canonicalize BEFORE the existence filter,
-		// matching rust/cpp, so the fallback is reachable.
 		canonical, err := filepath.EvalSymlinks(c.path)
 		if err != nil {
 			canonical = filepath.Clean(c.path)
@@ -222,11 +282,7 @@ func ResolveRoots(primary string, cliExtras []string, readConfig bool) []string 
 			}
 			continue
 		}
-		// Canonical is the dedup key ONLY; walk the original path (SPEC
-		// "Roots": canonicalizing a mapped network drive can yield a
-		// \\?\UNC form some walkers cannot enumerate, and it leaks into
-		// host_root output).
-		result = append(result, c.path)
+		result = append(result, resolvedRoot{Path: c.path, FromArchive: c.fromArchive})
 	}
 	return result
 }

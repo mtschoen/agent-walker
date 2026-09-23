@@ -33,6 +33,7 @@ type eventsArguments struct {
 	nowUnix            float64
 	projectsRoot       string
 	extraProjectsRoots []string
+	archiveRoots       []string
 	readConfig         bool
 }
 
@@ -89,6 +90,12 @@ func parseEventsArguments(rawArgs []string) (eventsArguments, error) {
 			}
 			i++
 			out.extraProjectsRoots = append(out.extraProjectsRoots, rawArgs[i])
+		case "--archive-root":
+			if i+1 >= len(rawArgs) {
+				return eventsArguments{}, fmt.Errorf("--archive-root needs a value")
+			}
+			i++
+			out.archiveRoots = append(out.archiveRoots, rawArgs[i])
 		case "--no-config":
 			out.readConfig = false
 		case "--version":
@@ -110,9 +117,6 @@ func parseEventsArguments(rawArgs []string) (eventsArguments, error) {
 	// predicate to ts >= now - period, per SPEC §events).
 	if !winStartSet {
 		out.winStartUnix = out.nowUnix - float64(out.periodSeconds)
-	}
-	if out.projectsRoot == "" {
-		out.projectsRoot = defaultProjectsRoot()
 	}
 
 	return out, nil
@@ -136,7 +140,7 @@ func walkGroupEvents(paths []string, slug, sessionID string, cutoff float64) []e
 	seenIDs := make(map[string]struct{})
 
 	for _, path := range paths {
-		file, err := os.Open(path)
+		file, err := openTranscript(path)
 		if err != nil {
 			continue
 		}
@@ -206,7 +210,13 @@ func runEvents(rawArgs []string) {
 	periodCutoff := args.nowUnix - float64(args.periodSeconds)
 	cutoff := math.Min(periodCutoff, args.winStartUnix)
 
-	roots := ResolveRoots(args.projectsRoot, args.extraProjectsRoots, args.readConfig)
+	primaryExplicit := args.projectsRoot != ""
+	primary := args.projectsRoot
+	if primary == "" {
+		primary = defaultProjectsRoot()
+	}
+	roots := ResolveRoots(primary, primaryExplicit, args.extraProjectsRoots,
+		args.archiveRoots, args.readConfig)
 	if len(roots) == 0 {
 		// Primary root doesn't exist — emit nothing, exit 0 (matches cost-mode
 		// empty-fleet behavior).

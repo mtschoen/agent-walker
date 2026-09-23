@@ -207,7 +207,7 @@ func searchParseCodexEvent(root searchRootRecord, lineNumber uint32) (searchMsg,
 }
 
 func searchScanFile(path string, format transcriptFormat, includeQueueOps, includeToolBlocks bool) []searchMsg {
-	file, err := os.Open(path)
+	file, err := openTranscript(path)
 	if err != nil {
 		return nil
 	}
@@ -319,6 +319,7 @@ type searchFileInfo struct {
 
 func searchDiscoverFiles(roots []transcriptRoot, since *float64, cwdSlug *string) []searchFileInfo {
 	var out []searchFileInfo
+	claimed := make(map[string]struct{})
 	earliestTime := time.Time{}
 	if since != nil {
 		earliestTime = time.Unix(0, int64(*since*1e9))
@@ -328,6 +329,7 @@ func searchDiscoverFiles(roots []transcriptRoot, since *float64, cwdSlug *string
 			out = append(out, searchDiscoverCodexFiles(root, since, earliestTime, cwdSlug)...)
 			continue
 		}
+		skippedSuffixes := 0
 		entries, err := os.ReadDir(root.Path)
 		if err != nil {
 			continue
@@ -347,7 +349,7 @@ func searchDiscoverFiles(roots []transcriptRoot, since *float64, cwdSlug *string
 			}
 			for _, fEnt := range dirEntries {
 				if fEnt.IsDir() {
-					// Subagents: <slug>/<session>/subagents/agent-*.jsonl, per
+					// Subagents: <slug>/<session>/subagents/agent-*.jsonl[.zst], per
 					// SPEC "Discovery" under search. session_id is the
 					// enclosing session dir name (the parent session), so
 					// subagent hits group with the parent in sessions_matched.
@@ -361,8 +363,9 @@ func searchDiscoverFiles(roots []transcriptRoot, since *float64, cwdSlug *string
 						if sEnt.IsDir() {
 							continue
 						}
-						name := sEnt.Name()
-						if !strings.HasPrefix(name, "agent-") || !strings.HasSuffix(name, ".jsonl") {
+						agentID, ok := subagentAgentID(sEnt.Name())
+						if !ok {
+							skippedSuffixes++
 							continue
 						}
 						if since != nil {
@@ -371,8 +374,13 @@ func searchDiscoverFiles(roots []transcriptRoot, since *float64, cwdSlug *string
 								continue
 							}
 						}
+						key := slug + "\x00" + sid + "\x00" + agentID
+						if _, exists := claimed[key]; exists {
+							continue
+						}
+						claimed[key] = struct{}{}
 						out = append(out, searchFileInfo{
-							Path:      filepath.Join(subDir, name),
+							Path:      filepath.Join(subDir, sEnt.Name()),
 							Slug:      slug,
 							SessionID: sid,
 							HostRoot:  root.Path,
@@ -381,7 +389,9 @@ func searchDiscoverFiles(roots []transcriptRoot, since *float64, cwdSlug *string
 					}
 					continue
 				}
-				if !strings.HasSuffix(fEnt.Name(), ".jsonl") {
+				sessionID, ok := parentSessionID(fEnt.Name())
+				if !ok {
+					skippedSuffixes++
 					continue
 				}
 				if since != nil {
@@ -390,15 +400,25 @@ func searchDiscoverFiles(roots []transcriptRoot, since *float64, cwdSlug *string
 						continue
 					}
 				}
+				key := slug + "\x00" + sessionID + "\x00"
+				if _, exists := claimed[key]; exists {
+					continue
+				}
+				claimed[key] = struct{}{}
 				df := searchFileInfo{
 					Path:      filepath.Join(slugPath, fEnt.Name()),
 					Slug:      slug,
-					SessionID: strings.TrimSuffix(fEnt.Name(), ".jsonl"),
+					SessionID: sessionID,
 					HostRoot:  root.Path,
 					Format:    transcriptFormatClaudeCode,
 				}
 				out = append(out, df)
 			}
+		}
+		if root.FromArchive && skippedSuffixes > 0 {
+			fmt.Fprintf(os.Stderr,
+				"walker: %s: skipped %d files with an unrecognized suffix\n",
+				root.Path, skippedSuffixes)
 		}
 	}
 	return out
@@ -637,6 +657,7 @@ type searchArgs struct {
 	ProjectsRoot         string
 	ProjectsRootExplicit bool
 	ExtraProjectsRoots   []string
+	ArchiveRoots         []string
 	ReadConfig           bool
 	Now                  float64
 }
@@ -747,6 +768,12 @@ func parseSearchArgs(raw []string) (searchArgs, error) {
 			}
 			i++
 			args.ExtraProjectsRoots = append(args.ExtraProjectsRoots, raw[i])
+		case "--archive-root":
+			if i+1 >= len(raw) {
+				return args, fmt.Errorf("--archive-root needs a value")
+			}
+			i++
+			args.ArchiveRoots = append(args.ArchiveRoots, raw[i])
 		case "--no-config":
 			args.ReadConfig = false
 		case "--now":
@@ -1087,8 +1114,8 @@ func runSearch(argv []string) {
 	}
 	matcher := newSearchMatcher(re, args)
 
-	// Resolve roots (primary + CLI extras + config extras).
-	roots := ResolveSearchRoots(args.ProjectsRoot, args.ProjectsRootExplicit, args.ExtraProjectsRoots, args.ReadConfig)
+	// Resolve roots (primary + CLI extras + config extras + archive roots).
+	roots := ResolveSearchRoots(args.ProjectsRoot, args.ProjectsRootExplicit, args.ExtraProjectsRoots, args.ArchiveRoots, args.ReadConfig)
 	rootsWalked := uint64(len(roots))
 
 	// Discover files

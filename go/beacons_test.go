@@ -289,7 +289,7 @@ func TestDiscoverHistoryGroups(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(subDir, "agent-a.jsonl"), []byte(""), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	groups := discoverHistoryGroups([]string{root})
+	groups := discoverHistoryGroups([]resolvedRoot{{Path: root}})
 	if len(groups) != 2 {
 		t.Fatalf("expected 2 groups, got %d (%v)", len(groups), groups)
 	}
@@ -297,7 +297,7 @@ func TestDiscoverHistoryGroups(t *testing.T) {
 
 // TestDiscoverHistoryGroupsMissingRoot — readdir-err branches.
 func TestDiscoverHistoryGroupsMissingRoot(t *testing.T) {
-	groups := discoverHistoryGroups([]string{"/no/such/root"})
+	groups := discoverHistoryGroups([]resolvedRoot{{Path: "/no/such/root"}})
 	if len(groups) != 0 {
 		t.Errorf("expected empty result for missing root, got %v", groups)
 	}
@@ -317,7 +317,7 @@ func TestDiscoverLatestPathsUnreadableRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Chmod(root, 0o755) //nolint — best effort cleanup
-	paths := discoverLatestPaths([]string{root}, "some-session-id")
+	paths := discoverLatestPaths([]resolvedRoot{{Path: root}}, "some-session-id")
 	if len(paths) != 0 {
 		t.Fatalf("expected 0 paths from unreadable root, got %d", len(paths))
 	}
@@ -341,7 +341,7 @@ func TestDiscoverLatestPathsUnreadableSlugDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Chmod(slugPath, 0o755) //nolint — best effort cleanup
-	paths := discoverLatestPaths([]string{root}, "some-session-id")
+	paths := discoverLatestPaths([]resolvedRoot{{Path: root}}, "some-session-id")
 	if len(paths) != 0 {
 		t.Fatalf("expected 0 paths with unreadable slug dir, got %d", len(paths))
 	}
@@ -365,7 +365,7 @@ func TestDiscoverHistoryGroupsUnreadableSlugDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Chmod(slugPath, 0o755) //nolint — best effort cleanup
-	groups := discoverHistoryGroups([]string{root})
+	groups := discoverHistoryGroups([]resolvedRoot{{Path: root}})
 	if len(groups) != 0 {
 		t.Fatalf("expected 0 groups with unreadable slug dir, got %d", len(groups))
 	}

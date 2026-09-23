@@ -246,7 +246,7 @@ func TestDiscoverGroupsParentAndSubagents(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(subDir, "agent-a.jsonl"), []byte(""), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	groups := discoverGroups([]string{root}, 0)
+	groups := discoverGroups([]resolvedRoot{{Path: root}}, 0)
 	if len(groups) != 2 {
 		t.Fatalf("expected 2 groups; got %d (%v)", len(groups), groups)
 	}
@@ -261,7 +261,7 @@ func TestDiscoverGroupsParentAndSubagents(t *testing.T) {
 // TestDiscoverGroupsMissingRoot — exercises the ReadDir err branch (root
 // doesn't exist) plus the Glob no-match path.
 func TestDiscoverGroupsMissingRoot(t *testing.T) {
-	groups := discoverGroups([]string{"/no/such/root"}, 0)
+	groups := discoverGroups([]resolvedRoot{{Path: "/no/such/root"}}, 0)
 	if len(groups) != 0 {
 		t.Fatalf("expected no groups for missing root; got %v", groups)
 	}
@@ -316,7 +316,7 @@ func TestDiscoverGroupsUnreadableSlugDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Chmod(slugPath, 0o755) //nolint — best effort cleanup
-	groups := discoverGroups([]string{root}, 0)
+	groups := discoverGroups([]resolvedRoot{{Path: root}}, 0)
 	if len(groups) != 0 {
 		t.Fatalf("expected 0 groups with unreadable slug dir, got %d", len(groups))
 	}
@@ -354,7 +354,7 @@ func TestDiscoverGroupsDanglingSymlinks(t *testing.T) {
 	}
 
 	// Both should be skipped silently; no groups discovered.
-	groups := discoverGroups([]string{root}, 0)
+	groups := discoverGroups([]resolvedRoot{{Path: root}}, 0)
 	if len(groups) != 0 {
 		t.Fatalf("expected 0 groups with all-dangling symlinks, got %d (%v)", len(groups), groups)
 	}
@@ -380,7 +380,7 @@ func TestDiscoverGroupsPrunesOldFiles(t *testing.T) {
 	}
 	// Earliest far in the future (but within int64 nanos) → everything is
 	// "before" earliest. 4e9 seconds ≈ year 2096; 4e9 * 1e9 < int64 max.
-	groups := discoverGroups([]string{root}, 4e9)
+	groups := discoverGroups([]resolvedRoot{{Path: root}}, 4e9)
 	if len(groups) != 0 {
 		t.Fatalf("expected pruning to drop everything; got %v", groups)
 	}
