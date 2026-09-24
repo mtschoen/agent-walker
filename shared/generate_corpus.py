@@ -1285,6 +1285,55 @@ def main():
     (CORPUS_COST_ARCHIVE / "expected.json").write_text(
         json.dumps(archive_expected, indent=2) + "\n", encoding="utf-8"
     )
+    archive_sub_dir = ROOT / "corpus" / "archive_subcommands"
+    if archive_sub_dir.exists():
+        for path in sorted(archive_sub_dir.rglob("*"), reverse=True):
+            if path.is_file():
+                path.unlink()
+            elif path.is_dir():
+                path.rmdir()
+        archive_sub_dir.rmdir()
+    live_sub = archive_sub_dir / "live" / "my-slug"
+    live_sub_sub = live_sub / "my-sess" / "subagents"
+    live_sub_sub.mkdir(parents=True, exist_ok=True)
+    archive_sub_host = archive_sub_dir / "archive" / "host1" / "my-slug"
+    archive_sub_subagents = archive_sub_host / "my-sess" / "subagents"
+    archive_sub_subagents.mkdir(parents=True, exist_ok=True)
+
+    parent_payload = json.dumps(
+        {
+            "timestamp": "2026-03-20T10:00:00Z",
+            "message": {
+                "role": "user",
+                "content": "target pattern in parent",
+            },
+            "costUSD": 0.01,
+        }
+    )
+    subagent_payload = json.dumps(
+        {
+            "timestamp": "2026-03-20T10:05:00Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": 'target pattern in subagent <progress-beacon>{"version":"1.0.0","operation":"test","status":"in_progress","begin_eta":200,"actual_elapsed":100}</progress-beacon>',
+                    },
+                ],
+            },
+            "costUSD": 0.02,
+        }
+    )
+
+    (live_sub / "my-sess.jsonl").write_text(parent_payload + "\n", encoding="utf-8")
+    (live_sub_sub / "agent-sub1.jsonl").write_text(
+        subagent_payload + "\n", encoding="utf-8"
+    )
+    write_jsonl_zst(archive_sub_host / "my-sess.jsonl.zst", [parent_payload])
+    write_jsonl_zst(archive_sub_subagents / "agent-sub1.jsonl.zst", [subagent_payload])
+    (archive_sub_host / "ignored.xyz").write_text("skip me\n", encoding="utf-8")
+
     print(f"Wrote cost archive scenarios under {CORPUS_COST_ARCHIVE}")
 
     print(f"Wrote {file_count} fixture files under {CORPUS}")

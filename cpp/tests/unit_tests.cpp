@@ -331,6 +331,46 @@ void test_load_transcript_inflates_and_rejects() {
   write_file(root / "broken.jsonl.zst", "this is not a zstd frame");
   expect(!walker::load_transcript(root / "broken.jsonl.zst").has_value(),
          "load_transcript rejects a corrupt frame");
+
+  // Corrupt frame declaring 0xFFFFFFFFFFFFFFFF bytes content size.
+  std::string huge_frame =
+      "\x28\xb5\x2f\xfd\xc0\x00\xff\xff\xff\xff\xff\xff\xff\xff";
+  write_file(root / "huge.jsonl.zst", huge_frame);
+  expect(!walker::load_transcript(root / "huge.jsonl.zst").has_value(),
+         "load_transcript rejects frame declaring huge content size");
+
+  // Frame with unknown content size (contentSizeFlag = 0).
+  ZSTD_CCtx *cctx = ZSTD_createCCtx();
+  ZSTD_CCtx_setParameter(cctx, ZSTD_c_contentSizeFlag, 0);
+  std::vector<char> unknown_encoded(ZSTD_compressBound(body.size()) + 128);
+  ZSTD_inBuffer in_buf{body.data(), body.size(), 0};
+  ZSTD_outBuffer out_buf{unknown_encoded.data(), unknown_encoded.size(), 0};
+  size_t comp_res = ZSTD_compressStream2(cctx, &out_buf, &in_buf, ZSTD_e_end);
+  expect(!ZSTD_isError(comp_res), "unknown-size stream compresses");
+  ZSTD_freeCCtx(cctx);
+  {
+    std::ofstream out(root / "unknown.jsonl.zst", std::ios::binary);
+    out.write(unknown_encoded.data(), static_cast<std::streamsize>(out_buf.pos));
+  }
+  auto unknown_inflated = walker::load_transcript(root / "unknown.jsonl.zst");
+  expect(unknown_inflated.has_value() &&
+             std::string_view(*unknown_inflated) == std::string_view(body),
+         "load_transcript inflates unknown-size zstd stream");
+
+  if (out_buf.pos > 4) {
+    std::ofstream out(root / "truncated_unknown.jsonl.zst", std::ios::binary);
+    out.write(unknown_encoded.data(), static_cast<std::streamsize>(out_buf.pos - 4));
+  }
+  expect(!walker::load_transcript(root / "truncated_unknown.jsonl.zst").has_value(),
+         "load_transcript rejects truncated unknown-size zstd stream");
+
+  if (written > 4) {
+    std::ofstream out(root / "truncated_declared.jsonl.zst", std::ios::binary);
+    out.write(encoded.data(), static_cast<std::streamsize>(written - 4));
+  }
+  expect(!walker::load_transcript(root / "truncated_declared.jsonl.zst").has_value(),
+         "load_transcript rejects truncated declared-size zstd frame");
+
   expect(!walker::load_transcript(root / "missing.jsonl").has_value(),
          "load_transcript returns nullopt for a missing file");
   fs::remove_all(root);

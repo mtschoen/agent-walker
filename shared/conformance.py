@@ -23,7 +23,6 @@ Tolerance: ±$0.01 on trailing_usd and window_usd per fixture and aggregate.
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import re
@@ -45,6 +44,7 @@ SEARCH_MULTI_ROOT_CORPUS = ROOT / "shared" / "corpus" / "search_multi_root"
 SEARCH_CODEX_CORPUS = ROOT / "shared" / "corpus" / "search_codex"
 COST_ARCHIVE_CORPUS = ROOT / "shared" / "corpus" / "cost_archive"
 SEARCH_ARCHIVE_CORPUS = ROOT / "shared" / "corpus" / "search_archive"
+ARCHIVE_SUBCOMMANDS_CORPUS = ROOT / "shared" / "corpus" / "archive_subcommands"
 EVENTS_CORPUS = ROOT / "shared" / "corpus" / "events"
 EVENTS_EXPECTED = EVENTS_CORPUS / "expected_events.json"
 EXPECTED_LATEST = BEACON_CORPUS / "expected_latest.json"
@@ -3358,214 +3358,143 @@ def check_archive_missing_root_diagnostic(lang: str, binary: Path) -> bool:
 def check_archive_dedup_and_subcommands(lang: str, binary: Path) -> bool:
     """Exercises --archive-root and subagent dedup across search, cost, events,
     and beacons subcommands."""
+    if not ARCHIVE_SUBCOMMANDS_CORPUS.is_dir():
+        return True
     all_ok = True
-    parent_line = (
-        json.dumps(
-            {
-                "timestamp": "2026-03-20T10:00:00Z",
-                "message": {
-                    "role": "user",
-                    "content": "target pattern in parent",
-                },
-                "costUSD": 0.01,
-            }
-        )
-        + "\n"
-    )
-
-    subagent_line = (
-        json.dumps(
-            {
-                "timestamp": "2026-03-20T10:05:00Z",
-                "message": {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": 'target pattern in subagent <progress-beacon>{"version":"1.0.0","operation":"test","status":"in_progress","begin_eta":200,"actual_elapsed":100}</progress-beacon>',
-                        },
-                    ],
-                },
-                "costUSD": 0.02,
-            }
-        )
-        + "\n"
-    )
-
-    def compress(data: bytes) -> bytes:
-        try:
-            import zstandard  # type: ignore[import-untyped]
-
-            return zstandard.ZstdCompressor(level=10).compress(data)
-        except (ImportError, AttributeError):
-            pass
-        if data == parent_line.encode("utf-8"):
-            return base64.b64decode(
-                "KLUv/QRYPQMAYocXGoC5OU693NveYbagMP3JKkM3gkg9QGlhM4UBgAZ54D0TCodsjVMhQ6tKqWKYiVYTE4bSPafCVEvCNcywLdwzKhZmpmdMUGuYXMOI//47Yvg5BD8G58c9r4SyYVLSTAEA6BJUFL4/MvE="
-            )
-        if data == subagent_line.encode("utf-8"):
-            return base64.b64decode(
-                "KLUv/QRYnQYA0o4sIDBLtQ0A23H1EokguL79mT4ZhxXVmtH2vd4/SA4KsKrgiCnJI1G9wACheVqYDpCYMhH1xbDs9Fnl0agZ/SoyE/WlvQpzml0U5nDU2ty83frWta/iK488kC/1xZrDbxu+JALWGN3FYN7XtOcS2GwbXSJG5iB7260Oe5unfVTtsO0e+pICqjfbZo05Fn/L0VF9n/Yuofo2yrzQsXhCphJIlchBJkZAGgNJJkd1B2nzQk5fCgsAXxN0MAQkKyqfayNM46krOhs5O5+tiAVBE7iUGb5qozo="
-            )
-        raise ValueError("unsupported data for compression fallback")
-
     now = 1774000000.0
-    with tempfile.TemporaryDirectory(prefix="walker-archive-subcommands-") as tmp:
-        tmp_path = Path(tmp)
-        live = tmp_path / "live"
-        archive = tmp_path / "archive"
-        live_slug = live / "my-slug"
-        live_sub = live_slug / "my-sess" / "subagents"
-        live_sub.mkdir(parents=True)
+    live = ARCHIVE_SUBCOMMANDS_CORPUS / "live"
+    archive = ARCHIVE_SUBCOMMANDS_CORPUS / "archive"
 
-        archive_host = archive / "host1"
-        archive_slug = archive_host / "my-slug"
-        archive_sub = archive_slug / "my-sess" / "subagents"
-        archive_sub.mkdir(parents=True)
+    label = "archive: search subagent dedup"
+    res = run_captured(
+        [
+            str(binary),
+            "search",
+            "target pattern",
+            "--projects-root",
+            str(live),
+            "--archive-root",
+            str(archive),
+            "--format",
+            "jsonl",
+            "--no-config",
+        ],
+        text=True,
+        encoding="utf-8",
+        timeout=10,
+    )
+    raw_lines = (
+        [json.loads(line) for line in res.stdout.strip().splitlines() if line]
+        if res.returncode == 0
+        else []
+    )
+    hits = [entry for entry in raw_lines if entry.get("type") == "hit"]
+    ok = res.returncode == 0 and len(hits) == 2
+    print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
+    if not ok:
+        all_ok = False
+        print(f"        exit={res.returncode} hits={len(hits)} stdout={res.stdout!r}")
 
-        (live_slug / "my-sess.jsonl").write_text(parent_line, encoding="utf-8")
-        (live_sub / "agent-sub1.jsonl").write_text(subagent_line, encoding="utf-8")
+    label = "archive: cost subagent dedup"
+    res = run_captured(
+        [
+            str(binary),
+            "--period",
+            "86400",
+            "--win-start",
+            "0",
+            "--now",
+            repr(now),
+            "--projects-root",
+            str(live),
+            "--archive-root",
+            str(archive),
+            "--no-config",
+        ],
+        text=True,
+        encoding="utf-8",
+        timeout=10,
+    )
+    ok = res.returncode == 0
+    print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
+    if not ok:
+        all_ok = False
 
-        (archive_slug / "my-sess.jsonl.zst").write_bytes(
-            compress(parent_line.encode("utf-8"))
-        )
-        (archive_sub / "agent-sub1.jsonl.zst").write_bytes(
-            compress(subagent_line.encode("utf-8"))
-        )
-        (archive_slug / "ignored.xyz").write_text("skip me\n", encoding="utf-8")
+    label = "archive: events subcommand"
+    res = run_captured(
+        [
+            str(binary),
+            "events",
+            "--period",
+            "86400",
+            "--win-start",
+            "0",
+            "--now",
+            repr(now),
+            "--projects-root",
+            str(live),
+            "--archive-root",
+            str(archive),
+            "--no-config",
+        ],
+        text=True,
+        encoding="utf-8",
+        timeout=10,
+    )
+    ok = res.returncode == 0
+    print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
+    if not ok:
+        all_ok = False
 
-        label = "archive: search subagent dedup"
-        res = run_captured(
-            [
-                str(binary),
-                "search",
-                "target pattern",
-                "--projects-root",
-                str(live),
-                "--archive-root",
-                str(archive),
-                "--format",
-                "jsonl",
-                "--no-config",
-            ],
-            text=True,
-            encoding="utf-8",
-            timeout=10,
-        )
-        raw_lines = (
-            [json.loads(line) for line in res.stdout.strip().splitlines() if line]
-            if res.returncode == 0
-            else []
-        )
-        hits = [entry for entry in raw_lines if entry.get("type") == "hit"]
-        ok = res.returncode == 0 and len(hits) == 2
-        print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
-        if not ok:
-            all_ok = False
-            print(
-                f"        exit={res.returncode} hits={len(hits)} stdout={res.stdout!r}"
-            )
+    label = "archive: beacons-latest subcommand"
+    res = run_captured(
+        [
+            str(binary),
+            "beacons-latest",
+            "--session-id",
+            "my-sess",
+            "--projects-root",
+            str(live),
+            "--archive-root",
+            str(archive),
+            "--now",
+            repr(now),
+            "--no-config",
+        ],
+        text=True,
+        encoding="utf-8",
+        timeout=10,
+    )
+    ok = res.returncode == 0
+    print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
+    if not ok:
+        all_ok = False
 
-        label = "archive: cost subagent dedup"
-        res = run_captured(
-            [
-                str(binary),
-                "--period",
-                "86400",
-                "--win-start",
-                "0",
-                "--now",
-                repr(now),
-                "--projects-root",
-                str(live),
-                "--archive-root",
-                str(archive),
-                "--no-config",
-            ],
-            text=True,
-            encoding="utf-8",
-            timeout=10,
-        )
-        ok = res.returncode == 0
-        print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
-        if not ok:
-            all_ok = False
-
-        label = "archive: events subcommand"
-        res = run_captured(
-            [
-                str(binary),
-                "events",
-                "--period",
-                "86400",
-                "--win-start",
-                "0",
-                "--now",
-                repr(now),
-                "--projects-root",
-                str(live),
-                "--archive-root",
-                str(archive),
-                "--no-config",
-            ],
-            text=True,
-            encoding="utf-8",
-            timeout=10,
-        )
-        ok = res.returncode == 0
-        print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
-        if not ok:
-            all_ok = False
-
-        label = "archive: beacons-latest subcommand"
-        res = run_captured(
-            [
-                str(binary),
-                "beacons-latest",
-                "--session-id",
-                "my-sess",
-                "--projects-root",
-                str(live),
-                "--archive-root",
-                str(archive),
-                "--now",
-                repr(now),
-                "--no-config",
-            ],
-            text=True,
-            encoding="utf-8",
-            timeout=10,
-        )
-        ok = res.returncode == 0
-        print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
-        if not ok:
-            all_ok = False
-
-        label = "archive: beacons-history subcommand"
-        res = run_captured(
-            [
-                str(binary),
-                "beacons-history",
-                "--period",
-                "86400",
-                "--win-start",
-                "0",
-                "--now",
-                repr(now),
-                "--projects-root",
-                str(live),
-                "--archive-root",
-                str(archive),
-                "--no-config",
-            ],
-            text=True,
-            encoding="utf-8",
-            timeout=10,
-        )
-        ok = res.returncode == 0
-        print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
-        if not ok:
-            all_ok = False
+    label = "archive: beacons-history subcommand"
+    res = run_captured(
+        [
+            str(binary),
+            "beacons-history",
+            "--period",
+            "86400",
+            "--win-start",
+            "0",
+            "--now",
+            repr(now),
+            "--projects-root",
+            str(live),
+            "--archive-root",
+            str(archive),
+            "--no-config",
+        ],
+        text=True,
+        encoding="utf-8",
+        timeout=10,
+    )
+    ok = res.returncode == 0
+    print(f"  [{lang:>4s}] {label:38s} {' OK ' if ok else 'FAIL'}")
+    if not ok:
+        all_ok = False
 
     return all_ok
 

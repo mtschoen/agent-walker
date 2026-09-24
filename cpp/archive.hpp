@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -78,6 +79,69 @@ inline std::vector<fs::path> expand_archive_root(const fs::path &archive_path) {
   return hosts;
 }
 
+inline constexpr unsigned long long kMaxTranscriptPlaintextSize =
+    512ULL * 1024 * 1024; // 512 MiB
+
+inline bool decompress_stream(const std::string &compressed, std::string &plain,
+                              size_t max_plaintext_size) {
+  struct DStreamDeleter {
+    void operator()(ZSTD_DStream *s) const noexcept {
+      if (s != nullptr)
+        ZSTD_freeDStream(s);
+    }
+  };
+  std::unique_ptr<ZSTD_DStream, DStreamDeleter> stream(ZSTD_createDStream());
+  if (!stream)
+    return false;
+  if (ZSTD_isError(ZSTD_initDStream(stream.get())))
+    return false;
+
+  std::string chunk(ZSTD_DStreamOutSize(), '\0');
+  ZSTD_inBuffer in{compressed.data(), compressed.size(), 0};
+  size_t status = 1;
+  bool failed = false;
+  try {
+    while (in.pos < in.size) {
+      ZSTD_outBuffer out{chunk.data(), chunk.size(), 0};
+      status = ZSTD_decompressStream(stream.get(), &out, &in);
+      if (ZSTD_isError(status)) {
+        failed = true;
+        break;
+      }
+      if (out.pos > 0) {
+        if (plain.size() + out.pos > max_plaintext_size) {
+          failed = true;
+          break;
+        }
+        plain.append(chunk.data(), out.pos);
+      }
+    }
+    while (!failed && status > 0) {
+      ZSTD_outBuffer out{chunk.data(), chunk.size(), 0};
+      size_t prev_in_pos = in.pos;
+      status = ZSTD_decompressStream(stream.get(), &out, &in);
+      if (ZSTD_isError(status)) {
+        failed = true;
+        break;
+      }
+      if (out.pos == 0 && in.pos == prev_in_pos) {
+        failed = true;
+        break;
+      }
+      if (out.pos > 0) {
+        if (plain.size() + out.pos > max_plaintext_size) {
+          failed = true;
+          break;
+        }
+        plain.append(chunk.data(), out.pos);
+      }
+    }
+  } catch (const std::exception &) {
+    return false;
+  }
+  return !failed && status == 0;
+}
+
 // Whole-file load, inflating a .zst in memory. Returns nullopt for an
 // unreadable file (silent, matching the prior padded_string::load posture) and
 // for an undecodable frame (one stderr line, per SPEC "Filters").
@@ -114,36 +178,29 @@ load_transcript(const fs::path &path) {
 
   std::string plain;
   if (declared != ZSTD_CONTENTSIZE_UNKNOWN) {
-    plain.resize(static_cast<size_t>(declared));
+    if (declared > kMaxTranscriptPlaintextSize)
+      return report_failure();
+    try {
+      plain.resize(static_cast<size_t>(declared));
+    } catch (const std::exception &) {
+      return report_failure();
+    }
     size_t written = ZSTD_decompress(plain.data(), plain.size(),
                                      compressed.data(), compressed.size());
     if (ZSTD_isError(written) || written != plain.size())
       return report_failure();
   } else {
-    ZSTD_DStream *stream = ZSTD_createDStream();
-    if (stream == nullptr)
-      return report_failure();
-    ZSTD_initDStream(stream);
-    std::string chunk(ZSTD_DStreamOutSize(), '\0');
-    ZSTD_inBuffer in{compressed.data(), compressed.size(), 0};
-    bool failed = false;
-    while (in.pos < in.size) {
-      ZSTD_outBuffer out{chunk.data(), chunk.size(), 0};
-      size_t status = ZSTD_decompressStream(stream, &out, &in);
-      if (ZSTD_isError(status)) {
-        failed = true;
-        break;
-      }
-      plain.append(chunk.data(), out.pos);
-    }
-    ZSTD_freeDStream(stream);
-    if (failed)
+    if (!decompress_stream(compressed, plain, kMaxTranscriptPlaintextSize))
       return report_failure();
   }
 
   // padded_string's string_view constructor copies and adds the tail padding
   // simdjson's on-demand parser requires.
-  return simdjson::padded_string(std::string_view(plain));
+  try {
+    return simdjson::padded_string(std::string_view(plain));
+  } catch (const std::exception &) {
+    return report_failure();
+  }
 }
 
 } // namespace walker

@@ -65,8 +65,8 @@ pub fn walker_config_path() -> PathBuf {
     }
 }
 
-#[allow(dead_code)]
-pub fn read_extra_roots_from_config() -> Vec<PathBuf> {
+#[cfg(test)]
+pub(crate) fn read_extra_roots_from_config() -> Vec<PathBuf> {
     read_tagged_extra_roots_from_config()
         .into_iter()
         .filter(|root| root.format == TranscriptFormat::ClaudeCode)
