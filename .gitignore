@@ -3,6 +3,9 @@ rust/target/
 go/walker
 go/walker.exe
 cpp/build/
+# Any other CMake build tree (build-test, build-ninja, ...): FetchContent
+# checkouts under _deps/ would otherwise be committed as URL-less gitlinks.
+cpp/build-*/
 zig/zig-out/
 zig/zig-cache/
 zig/.zig-cache/
