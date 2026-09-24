@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parent
 CORPUS_SEARCH = ROOT / "corpus" / "search"
 CORPUS_SEARCH_MULTI_ROOT = ROOT / "corpus" / "search_multi_root"
 CORPUS_SEARCH_CODEX = ROOT / "corpus" / "search_codex"
+CORPUS_SEARCH_ARCHIVE = ROOT / "corpus" / "search_archive"
 
 NOW_UNIX = 1778414400.0  # 2026-05-09 12:00:00 UTC -- matches beacon corpus
 
@@ -236,6 +237,27 @@ def write_jsonl(path: Path, lines: "Sequence[dict | str | bytes]") -> None:
                 text = line if isinstance(line, str) else json.dumps(line)
                 f.write(text.encode("utf-8"))
             f.write(b"\n")
+
+
+ZSTD_LEVEL = 10
+
+
+def write_jsonl_zst(path: Path, lines: "Sequence[dict | str | bytes]") -> None:
+    """Encode `lines` exactly as write_jsonl does, then zstd-compress the
+    whole buffer into `path`. `path` must already end in `.jsonl.zst`."""
+    import zstandard
+
+    buffer = bytearray()
+    for line in lines:
+        if isinstance(line, bytes):
+            buffer += line
+        else:
+            text = line if isinstance(line, str) else json.dumps(line)
+            buffer += text.encode("utf-8")
+        buffer += b"\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    compressor = zstandard.ZstdCompressor(level=ZSTD_LEVEL)
+    path.write_bytes(compressor.compress(bytes(buffer)))
 
 
 # Hit-record helpers --------------------------------------------------------
@@ -2413,6 +2435,174 @@ def scenario_29_discovery_oddities():
     return scenario, files, combos
 
 
+def search_archive_01_archive_only():
+    """A needle that lives only in a compressed archive transcript."""
+    scenario = "01-archive-only"
+    text = "archiveneedle only in the archive"
+    timestamp = NOW_UNIX - 3600
+    live_files = {
+        "live-slug/live-session.jsonl": [
+            assistant_text(NOW_UNIX - 7200, "live-1", "nothing to see here"),
+        ],
+    }
+    archive_files = {
+        "chonkers/archived-slug/archived-session.jsonl.zst": [
+            assistant_text(timestamp, "archived-1", text),
+        ],
+    }
+    start, end = find_offset(text, "archiveneedle")
+    combos = {
+        "default": {
+            "pattern": "archiveneedle",
+            "flags": [],
+            "hits": [
+                hit(
+                    session_id="archived-session",
+                    cwd_slug="archived-slug",
+                    line_number=1,
+                    timestamp=iso(timestamp),
+                    role="assistant",
+                    snippet=text,
+                    match_offsets=[[start, end]],
+                ),
+            ],
+            "summary": summary(hits=1, sessions_matched=1, roots_walked=2),
+        },
+    }
+    return scenario, live_files, archive_files, combos
+
+
+def search_archive_02_live_shadows_archive():
+    """Same (slug, session_id) live and archived. The live file is read, the
+    archive copy is never opened, so only the live text can produce a hit."""
+    scenario = "02-live-shadows-archive"
+    live_text = "archiveneedle from the live transcript"
+    archive_text = "archiveneedle from the archived transcript"
+    live_ts = NOW_UNIX - 1800
+    live_files = {
+        "shared-slug/shared-session.jsonl": [
+            assistant_text(live_ts, "live-a", live_text),
+        ],
+    }
+    archive_files = {
+        "chonkers/shared-slug/shared-session.jsonl.zst": [
+            assistant_text(NOW_UNIX - 1700, "archive-a", archive_text),
+        ],
+    }
+    start, end = find_offset(live_text, "archiveneedle")
+    combos = {
+        "default": {
+            "pattern": "archiveneedle",
+            "flags": [],
+            "hits": [
+                hit(
+                    session_id="shared-session",
+                    cwd_slug="shared-slug",
+                    line_number=1,
+                    timestamp=iso(live_ts),
+                    role="assistant",
+                    snippet=live_text,
+                    match_offsets=[[start, end]],
+                ),
+            ],
+            "summary": summary(hits=1, sessions_matched=1, roots_walked=2),
+        },
+    }
+    return scenario, live_files, archive_files, combos
+
+
+def search_archive_03_two_hosts_and_subagent():
+    """Two hostname subdirectories under one archive root, one of them
+    carrying a compressed subagent transcript. Hits sort newest-first."""
+    scenario = "03-two-hosts-and-subagent"
+    chonkers_text = "archiveneedle on chonkers"
+    llamabox_text = "archiveneedle on llamabox"
+    subagent_text = "archiveneedle from a subagent"
+    chonkers_ts = NOW_UNIX - 1000
+    llamabox_ts = NOW_UNIX - 2000
+    subagent_ts = NOW_UNIX - 500
+    live_files = {}
+    archive_files = {
+        "chonkers/host-slug/session-one.jsonl.zst": [
+            assistant_text(chonkers_ts, "chonkers-1", chonkers_text),
+        ],
+        "chonkers/host-slug/session-one/subagents/agent-aaa.jsonl.zst": [
+            assistant_text(subagent_ts, "agent-1", subagent_text),
+        ],
+        "llamabox/host-slug/session-two.jsonl.zst": [
+            assistant_text(llamabox_ts, "llamabox-1", llamabox_text),
+        ],
+    }
+
+    def one(session, text, timestamp):
+        start, end = find_offset(text, "archiveneedle")
+        return hit(
+            session_id=session,
+            cwd_slug="host-slug",
+            line_number=1,
+            timestamp=iso(timestamp),
+            role="assistant",
+            snippet=text,
+            match_offsets=[[start, end]],
+        )
+
+    combos = {
+        "default": {
+            "pattern": "archiveneedle",
+            "flags": [],
+            "hits": [
+                one("session-one", subagent_text, subagent_ts),
+                one("session-one", chonkers_text, chonkers_ts),
+                one("session-two", llamabox_text, llamabox_ts),
+            ],
+            "summary": summary(hits=3, sessions_matched=2, roots_walked=3),
+        },
+    }
+    return scenario, live_files, archive_files, combos
+
+
+def search_archive_04_corrupt_and_suffix():
+    """A corrupt .jsonl.zst and an unrelated suffix in the same archive host
+    directory: the good file still produces its hit."""
+    scenario = "04-corrupt-and-suffix"
+    text = "archiveneedle survives a bad neighbor"
+    timestamp = NOW_UNIX - 900
+    live_files = {}
+    archive_files = {
+        "chonkers/mixed-slug/good-session.jsonl.zst": [
+            assistant_text(timestamp, "good-1", text),
+        ],
+    }
+    start, end = find_offset(text, "archiveneedle")
+    combos = {
+        "default": {
+            "pattern": "archiveneedle",
+            "flags": [],
+            "hits": [
+                hit(
+                    session_id="good-session",
+                    cwd_slug="mixed-slug",
+                    line_number=1,
+                    timestamp=iso(timestamp),
+                    role="assistant",
+                    snippet=text,
+                    match_offsets=[[start, end]],
+                ),
+            ],
+            "summary": summary(hits=1, sessions_matched=1, roots_walked=2),
+        },
+    }
+    return scenario, live_files, archive_files, combos
+
+
+SEARCH_ARCHIVE_SCENARIOS = [
+    search_archive_01_archive_only,
+    search_archive_02_live_shadows_archive,
+    search_archive_03_two_hosts_and_subagent,
+    search_archive_04_corrupt_and_suffix,
+]
+
+
 SCENARIOS = [
     scenario_01_basic,
     scenario_02_multi_match_per_session,
@@ -2518,6 +2708,38 @@ def main() -> None:
         f"Wrote {mr_files} JSONL fixtures across {len(MULTI_ROOT_SCENARIOS)} multi-root scenarios"
     )
     print(f"  under {CORPUS_SEARCH_MULTI_ROOT}")
+
+    if CORPUS_SEARCH_ARCHIVE.exists():
+        for path in sorted(CORPUS_SEARCH_ARCHIVE.rglob("*"), reverse=True):
+            if path.is_file():
+                path.unlink()
+            else:
+                path.rmdir()
+        CORPUS_SEARCH_ARCHIVE.rmdir()
+    CORPUS_SEARCH_ARCHIVE.mkdir(parents=True, exist_ok=True)
+
+    for build in SEARCH_ARCHIVE_SCENARIOS:
+        scenario, live_files, archive_files, combos = build()
+        scenario_dir = CORPUS_SEARCH_ARCHIVE / scenario
+        # An empty live root must still exist on disk so the primary root is
+        # a real directory (SPEC: a nonexistent primary is the empty-fleet
+        # case, which would change roots_walked).
+        (scenario_dir / "live").mkdir(parents=True, exist_ok=True)
+        for rel, lines in live_files.items():
+            write_jsonl(scenario_dir / "live" / rel, lines)
+        for rel, lines in archive_files.items():
+            write_jsonl_zst(scenario_dir / "archive" / rel, lines)
+        if scenario == "04-corrupt-and-suffix":
+            slug_dir = scenario_dir / "archive" / "chonkers" / "mixed-slug"
+            (slug_dir / "broken-session.jsonl.zst").write_bytes(
+                b"this is not a zstd frame"
+            )
+            (slug_dir / "ignored.jsonl.gz").write_bytes(b"\x1f\x8b")
+        (scenario_dir / "expected.json").write_text(
+            json.dumps({"_meta": meta, "combos": combos}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    print(f"Wrote search archive fixtures under {CORPUS_SEARCH_ARCHIVE}")
 
     if CORPUS_SEARCH_CODEX.exists():
         for p in sorted(CORPUS_SEARCH_CODEX.rglob("*"), reverse=True):

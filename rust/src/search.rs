@@ -48,6 +48,7 @@ struct SearchArgs {
     snippet_chars: u32,
     projects_root: Option<PathBuf>,
     extra_projects_roots: Vec<PathBuf>,
+    archive_roots: Vec<PathBuf>,
     read_config: bool,
 }
 
@@ -69,6 +70,7 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
     let mut snippet_chars: u32 = 240;
     let mut projects_root: Option<PathBuf> = None;
     let mut extra_projects_roots: Vec<PathBuf> = Vec::new();
+    let mut archive_roots: Vec<PathBuf> = Vec::new();
     let mut read_config = true;
     let mut now_override: Option<f64> = None;
 
@@ -140,6 +142,11 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
                     iter.next().ok_or("--extra-projects-root needs a value")?,
                 ));
             }
+            "--archive-root" => {
+                archive_roots.push(PathBuf::from(
+                    iter.next().ok_or("--archive-root needs a value")?,
+                ));
+            }
             "--no-config" => {
                 read_config = false;
             }
@@ -200,6 +207,7 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
         snippet_chars,
         projects_root,
         extra_projects_roots,
+        archive_roots,
         read_config,
     })
 }
@@ -247,13 +255,15 @@ fn scan_file(
     prefilter: Option<&PreFilter>,
 ) -> Vec<ScanMessage> {
     let mut out: Vec<ScanMessage> = Vec::new();
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => return out,
+    let data = match crate::archive::read_transcript(path) {
+        Some(data) => data,
+        None => return out,
     };
-    // File-level literal pre-filter: when the pattern is a plain literal whose
-    // bytes survive JSON string-escaping unchanged, a transcript whose raw
-    // bytes never contain it cannot produce a hit; skip all JSON parsing.
+    // File-level literal pre-filter: runs on the inflated plaintext bytes, so
+    // a compressed .jsonl.zst is searched after decompression just like .jsonl.
+    // When the pattern is a plain literal whose bytes survive JSON string-escaping
+    // unchanged, a transcript whose raw bytes never contain it cannot produce a hit;
+    // skip all JSON parsing.
     // Context turns are only emitted for files WITH hits, so whole-file
     // skipping cannot change any output.
     if let Some(pf) = prefilter {
@@ -419,11 +429,13 @@ fn discover_files(
     cwd_slug: Option<&str>,
 ) -> Vec<DiscoveredFile> {
     let mut files: Vec<DiscoveredFile> = Vec::new();
+    let mut claimed: HashSet<crate::transcript::SessionKey> = HashSet::new();
     for root in roots {
         if root.format == TranscriptFormat::Codex {
             discover_codex_files(root, since, cwd_slug, &mut files);
             continue;
         }
+        let mut skipped_suffixes: u64 = 0;
         let host_root = root.path.display().to_string();
         let slug_entries = match read_dir(&root.path) {
             Ok(e) => e,
@@ -452,17 +464,21 @@ fn discover_files(
                 if file_type.is_file() {
                     let name = entry.file_name();
                     let name = name.to_string_lossy();
-                    let stem = match name.strip_suffix(".jsonl") {
-                        Some(s) => s,
-                        None => continue,
+                    let Some(session_id) = crate::archive::parent_session_id(&name) else {
+                        skipped_suffixes += 1;
+                        continue;
                     };
                     if mtime_pruned(&entry, since) {
+                        continue;
+                    }
+                    let key = (slug.clone(), session_id.to_string(), None);
+                    if !claimed.insert(key) {
                         continue;
                     }
                     files.push(DiscoveredFile {
                         path: entry.path(),
                         slug: slug.clone(),
-                        session_id: stem.to_string(),
+                        session_id: session_id.to_string(),
                         host_root: host_root.clone(),
                         format: TranscriptFormat::ClaudeCode,
                     });
@@ -478,10 +494,19 @@ fn discover_files(
                         }
                         let sub_name = sub.file_name();
                         let sub_name = sub_name.to_string_lossy();
-                        if !sub_name.starts_with("agent-") || !sub_name.ends_with(".jsonl") {
+                        let Some(agent_id) = crate::archive::subagent_agent_id(&sub_name) else {
+                            skipped_suffixes += 1;
+                            continue;
+                        };
+                        if mtime_pruned(&sub, since) {
                             continue;
                         }
-                        if mtime_pruned(&sub, since) {
+                        let key = (
+                            slug.clone(),
+                            sid.clone(),
+                            Some(agent_id.to_string()),
+                        );
+                        if !claimed.insert(key) {
                             continue;
                         }
                         files.push(DiscoveredFile {
@@ -494,6 +519,13 @@ fn discover_files(
                     }
                 }
             }
+        }
+        if root.from_archive && skipped_suffixes > 0 {
+            eprintln!(
+                "walker: {}: skipped {} files with an unrecognized suffix",
+                root.path.display(),
+                skipped_suffixes
+            );
         }
     }
     files
@@ -1021,6 +1053,7 @@ pub fn run(raw: &[String]) {
     let roots = walker_roots::resolve_search_roots(
         args.projects_root.clone(),
         &args.extra_projects_roots,
+        &args.archive_roots,
         args.read_config,
     );
     let files = discover_files(&roots, args.since, args.cwd.as_deref());
@@ -1285,6 +1318,7 @@ mod tests {
         let tagged = TranscriptRoot {
             path: root.clone(),
             format: TranscriptFormat::ClaudeCode,
+            from_archive: false,
         };
         let files = discover_files(std::slice::from_ref(&tagged), Some(far_future), None);
         assert!(files.is_empty());
@@ -1363,6 +1397,7 @@ mod tests {
         let tagged = TranscriptRoot {
             path: root.clone(),
             format: TranscriptFormat::ClaudeCode,
+            from_archive: false,
         };
         let files = discover_files(std::slice::from_ref(&tagged), None, None);
         fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
@@ -1381,6 +1416,7 @@ mod tests {
         let tagged = TranscriptRoot {
             path: root.clone(),
             format: TranscriptFormat::ClaudeCode,
+            from_archive: false,
         };
         let files = discover_files(std::slice::from_ref(&tagged), None, None);
         let _ = fs::remove_dir_all(&root);
@@ -1417,6 +1453,7 @@ mod tests {
         let tagged = TranscriptRoot {
             path: root.clone(),
             format: TranscriptFormat::ClaudeCode,
+            from_archive: false,
         };
         let files = discover_files(std::slice::from_ref(&tagged), None, None);
 
@@ -1448,6 +1485,7 @@ mod tests {
         let tagged = TranscriptRoot {
             path: root.clone(),
             format: TranscriptFormat::ClaudeCode,
+            from_archive: false,
         };
         let files = discover_files(std::slice::from_ref(&tagged), None, None);
         let _ = fs::remove_dir_all(&root);
@@ -1479,5 +1517,17 @@ mod tests {
             contains_ascii_ci(b"1ab", b"1ab"),
             "should find pattern at index 0"
         );
+    }
+
+    #[test]
+    fn parse_search_args_collects_archive_roots() {
+        let parsed = parse_args(&[
+            "needle".to_string(),
+            "--archive-root".to_string(),
+            "/path/to/archive".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.archive_roots, vec![PathBuf::from("/path/to/archive")]);
+        assert!(parse_args(&["needle".to_string(), "--archive-root".to_string()]).is_err());
     }
 }

@@ -9,6 +9,7 @@
 // the test binary is built from this one TU only (see CMakeLists
 // WALKER_BUILD_TESTS) so no duplicate-symbol issues arise.
 
+#include "../archive.hpp"
 #include "../beacons.cpp"
 #include "../cost_walk.hpp"
 #include "../events.cpp"
@@ -19,6 +20,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <zstd.h>
 
 #ifndef _WIN32
 #include <sys/stat.h>
@@ -68,7 +70,8 @@ void test_lenient_count() {
   expect(parser.iterate(doc).get(parsed) == simdjson::SUCCESS,
          "lenient_count fixture parses");
   simdjson::ondemand::object object;
-  assert(parsed.get_object().get(object) == simdjson::SUCCESS);
+  expect(parsed.get_object().get(object) == simdjson::SUCCESS,
+         "get_object succeeds");
   uint64_t expected_values[] = {1, 0, 0, 0, 7, 200, 0};
   size_t index = 0;
   for (auto field : object) {
@@ -139,12 +142,12 @@ void test_discover_groups_unreadable_dirs() {
   fs::path slug = root / "slug-locked";
   write_file(slug / "sess.jsonl", "{}\n");
   ::chmod(slug.c_str(), 0000);
-  auto groups = walker::discover_groups({root}, -1e308);
+  auto groups = walker::discover_groups({{root, false}}, -1e308);
   expect(groups.empty(), "unreadable slug dir skipped by discover_groups");
   ::chmod(slug.c_str(), 0755);
 
   ::chmod(root.c_str(), 0000);
-  auto root_groups = walker::discover_groups({root}, -1e308);
+  auto root_groups = walker::discover_groups({{root, false}}, -1e308);
   expect(root_groups.empty(), "unreadable root skipped by discover_groups");
   ::chmod(root.c_str(), 0755);
   fs::remove_all(root);
@@ -277,6 +280,102 @@ void test_codex_discovery() {
   fs::remove_all(root);
 }
 
+void test_archive_name_classification() {
+  expect(walker::parent_session_id("abc.jsonl").value_or("") == "abc",
+         "parent_session_id strips .jsonl");
+  expect(walker::parent_session_id("abc.jsonl.zst").value_or("") == "abc",
+         "parent_session_id strips .jsonl.zst");
+  expect(!walker::parent_session_id("abc.jsonl.gz").has_value(),
+         "parent_session_id rejects .jsonl.gz");
+  expect(walker::subagent_agent_id("agent-aaa.jsonl.zst").value_or("") == "aaa",
+         "subagent_agent_id strips prefix and both suffixes");
+  expect(!walker::subagent_agent_id("aaa.jsonl").has_value(),
+         "subagent_agent_id requires the agent- prefix");
+}
+
+void test_archive_root_expansion_is_sorted() {
+  fs::path root = make_temp_dir("archive-expand");
+  fs::create_directories(root / "llamabox");
+  fs::create_directories(root / "chonkers");
+  write_file(root / "README.txt", "not a host");
+  auto hosts = walker::expand_archive_root(root);
+  expect(hosts.size() == 2, "expand_archive_root sees two host dirs");
+  expect(hosts.size() == 2 && hosts[0].filename() == "chonkers" &&
+             hosts[1].filename() == "llamabox",
+         "expand_archive_root sorts host dirs by name");
+  expect(walker::expand_archive_root(root / "missing").empty(),
+         "expand_archive_root of a missing path is empty");
+  fs::remove_all(root);
+}
+
+void test_load_transcript_inflates_and_rejects() {
+  fs::path root = make_temp_dir("archive-load");
+  write_file(root / "plain.jsonl", "{\"a\":1}\n");
+  auto plain = walker::load_transcript(root / "plain.jsonl");
+  expect(plain.has_value(), "load_transcript reads a plain transcript");
+
+  std::string body = "{\"b\":2}\n";
+  std::vector<char> encoded(ZSTD_compressBound(body.size()));
+  size_t written = ZSTD_compress(encoded.data(), encoded.size(), body.data(),
+                                 body.size(), 10);
+  expect(!ZSTD_isError(written), "test fixture compresses");
+  {
+    std::ofstream out(root / "compressed.jsonl.zst", std::ios::binary);
+    out.write(encoded.data(), static_cast<std::streamsize>(written));
+  }
+  auto inflated = walker::load_transcript(root / "compressed.jsonl.zst");
+  expect(inflated.has_value() &&
+             std::string_view(*inflated) == std::string_view(body),
+         "load_transcript inflates a zstd transcript");
+
+  write_file(root / "broken.jsonl.zst", "this is not a zstd frame");
+  expect(!walker::load_transcript(root / "broken.jsonl.zst").has_value(),
+         "load_transcript rejects a corrupt frame");
+
+  // Corrupt frame declaring 0xFFFFFFFFFFFFFFFF bytes content size.
+  std::string huge_frame =
+      "\x28\xb5\x2f\xfd\xc0\x00\xff\xff\xff\xff\xff\xff\xff\xff";
+  write_file(root / "huge.jsonl.zst", huge_frame);
+  expect(!walker::load_transcript(root / "huge.jsonl.zst").has_value(),
+         "load_transcript rejects frame declaring huge content size");
+
+  // Frame with unknown content size (contentSizeFlag = 0).
+  ZSTD_CCtx *cctx = ZSTD_createCCtx();
+  ZSTD_CCtx_setParameter(cctx, ZSTD_c_contentSizeFlag, 0);
+  std::vector<char> unknown_encoded(ZSTD_compressBound(body.size()) + 128);
+  ZSTD_inBuffer in_buf{body.data(), body.size(), 0};
+  ZSTD_outBuffer out_buf{unknown_encoded.data(), unknown_encoded.size(), 0};
+  size_t comp_res = ZSTD_compressStream2(cctx, &out_buf, &in_buf, ZSTD_e_end);
+  expect(!ZSTD_isError(comp_res), "unknown-size stream compresses");
+  ZSTD_freeCCtx(cctx);
+  {
+    std::ofstream out(root / "unknown.jsonl.zst", std::ios::binary);
+    out.write(unknown_encoded.data(), static_cast<std::streamsize>(out_buf.pos));
+  }
+  auto unknown_inflated = walker::load_transcript(root / "unknown.jsonl.zst");
+  expect(unknown_inflated.has_value() &&
+             std::string_view(*unknown_inflated) == std::string_view(body),
+         "load_transcript inflates unknown-size zstd stream");
+
+  if (out_buf.pos > 4) {
+    std::ofstream out(root / "truncated_unknown.jsonl.zst", std::ios::binary);
+    out.write(unknown_encoded.data(), static_cast<std::streamsize>(out_buf.pos - 4));
+  }
+  expect(!walker::load_transcript(root / "truncated_unknown.jsonl.zst").has_value(),
+         "load_transcript rejects truncated unknown-size zstd stream");
+
+  if (written > 4) {
+    std::ofstream out(root / "truncated_declared.jsonl.zst", std::ios::binary);
+    out.write(encoded.data(), static_cast<std::streamsize>(written - 4));
+  }
+  expect(!walker::load_transcript(root / "truncated_declared.jsonl.zst").has_value(),
+         "load_transcript rejects truncated declared-size zstd frame");
+
+  expect(!walker::load_transcript(root / "missing.jsonl").has_value(),
+         "load_transcript returns nullopt for a missing file");
+  fs::remove_all(root);
+}
+
 } // namespace
 
 int main() {
@@ -287,6 +386,9 @@ int main() {
   test_nudge_to_whitespace_bounds();
   test_codex_scan_messages();
   test_codex_discovery();
+  test_archive_name_classification();
+  test_archive_root_expansion_is_sorted();
+  test_load_transcript_inflates_and_rejects();
 #ifndef _WIN32
   test_entry_mtime_before_dangling_symlink();
   test_discover_groups_unreadable_dirs();

@@ -5,13 +5,12 @@ use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::content::{extract_text, user_content_is_tool_result};
-use crate::{current_unix, default_projects_root, parse_iso8601, walker_roots};
+use crate::{current_unix, parse_iso8601, walker_roots};
 
 #[derive(Deserialize)]
 struct Entry {
@@ -86,9 +85,8 @@ fn beacon_re() -> Regex {
 /// well-formed beacon embedded in its text content. Return the (beacon,
 /// entry-timestamp) pair from the entry with the highest timestamp.
 fn find_latest_in_path(path: &Path, re: &Regex) -> Option<(Beacon, f64)> {
-    let file = File::open(path).ok()?;
+    let mut reader = crate::archive::open_transcript(path)?;
     let mut latest: Option<(Beacon, f64)> = None;
-    let mut reader = BufReader::new(file);
     // Reused line buffer; see walk_group in main.rs for the rationale.
     let mut line = String::with_capacity(8 * 1024);
     loop {
@@ -158,11 +156,10 @@ struct SessionEvents {
 fn collect_session_events_in_path(path: &Path, re: &Regex) -> SessionEvents {
     let mut beacons: Vec<(Beacon, f64)> = Vec::new();
     let mut events: Vec<(f64, bool)> = Vec::new();
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => return SessionEvents { beacons, events },
+    let mut reader = match crate::archive::open_transcript(path) {
+        Some(r) => r,
+        None => return SessionEvents { beacons, events },
     };
-    let mut reader = BufReader::new(file);
     // Reused line buffer; see walk_group in main.rs for the rationale.
     let mut buf = String::with_capacity(8 * 1024);
     loop {
@@ -250,6 +247,7 @@ struct LatestArgs {
     session_id: String,
     projects_root: Option<PathBuf>,
     extra_projects_roots: Vec<PathBuf>,
+    archive_roots: Vec<PathBuf>,
     read_config: bool,
     now_unix: Option<f64>,
 }
@@ -258,6 +256,7 @@ fn parse_latest_args(args: &[String]) -> Result<LatestArgs, String> {
     let mut session_id: Option<String> = None;
     let mut projects_root: Option<PathBuf> = None;
     let mut extra_projects_roots: Vec<PathBuf> = Vec::new();
+    let mut archive_roots: Vec<PathBuf> = Vec::new();
     let mut read_config = true;
     let mut now_unix: Option<f64> = None;
     let mut iter = args.iter();
@@ -274,6 +273,11 @@ fn parse_latest_args(args: &[String]) -> Result<LatestArgs, String> {
             "--extra-projects-root" => {
                 extra_projects_roots.push(PathBuf::from(
                     iter.next().ok_or("--extra-projects-root needs a value")?,
+                ));
+            }
+            "--archive-root" => {
+                archive_roots.push(PathBuf::from(
+                    iter.next().ok_or("--archive-root needs a value")?,
                 ));
             }
             "--no-config" => {
@@ -295,6 +299,7 @@ fn parse_latest_args(args: &[String]) -> Result<LatestArgs, String> {
         session_id,
         projects_root,
         extra_projects_roots,
+        archive_roots,
         read_config,
         now_unix,
     })
@@ -309,38 +314,48 @@ fn parse_latest_args(args: &[String]) -> Result<LatestArgs, String> {
 /// instead of listing every slug dir's contents the way `glob` does, which is
 /// the bulk of the win on a large fleet. Result order is irrelevant: the
 /// caller reduces over the matches with `max_by` on timestamp.
-fn discover_latest_paths(roots: &[PathBuf], session_id: &str) -> Vec<PathBuf> {
-    let parent_name = format!("{session_id}.jsonl");
-    let sub_name = format!("agent-{session_id}.jsonl");
+fn discover_latest_paths(
+    roots: &[crate::walker_roots::ResolvedRoot],
+    session_id: &str,
+) -> Vec<PathBuf> {
+    let parent_names = [
+        format!("{session_id}.jsonl"),
+        format!("{session_id}.jsonl.zst"),
+    ];
+    let subagent_names = [
+        format!("agent-{session_id}.jsonl"),
+        format!("agent-{session_id}.jsonl.zst"),
+    ];
     let mut paths: Vec<PathBuf> = Vec::new();
     for root in roots {
-        let slug_entries = match std::fs::read_dir(root) {
-            Ok(e) => e,
+        let slug_entries = match std::fs::read_dir(&root.path) {
+            Ok(entries) => entries,
             Err(_) => continue,
         };
         for slug in slug_entries.flatten() {
-            if !slug.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            if !slug.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
                 continue;
             }
             let slug_path = slug.path();
-            // Parent transcript: <root>/<slug>/<session_id>.jsonl
-            let parent = slug_path.join(&parent_name);
-            if parent.is_file() {
-                paths.push(parent);
+            for name in &parent_names {
+                let parent = slug_path.join(name);
+                if parent.is_file() {
+                    paths.push(parent);
+                }
             }
-            // Subagent transcripts live one level deeper, under each session
-            // directory's `subagents/` folder.
             let session_entries = match std::fs::read_dir(&slug_path) {
-                Ok(e) => e,
+                Ok(entries) => entries,
                 Err(_) => continue,
             };
             for session in session_entries.flatten() {
-                if !session.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                if !session.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
                     continue;
                 }
-                let sub = session.path().join("subagents").join(&sub_name);
-                if sub.is_file() {
-                    paths.push(sub);
+                for name in &subagent_names {
+                    let subagent = session.path().join("subagents").join(name);
+                    if subagent.is_file() {
+                        paths.push(subagent);
+                    }
                 }
             }
         }
@@ -357,9 +372,12 @@ pub fn run_latest(args: &[String]) {
             std::process::exit(2);
         }
     };
-    let primary = parsed.projects_root.unwrap_or_else(default_projects_root);
-    let roots =
-        walker_roots::resolve_roots(primary, &parsed.extra_projects_roots, parsed.read_config);
+    let roots = walker_roots::resolve_roots(
+        parsed.projects_root.clone(),
+        &parsed.extra_projects_roots,
+        &parsed.archive_roots,
+        parsed.read_config,
+    );
     let now_unix = parsed.now_unix.unwrap_or_else(current_unix);
 
     // Try parent transcript first, then any subagent transcript, across
@@ -394,6 +412,7 @@ struct HistoryArgs {
     win_start_unix: f64,
     projects_root: Option<PathBuf>,
     extra_projects_roots: Vec<PathBuf>,
+    archive_roots: Vec<PathBuf>,
     read_config: bool,
     now_unix: Option<f64>,
 }
@@ -403,6 +422,7 @@ fn parse_history_args(args: &[String]) -> Result<HistoryArgs, String> {
     let mut win_start_unix: Option<f64> = None;
     let mut projects_root: Option<PathBuf> = None;
     let mut extra_projects_roots: Vec<PathBuf> = Vec::new();
+    let mut archive_roots: Vec<PathBuf> = Vec::new();
     let mut read_config = true;
     let mut now_unix: Option<f64> = None;
     let mut iter = args.iter();
@@ -434,6 +454,11 @@ fn parse_history_args(args: &[String]) -> Result<HistoryArgs, String> {
                     iter.next().ok_or("--extra-projects-root needs a value")?,
                 ));
             }
+            "--archive-root" => {
+                archive_roots.push(PathBuf::from(
+                    iter.next().ok_or("--archive-root needs a value")?,
+                ));
+            }
             "--no-config" => {
                 read_config = false;
             }
@@ -453,6 +478,7 @@ fn parse_history_args(args: &[String]) -> Result<HistoryArgs, String> {
         win_start_unix: win_start_unix.unwrap_or(0.0),
         projects_root,
         extra_projects_roots,
+        archive_roots,
         read_config,
         now_unix,
     })
@@ -493,9 +519,12 @@ pub fn run_history(args: &[String]) {
     // Beacons before window_lo are dropped; pairing runs on the survivors, so
     // a pair requires its begin (and end) timestamp inside the window.
     let window_lo = period_cutoff.max(parsed.win_start_unix);
-    let primary = parsed.projects_root.unwrap_or_else(default_projects_root);
-    let roots =
-        walker_roots::resolve_roots(primary, &parsed.extra_projects_roots, parsed.read_config);
+    let roots = walker_roots::resolve_roots(
+        parsed.projects_root.clone(),
+        &parsed.extra_projects_roots,
+        &parsed.archive_roots,
+        parsed.read_config,
+    );
 
     // Same discovery as cost/events, with the mtime prune disabled: history
     // pairing must see every transcript regardless of age.
@@ -721,6 +750,7 @@ mod tests {
         assert_eq!(r.session_id, "abc");
         assert_eq!(r.projects_root, Some(PathBuf::from("/tmp/p")));
         assert_eq!(r.extra_projects_roots, vec![PathBuf::from("/tmp/q")]);
+        assert_eq!(r.archive_roots, Vec::<PathBuf>::new());
         assert!(!r.read_config);
         assert_eq!(r.now_unix, Some(1.5));
     }
@@ -744,6 +774,7 @@ mod tests {
             "--win-start",
             "--projects-root",
             "--extra-projects-root",
+            "--archive-root",
             "--now",
         ] {
             assert!(
@@ -851,8 +882,11 @@ mod tests {
         let subagents = slug.join("sid-2").join("subagents");
         fs::create_dir_all(&subagents).unwrap();
         fs::write(subagents.join("agent-x.jsonl"), b"").unwrap();
-        let groups =
-            crate::transcript::discover_groups(std::slice::from_ref(&root), f64::NEG_INFINITY);
+        let resolved = [crate::walker_roots::ResolvedRoot {
+            path: root.clone(),
+            from_archive: false,
+        }];
+        let groups = crate::transcript::discover_groups(&resolved, f64::NEG_INFINITY);
         let k1 = ("slug".to_string(), "sid-1".to_string());
         let k2 = ("slug".to_string(), "sid-2".to_string());
         assert!(groups.contains_key(&k1));
@@ -867,7 +901,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let root = tempdir_path("latest-unreadable-root");
         fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
-        let paths = discover_latest_paths(std::slice::from_ref(&root), "any-session");
+        let resolved = [crate::walker_roots::ResolvedRoot {
+            path: root.clone(),
+            from_archive: false,
+        }];
+        let paths = discover_latest_paths(&resolved, "any-session");
         fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
         let _ = fs::remove_dir_all(&root);
         assert!(
@@ -894,7 +932,11 @@ mod tests {
         fs::create_dir_all(&good_slug).unwrap();
         fs::write(good_slug.join("target-session.jsonl"), b"").unwrap();
 
-        let paths = discover_latest_paths(std::slice::from_ref(&root), "target-session");
+        let resolved = [crate::walker_roots::ResolvedRoot {
+            path: root.clone(),
+            from_archive: false,
+        }];
+        let paths = discover_latest_paths(&resolved, "target-session");
 
         fs::set_permissions(&bad_slug, fs::Permissions::from_mode(0o755)).unwrap();
         let _ = fs::remove_dir_all(&root);

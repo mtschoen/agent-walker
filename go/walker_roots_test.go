@@ -162,7 +162,7 @@ func TestResolveSearchRootsAddsCodexOnlyForDefaultPrimary(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 
-	defaults := ResolveSearchRoots(defaultProjectsRoot(), false, []string{cliRoot}, false)
+	defaults := ResolveSearchRoots(defaultProjectsRoot(), false, []string{cliRoot}, nil, false)
 	wantDefaults := []transcriptRoot{
 		{Path: claudeRoot, Format: transcriptFormatClaudeCode},
 		{Path: codexRoot, Format: transcriptFormatCodex},
@@ -177,7 +177,7 @@ func TestResolveSearchRootsAddsCodexOnlyForDefaultPrimary(t *testing.T) {
 		}
 	}
 
-	explicit := ResolveSearchRoots(explicitRoot, true, nil, false)
+	explicit := ResolveSearchRoots(explicitRoot, true, nil, nil, false)
 	if len(explicit) != 1 || explicit[0] != (transcriptRoot{Path: explicitRoot, Format: transcriptFormatClaudeCode}) {
 		t.Fatalf("explicit search roots = %+v; want explicit Claude root only", explicit)
 	}
@@ -186,7 +186,7 @@ func TestResolveSearchRootsAddsCodexOnlyForDefaultPrimary(t *testing.T) {
 func TestResolveSearchRootsSkipsInvalidExtra(t *testing.T) {
 	primary := t.TempDir()
 	invalid := filepath.Join(t.TempDir(), "missing")
-	got := ResolveSearchRoots(primary, true, []string{invalid}, false)
+	got := ResolveSearchRoots(primary, true, []string{invalid}, nil, false)
 	if len(got) != 1 || got[0].Path != primary {
 		t.Fatalf("search roots = %+v; want primary only", got)
 	}
@@ -253,7 +253,7 @@ func TestReadExtraRootsLeadingWhitespace(t *testing.T) {
 // — must return empty without stderr noise. Also covers EvalSymlinks happy
 // path on an extra that does exist.
 func TestResolveRootsPrimaryMissing(t *testing.T) {
-	got := ResolveRoots("/no/such/primary/path", nil, false)
+	got := rootPaths(ResolveRoots("/no/such/primary/path", true, nil, nil, false))
 	if len(got) != 0 {
 		t.Fatalf("expected empty result with missing primary, got %v", got)
 	}
@@ -263,7 +263,7 @@ func TestResolveRootsPrimaryMissing(t *testing.T) {
 // stderr branch (just confirm it doesn't crash and returns the primary only).
 func TestResolveRootsExtraSkippedWithStderr(t *testing.T) {
 	primary := t.TempDir()
-	got := ResolveRoots(primary, []string{"/nope-extra-path"}, false)
+	got := rootPaths(ResolveRoots(primary, true, []string{"/nope-extra-path"}, nil, false))
 	if len(got) != 1 {
 		t.Fatalf("expected primary-only result, got %v", got)
 	}
@@ -278,7 +278,7 @@ func TestResolveRootsDedupsViaSymlink(t *testing.T) {
 	if err := os.Symlink(primary, linkPath); err != nil {
 		t.Skipf("symlink unsupported: %v", err)
 	}
-	got := ResolveRoots(primary, []string{linkPath}, false)
+	got := rootPaths(ResolveRoots(primary, true, []string{linkPath}, nil, false))
 	if len(got) != 1 {
 		t.Fatalf("expected 1 deduped result, got %v", got)
 	}
@@ -293,7 +293,7 @@ func TestResolveRootsBrokenSymlinkSkipped(t *testing.T) {
 	if err := os.Symlink("/no/such/target", broken); err != nil {
 		t.Skipf("symlink unsupported: %v", err)
 	}
-	got := ResolveRoots(dir, []string{broken}, false)
+	got := rootPaths(ResolveRoots(dir, true, []string{broken}, nil, false))
 	if len(got) != 1 {
 		t.Fatalf("expected primary-only result, got %v", got)
 	}
@@ -306,7 +306,7 @@ func TestResolveRootsBrokenSymlinkSkipped(t *testing.T) {
 func TestResolveRootsNonexistentExtraSkipped(t *testing.T) {
 	primary := t.TempDir()
 	nonexistent := filepath.Join(t.TempDir(), "does-not-exist")
-	got := ResolveRoots(primary, []string{nonexistent}, false)
+	got := rootPaths(ResolveRoots(primary, true, []string{nonexistent}, nil, false))
 	if len(got) != 1 {
 		t.Fatalf("expected 1 result (primary only), got %v", got)
 	}
@@ -326,8 +326,18 @@ func TestResolveRootsNonexistentExtraSkipped(t *testing.T) {
 // twice (once as primary, once as an extra) yields only a single entry.
 func TestResolveRootsDedupDuplicatePaths(t *testing.T) {
 	primary := t.TempDir()
-	got := ResolveRoots(primary, []string{primary}, false)
+	got := rootPaths(ResolveRoots(primary, true, []string{primary}, nil, false))
 	if len(got) != 1 {
 		t.Fatalf("expected 1 deduped result for same primary+extra, got %d (%v)", len(got), got)
 	}
+}
+
+// rootPaths flattens resolved roots to their paths for assertions that
+// predate the FromArchive field.
+func rootPaths(roots []resolvedRoot) []string {
+	paths := make([]string, 0, len(roots))
+	for _, root := range roots {
+		paths = append(paths, root.Path)
+	}
+	return paths
 }

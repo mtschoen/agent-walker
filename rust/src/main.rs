@@ -3,13 +3,13 @@
 
 use chrono::DateTime;
 use rayon::prelude::*;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::transcript::{cost_for, discover_groups, Entry};
 
+mod archive;
 mod beacons;
 mod content;
 mod events;
@@ -44,6 +44,7 @@ COST OPTIONS (default mode):
     --win-start <unix>            Required. Cost-window start (unix epoch).
     --projects-root <path>        Transcript root (default: ~/.claude/projects).
     --extra-projects-root <path>  Additional root; repeatable.
+    --archive-root <path>         Compressed archive root; repeatable.
     --no-config                   Skip ~/.claude/walker-roots.json extras.
     --now <unix>                  Pin "now" (default: wall clock; for tests).
 
@@ -82,6 +83,7 @@ struct Args {
     now_unix: Option<f64>,
     projects_root: Option<PathBuf>,
     extra_projects_roots: Vec<PathBuf>,
+    archive_roots: Vec<PathBuf>,
     read_config: bool,
 }
 
@@ -125,6 +127,11 @@ fn parse_cost_args(args: &[String]) -> Result<Args, String> {
             "--extra-projects-root" => {
                 result.extra_projects_roots.push(PathBuf::from(
                     iter.next().ok_or("--extra-projects-root needs a value")?,
+                ));
+            }
+            "--archive-root" => {
+                result.archive_roots.push(PathBuf::from(
+                    iter.next().ok_or("--archive-root needs a value")?,
                 ));
             }
             "--no-config" => {
@@ -174,11 +181,10 @@ fn walk_group(paths: &[PathBuf], period_cutoff: f64, win_start_unix: f64) -> Gro
     // a multi-hundred-MB fleet. read_line() retains capacity across clear().
     let mut line = String::with_capacity(8 * 1024);
     for path in paths {
-        let file = match File::open(path) {
-            Ok(f) => f,
-            Err(_) => continue,
+        let mut reader = match crate::archive::open_transcript(path) {
+            Some(reader) => reader,
+            None => continue,
         };
-        let mut reader = BufReader::new(file);
         loop {
             line.clear();
             match reader.read_line(&mut line) {
@@ -302,9 +308,12 @@ fn run_cost(args: &[String]) {
     let now_unix = parsed.now_unix.unwrap_or_else(current_unix);
     let period_cutoff = now_unix - parsed.period_seconds as f64;
     let earliest = period_cutoff.min(parsed.win_start_unix);
-    let primary = parsed.projects_root.unwrap_or_else(default_projects_root);
-    let roots =
-        walker_roots::resolve_roots(primary, &parsed.extra_projects_roots, parsed.read_config);
+    let roots = walker_roots::resolve_roots(
+        parsed.projects_root.clone(),
+        &parsed.extra_projects_roots,
+        &parsed.archive_roots,
+        parsed.read_config,
+    );
 
     let groups = discover_groups(&roots, earliest);
     let total_files: usize = groups.values().map(|v| v.len()).sum();
@@ -581,5 +590,51 @@ mod tests {
         };
         let t: (f64, f64) = g.into();
         assert_eq!(t, (1.0, 2.0));
+    }
+
+    #[test]
+    fn walk_group_reads_a_compressed_transcript() {
+        let directory = tempdir_path("walk-group-zst");
+        let path = directory.join("session.jsonl.zst");
+        let body = concat!(
+            r#"{"timestamp":"2025-01-01T00:00:01Z","message":{"role":"assistant","id":"z1","model":"sonnet","usage":{"input_tokens":1000000}}}"#,
+            "\n"
+        );
+        fs::write(&path, zstd::encode_all(body.as_bytes(), 10).unwrap()).unwrap();
+        let result = walk_group(&[path], 0.0, 0.0);
+        // 1M input tokens at the generic sonnet rate ($3.00 / MTok).
+        assert!((result.trailing - 3.0).abs() < 1e-6);
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn walk_group_skips_a_corrupt_compressed_transcript() {
+        let directory = tempdir_path("walk-group-corrupt");
+        let path = directory.join("session.jsonl.zst");
+        fs::write(&path, b"this is not a zstd frame").unwrap();
+        let result = walk_group(&[path], 0.0, 0.0);
+        assert_eq!(result.trailing, 0.0);
+        assert_eq!(result.window, 0.0);
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn parse_cost_args_collects_repeated_archive_roots() {
+        let parsed = parse_cost_args(&[
+            s("--period"),
+            s("60"),
+            s("--win-start"),
+            s("0"),
+            s("--archive-root"),
+            s("/one"),
+            s("--archive-root"),
+            s("/two"),
+        ])
+        .unwrap();
+        assert_eq!(
+            parsed.archive_roots,
+            vec![PathBuf::from("/one"), PathBuf::from("/two")]
+        );
+        assert!(parse_cost_args(&[s("--period"), s("60"), s("--win-start"), s("0"), s("--archive-root")]).is_err());
     }
 }

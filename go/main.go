@@ -38,6 +38,7 @@ COST OPTIONS (default mode):
     --win-start <unix>            Required. Cost-window start (unix epoch).
     --projects-root <path>        Transcript root (default: ~/.claude/projects).
     --extra-projects-root <path>  Additional root; repeatable.
+    --archive-root <path>         Compressed archive root; repeatable.
     --no-config                   Skip ~/.claude/walker-roots.json extras.
     --now <unix>                  Pin "now" (default: wall clock; for tests).
 
@@ -71,12 +72,14 @@ func wantsHelp(raw []string) bool {
 
 // CLI arguments.
 type arguments struct {
-	periodSeconds      uint64
-	winStartUnix       float64
-	nowUnix            float64
-	projectsRoot       string
-	extraProjectsRoots []string
-	readConfig         bool
+	periodSeconds        uint64
+	winStartUnix         float64
+	nowUnix              float64
+	projectsRoot         string
+	projectsRootExplicit bool
+	extraProjectsRoots   []string
+	archiveRoots         []string
+	readConfig           bool
 }
 
 func parseArguments(rawArgs []string) (arguments, error) {
@@ -130,12 +133,19 @@ func parseArguments(rawArgs []string) (arguments, error) {
 			}
 			i++
 			out.projectsRoot = rawArgs[i]
+			out.projectsRootExplicit = true
 		case "--extra-projects-root":
 			if i+1 >= len(rawArgs) {
 				return arguments{}, fmt.Errorf("--extra-projects-root needs a value")
 			}
 			i++
 			out.extraProjectsRoots = append(out.extraProjectsRoots, rawArgs[i])
+		case "--archive-root":
+			if i+1 >= len(rawArgs) {
+				return arguments{}, fmt.Errorf("--archive-root needs a value")
+			}
+			i++
+			out.archiveRoots = append(out.archiveRoots, rawArgs[i])
 		case "--no-config":
 			out.readConfig = false
 		case "--version":
@@ -379,7 +389,7 @@ func walkGroup(paths []string, periodCutoff, winStart float64) groupResult {
 	seenIDs := make(map[string]struct{})
 
 	for _, path := range paths {
-		file, err := os.Open(path)
+		file, err := openTranscript(path)
 		if err != nil {
 			continue
 		}
@@ -447,37 +457,14 @@ type groupKey struct {
 // filter, and groups them by (slug, session_id). Groups merge naturally
 // across roots: same (slug, session_id) on two roots concatenates the path
 // lists, and dedup happens later in walkGroup via seenIDs on message.id.
-func discoverGroups(roots []string, earliest float64) map[groupKey][]string {
+func discoverGroups(roots []resolvedRoot, earliest float64) map[groupKey][]string {
 	groups := make(map[groupKey][]string)
+	claimed := make(map[string]struct{})
 	earliestTime := time.Unix(0, int64(earliest*1e9))
 
-	for _, root := range roots {
-		// Parents: <root>/<slug>/<session_id>.jsonl
-		parentGlob := filepath.Join(root, "*", "*.jsonl")
-		parentMatches, err := filepath.Glob(parentGlob)
-		if err == nil {
-			for _, path := range parentMatches {
-				info, err := os.Stat(path)
-				if err != nil {
-					continue
-				}
-				// Glob matches directories named *.jsonl too; parents must
-				// be regular files (SPEC Discovery).
-				if !info.Mode().IsRegular() {
-					continue
-				}
-				if info.ModTime().Before(earliestTime) {
-					continue
-				}
-				slug := filepath.Base(filepath.Dir(path))
-				sessionID := strings.TrimSuffix(filepath.Base(path), ".jsonl")
-				key := groupKey{slug: slug, sessionID: sessionID}
-				groups[key] = append(groups[key], path)
-			}
-		}
-
-		// Subagents: <root>/<slug>/<session_id>/subagents/agent-*.jsonl
-		// filepath.Glob doesn't support **, so we walk two levels.
+	for _, resolved := range roots {
+		root := resolved.Path
+		skippedSuffixes := 0
 		slugEntries, err := os.ReadDir(root)
 		if err != nil {
 			continue
@@ -486,43 +473,75 @@ func discoverGroups(roots []string, earliest float64) map[groupKey][]string {
 			if !slugEntry.IsDir() {
 				continue
 			}
-			slugPath := filepath.Join(root, slugEntry.Name())
-			sessionEntries, err := os.ReadDir(slugPath)
+			slug := slugEntry.Name()
+			slugDir := filepath.Join(root, slug)
+			entries, err := os.ReadDir(slugDir)
 			if err != nil {
 				continue
 			}
-			for _, sessionEntry := range sessionEntries {
-				if !sessionEntry.IsDir() {
-					continue
-				}
-				subagentsDir := filepath.Join(slugPath, sessionEntry.Name(), "subagents")
-				subEntries, err := os.ReadDir(subagentsDir)
-				if err != nil {
-					continue // no subagents dir is normal
-				}
-				for _, subEntry := range subEntries {
-					name := subEntry.Name()
-					if subEntry.IsDir() || !strings.HasPrefix(name, "agent-") || !strings.HasSuffix(name, ".jsonl") {
+			for _, entry := range entries {
+				if !entry.IsDir() {
+					sessionID, ok := parentSessionID(entry.Name())
+					if !ok {
+						skippedSuffixes++
 						continue
 					}
-					path := filepath.Join(subagentsDir, name)
-					info, err := os.Stat(path)
-					if err != nil {
+					path := filepath.Join(slugDir, entry.Name())
+					info, err := entry.Info()
+					if err != nil || !info.Mode().IsRegular() {
 						continue
 					}
 					if info.ModTime().Before(earliestTime) {
 						continue
 					}
-					key := groupKey{
-						slug:      slugEntry.Name(),
-						sessionID: sessionEntry.Name(),
+					key := slug + "\x00" + sessionID + "\x00"
+					if _, exists := claimed[key]; exists {
+						continue
 					}
-					groups[key] = append(groups[key], path)
+					claimed[key] = struct{}{}
+					group := groupKey{slug: slug, sessionID: sessionID}
+					groups[group] = append(groups[group], path)
+					continue
+				}
+				sessionID := entry.Name()
+				subagentsDir := filepath.Join(slugDir, sessionID, "subagents")
+				subEntries, err := os.ReadDir(subagentsDir)
+				if err != nil {
+					continue
+				}
+				for _, subEntry := range subEntries {
+					if subEntry.IsDir() {
+						continue
+					}
+					agentID, ok := subagentAgentID(subEntry.Name())
+					if !ok {
+						skippedSuffixes++
+						continue
+					}
+					info, err := subEntry.Info()
+					if err != nil || !info.Mode().IsRegular() {
+						continue
+					}
+					if info.ModTime().Before(earliestTime) {
+						continue
+					}
+					key := slug + "\x00" + sessionID + "\x00" + agentID
+					if _, exists := claimed[key]; exists {
+						continue
+					}
+					claimed[key] = struct{}{}
+					group := groupKey{slug: slug, sessionID: sessionID}
+					groups[group] = append(groups[group],
+						filepath.Join(subagentsDir, subEntry.Name()))
 				}
 			}
 		}
+		if resolved.FromArchive && skippedSuffixes > 0 {
+			fmt.Fprintf(os.Stderr,
+				"walker: %s: skipped %d files with an unrecognized suffix\n",
+				root, skippedSuffixes)
+		}
 	}
-
 	return groups
 }
 
@@ -586,7 +605,8 @@ func runCost(rawArgs []string) {
 	periodCutoff := args.nowUnix - float64(args.periodSeconds)
 	earliest := math.Min(periodCutoff, args.winStartUnix)
 
-	roots := ResolveRoots(args.projectsRoot, args.extraProjectsRoots, args.readConfig)
+	roots := ResolveRoots(args.projectsRoot, args.projectsRootExplicit,
+		args.extraProjectsRoots, args.archiveRoots, args.readConfig)
 	groups := discoverGroups(roots, earliest)
 
 	// Count totals before we consume the map.

@@ -45,6 +45,7 @@ struct Args {
   std::optional<double> now_unix;
   std::optional<fs::path> projects_root;
   std::vector<fs::path> extra_projects_roots;
+  std::vector<fs::path> archive_roots;
   bool read_config = true;
 };
 
@@ -68,6 +69,7 @@ COST OPTIONS (default mode):
     --win-start <unix>            Required. Cost-window start (unix epoch).
     --projects-root <path>        Transcript root (default: ~/.claude/projects).
     --extra-projects-root <path>  Additional root; repeatable.
+    --archive-root <path>         Compressed archive root; repeatable.
     --no-config                   Skip ~/.claude/walker-roots.json extras.
     --now <unix>                  Pin "now" (default: wall clock; for tests).
 
@@ -142,6 +144,8 @@ static Args parse_args(const std::vector<std::string> &argv) {
       std::exit(0);
     } else if (flag == "--extra-projects-root") {
       args.extra_projects_roots.emplace_back(next());
+    } else if (flag == "--archive-root") {
+      args.archive_roots.emplace_back(next());
     } else if (flag == "--no-config") {
       args.read_config = false;
     } else {
@@ -197,9 +201,9 @@ static int run_cost(const std::vector<std::string> &argv) {
   double period_cutoff = now_unix - static_cast<double>(args.period_seconds);
   double earliest = std::min(period_cutoff, args.win_start_unix);
 
-  fs::path primary = args.projects_root.value_or(default_projects_root());
-  std::vector<fs::path> roots = walker::resolve_roots(
-      primary, args.extra_projects_roots, args.read_config);
+  std::vector<walker::ResolvedRoot> roots = walker::resolve_roots(
+      args.projects_root, args.extra_projects_roots, args.archive_roots,
+      args.read_config);
 
   GroupMap groups = discover_groups(roots, earliest);
 

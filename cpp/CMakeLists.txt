@@ -19,8 +19,26 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(simdjson)
 
+# libzstd - built from source via FetchContent, static, exactly like simdjson
+# above. zstd's CMake lives in a subdirectory of the repo, hence SOURCE_SUBDIR.
+# Programs, shared library, tests, and legacy format support are all off: the
+# walker needs only the decompression entry points.
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ZSTD_LEGACY_SUPPORT OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    zstd
+    GIT_REPOSITORY https://github.com/facebook/zstd.git
+    GIT_TAG v1.5.7
+    GIT_SHALLOW TRUE
+    SOURCE_SUBDIR build/cmake
+)
+FetchContent_MakeAvailable(zstd)
+
 add_executable(walker main.cpp beacons.cpp events.cpp search.cpp)
-target_link_libraries(walker PRIVATE simdjson::simdjson)
+target_link_libraries(walker PRIVATE simdjson::simdjson libzstd_static)
 
 if(MSVC)
     # /GL + /LTCG = whole-program optimization (MSVC's LTO). Already enabled.
@@ -56,7 +74,7 @@ endif()
 option(WALKER_BUILD_TESTS "Build the native unit-test binary" OFF)
 if(WALKER_BUILD_TESTS)
     add_executable(walker_unit_tests tests/unit_tests.cpp)
-    target_link_libraries(walker_unit_tests PRIVATE simdjson::simdjson)
+    target_link_libraries(walker_unit_tests PRIVATE simdjson::simdjson libzstd_static)
     if(WALKER_COVERAGE)
         target_compile_options(walker_unit_tests PRIVATE -fprofile-instr-generate -fcoverage-mapping -O0 -g)
         target_link_options(walker_unit_tests PRIVATE -fprofile-instr-generate -fcoverage-mapping)

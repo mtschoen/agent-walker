@@ -5,12 +5,11 @@
 
 use rayon::prelude::*;
 use serde::Serialize;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
 use crate::transcript::{cost_for, discover_groups, Entry};
-use crate::{current_unix, default_projects_root, parse_iso8601, walker_roots};
+use crate::{current_unix, parse_iso8601, walker_roots};
 
 // ── Output record ─────────────────────────────────────────────────────────────
 
@@ -33,8 +32,9 @@ pub(crate) struct EventsArgs {
     /// Defaults to `now - period` when not supplied by the caller.
     pub(crate) win_start_unix: f64,
     pub(crate) now_unix: f64,
-    pub(crate) projects_root: PathBuf,
+    pub(crate) projects_root: Option<PathBuf>,
     pub(crate) extra_projects_roots: Vec<PathBuf>,
+    pub(crate) archive_roots: Vec<PathBuf>,
     pub(crate) read_config: bool,
 }
 
@@ -44,6 +44,7 @@ pub(crate) fn parse_events_args(raw: &[String]) -> Result<EventsArgs, String> {
     let mut now_raw: Option<f64> = None;
     let mut projects_root: Option<PathBuf> = None;
     let mut extra_projects_roots: Vec<PathBuf> = Vec::new();
+    let mut archive_roots: Vec<PathBuf> = Vec::new();
     let mut read_config = true;
 
     let mut iter = raw.iter();
@@ -82,6 +83,11 @@ pub(crate) fn parse_events_args(raw: &[String]) -> Result<EventsArgs, String> {
                     iter.next().ok_or("--extra-projects-root needs a value")?,
                 ));
             }
+            "--archive-root" => {
+                archive_roots.push(PathBuf::from(
+                    iter.next().ok_or("--archive-root needs a value")?,
+                ));
+            }
             "--no-config" => {
                 read_config = false;
             }
@@ -106,8 +112,9 @@ pub(crate) fn parse_events_args(raw: &[String]) -> Result<EventsArgs, String> {
         period_seconds,
         win_start_unix,
         now_unix,
-        projects_root: projects_root.unwrap_or_else(default_projects_root),
+        projects_root,
         extra_projects_roots,
+        archive_roots,
         read_config,
     })
 }
@@ -129,11 +136,10 @@ fn walk_group_events(
     // Reused line buffer; see walk_group in main.rs for the rationale.
     let mut line = String::with_capacity(8 * 1024);
     for path in paths {
-        let file = match File::open(path) {
-            Ok(f) => f,
-            Err(_) => continue,
+        let mut reader = match crate::archive::open_transcript(path) {
+            Some(reader) => reader,
+            None => continue,
         };
-        let mut reader = BufReader::new(file);
         loop {
             line.clear();
             match reader.read_line(&mut line) {
@@ -214,6 +220,7 @@ pub(crate) fn run(raw: &[String]) -> i32 {
     let roots = walker_roots::resolve_roots(
         args.projects_root,
         &args.extra_projects_roots,
+        &args.archive_roots,
         args.read_config,
     );
 
@@ -341,6 +348,7 @@ mod tests {
             "--now",
             "--projects-root",
             "--extra-projects-root",
+            "--archive-root",
         ] {
             assert!(
                 parse_events_args(&[s("--period"), s("60"), s(flag)]).is_err(),
@@ -386,8 +394,9 @@ mod tests {
             s("50.0"),
         ])
         .unwrap();
-        assert_eq!(r.projects_root, PathBuf::from("/tmp/p"));
+        assert_eq!(r.projects_root, Some(PathBuf::from("/tmp/p")));
         assert_eq!(r.extra_projects_roots, vec![PathBuf::from("/tmp/q")]);
+        assert_eq!(r.archive_roots, Vec::<PathBuf>::new());
         assert_eq!(r.win_start_unix, 50.0);
     }
 

@@ -1,5 +1,5 @@
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{read_dir, DirEntry};
 use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
@@ -168,74 +168,99 @@ pub(crate) fn entry_mtime_before(entry: &DirEntry, earliest: f64) -> bool {
 /// subagents (`<slug>/<session>/subagents/agent-*.jsonl`) are classified in
 /// one directory pass, replacing the prior two-glob approach that re-read
 /// every slug dir twice and paid an extra stat per file.
+/// `(slug, session_id, agent_id)`. `agent_id` is None for a parent transcript.
+pub(crate) type SessionKey = (String, String, Option<String>);
+
 pub(crate) fn discover_groups(
-    roots: &[PathBuf],
+    roots: &[crate::walker_roots::ResolvedRoot],
     earliest: f64,
 ) -> HashMap<(String, String), Vec<PathBuf>> {
     let mut groups: HashMap<(String, String), Vec<PathBuf>> = HashMap::new();
+    let mut claimed: HashSet<SessionKey> = HashSet::new();
     let prune = earliest > f64::NEG_INFINITY;
 
     for root in roots {
-        let slug_entries = match read_dir(root) {
-            Ok(e) => e,
+        // Counted only for archive-expanded roots. A live root ignores stray
+        // files silently, as it always has: cost mode runs on every status
+        // line tick and must not gain stderr from a stray file in the live
+        // tree. See SPEC "Discovery".
+        let mut skipped_suffixes: u64 = 0;
+        let slug_entries = match read_dir(&root.path) {
+            Ok(entries) => entries,
             Err(_) => continue,
         };
         for slug_entry in slug_entries.flatten() {
-            if !slug_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            if !slug_entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
                 continue;
             }
             let slug = slug_entry.file_name().to_string_lossy().to_string();
             let entries = match read_dir(slug_entry.path()) {
-                Ok(e) => e,
+                Ok(entries) => entries,
                 Err(_) => continue,
             };
-            // file_type() on a freshly-listed entry fails only on a
-            // filesystem race; fold that failure into the iterator filter.
             for (entry, file_type) in entries
                 .flatten()
-                .filter_map(|entry| entry.file_type().ok().map(|t| (entry, t)))
+                .filter_map(|entry| entry.file_type().ok().map(|kind| (entry, kind)))
             {
                 if file_type.is_file() {
-                    // Parent: <root>/<slug>/<session_id>.jsonl
                     let name = entry.file_name();
                     let name = name.to_string_lossy();
-                    let stem = match name.strip_suffix(".jsonl") {
-                        Some(s) => s,
-                        None => continue,
+                    let Some(session_id) = crate::archive::parent_session_id(&name) else {
+                        skipped_suffixes += 1;
+                        continue;
                     };
                     if prune && entry_mtime_before(&entry, earliest) {
                         continue;
                     }
+                    let key = (slug.clone(), session_id.to_string(), None);
+                    if !claimed.insert(key) {
+                        continue;
+                    }
                     groups
-                        .entry((slug.clone(), stem.to_string()))
+                        .entry((slug.clone(), session_id.to_string()))
                         .or_default()
                         .push(entry.path());
                 } else if file_type.is_dir() {
-                    // Subagents: <root>/<slug>/<session>/subagents/agent-*.jsonl
-                    let sid = entry.file_name().to_string_lossy().to_string();
+                    let session_id = entry.file_name().to_string_lossy().to_string();
                     let sub_entries = match read_dir(entry.path().join("subagents")) {
-                        Ok(e) => e,
+                        Ok(entries) => entries,
                         Err(_) => continue,
                     };
                     for sub in sub_entries.flatten() {
-                        if !sub.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                        if !sub.file_type().map(|kind| kind.is_file()).unwrap_or(false) {
                             continue;
                         }
                         let sub_name = sub.file_name();
                         let sub_name = sub_name.to_string_lossy();
-                        if !sub_name.starts_with("agent-") || !sub_name.ends_with(".jsonl") {
+                        let Some(agent_id) = crate::archive::subagent_agent_id(&sub_name) else {
+                            skipped_suffixes += 1;
                             continue;
-                        }
+                        };
                         if prune && entry_mtime_before(&sub, earliest) {
                             continue;
                         }
+                        let key = (
+                            slug.clone(),
+                            session_id.clone(),
+                            Some(agent_id.to_string()),
+                        );
+                        if !claimed.insert(key) {
+                            continue;
+                        }
                         groups
-                            .entry((slug.clone(), sid.clone()))
+                            .entry((slug.clone(), session_id.clone()))
                             .or_default()
                             .push(sub.path());
                     }
                 }
             }
+        }
+        if root.from_archive && skipped_suffixes > 0 {
+            eprintln!(
+                "walker: {}: skipped {} files with an unrecognized suffix",
+                root.path.display(),
+                skipped_suffixes
+            );
         }
     }
 
@@ -352,7 +377,11 @@ mod tests {
             .map(|d| d.as_secs_f64())
             .unwrap_or(0.0))
             + 1e9;
-        let groups = discover_groups(std::slice::from_ref(&root), far_future);
+        let resolved = [crate::walker_roots::ResolvedRoot {
+            path: root.clone(),
+            from_archive: false,
+        }];
+        let groups = discover_groups(&resolved, far_future);
         assert!(
             groups.is_empty(),
             "future cutoff should prune everything, got {:?}",
@@ -369,7 +398,11 @@ mod tests {
         fs::create_dir_all(&subagents).unwrap();
         let agent_file = subagents.join("agent-aaa.jsonl");
         fs::write(&agent_file, b"").unwrap();
-        let groups = discover_groups(std::slice::from_ref(&root), 0.0);
+        let resolved = [crate::walker_roots::ResolvedRoot {
+            path: root.clone(),
+            from_archive: false,
+        }];
+        let groups = discover_groups(&resolved, 0.0);
         // Subagent file should be discovered under (slug, session-1).
         let key = ("slug".to_string(), "session-1".to_string());
         assert!(
@@ -457,7 +490,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let root = tempdir_path("unreadable-root");
         fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
-        let groups = discover_groups(std::slice::from_ref(&root), f64::NEG_INFINITY);
+        let resolved = [crate::walker_roots::ResolvedRoot {
+            path: root.clone(),
+            from_archive: false,
+        }];
+        let groups = discover_groups(&resolved, f64::NEG_INFINITY);
         // Restore before cleanup so the temp dir removal succeeds.
         fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
         let _ = fs::remove_dir_all(&root);
@@ -480,7 +517,11 @@ mod tests {
         fs::write(good_slug.join("session-ok.jsonl"), b"").unwrap();
         fs::set_permissions(&slug, fs::Permissions::from_mode(0o000)).unwrap();
 
-        let groups = discover_groups(std::slice::from_ref(&root), f64::NEG_INFINITY);
+        let resolved = [crate::walker_roots::ResolvedRoot {
+            path: root.clone(),
+            from_archive: false,
+        }];
+        let groups = discover_groups(&resolved, f64::NEG_INFINITY);
 
         fs::set_permissions(&slug, fs::Permissions::from_mode(0o755)).unwrap();
         let _ = fs::remove_dir_all(&root);
@@ -510,7 +551,11 @@ mod tests {
         fs::create_dir_all(&slug).unwrap();
         symlink("/nonexistent/target.jsonl", slug.join("dangling.jsonl")).unwrap();
 
-        let groups = discover_groups(std::slice::from_ref(&root), f64::NEG_INFINITY);
+        let resolved = [crate::walker_roots::ResolvedRoot {
+            path: root.clone(),
+            from_archive: false,
+        }];
+        let groups = discover_groups(&resolved, f64::NEG_INFINITY);
         let _ = fs::remove_dir_all(&root);
 
         // The dangling symlink should not produce any group entry.
@@ -519,5 +564,70 @@ mod tests {
             "dangling symlink should be skipped, got {:?}",
             groups
         );
+    }
+
+    #[test]
+    fn discover_groups_accepts_compressed_transcripts() {
+        let root = tempdir_path("compressed");
+        let slug = root.join("slug-a");
+        let subagents = slug.join("session-1").join("subagents");
+        fs::create_dir_all(&subagents).unwrap();
+        fs::write(slug.join("session-1.jsonl.zst"), b"").unwrap();
+        fs::write(subagents.join("agent-aaa.jsonl.zst"), b"").unwrap();
+        let resolved = vec![crate::walker_roots::ResolvedRoot {
+            path: root.clone(),
+            from_archive: true,
+        }];
+        let groups = discover_groups(&resolved, f64::NEG_INFINITY);
+        let key = ("slug-a".to_string(), "session-1".to_string());
+        assert_eq!(groups.get(&key).map(Vec::len), Some(2));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discover_groups_first_root_claims_the_session_key() {
+        let base = tempdir_path("session-key");
+        let live = base.join("live");
+        let archive_host = base.join("archive-host");
+        for root in [&live, &archive_host] {
+            let slug = root.join("slug-a");
+            fs::create_dir_all(&slug).unwrap();
+        }
+        fs::write(live.join("slug-a").join("session-1.jsonl"), b"").unwrap();
+        fs::write(archive_host.join("slug-a").join("session-1.jsonl.zst"), b"").unwrap();
+
+        let resolved = vec![
+            crate::walker_roots::ResolvedRoot { path: live.clone(), from_archive: false },
+            crate::walker_roots::ResolvedRoot { path: archive_host.clone(), from_archive: true },
+        ];
+        let groups = discover_groups(&resolved, f64::NEG_INFINITY);
+        let key = ("slug-a".to_string(), "session-1".to_string());
+        let paths = groups.get(&key).expect("group present");
+        assert_eq!(paths.len(), 1, "archive twin should be dropped: {paths:?}");
+        assert!(paths[0].ends_with("session-1.jsonl"));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn discover_groups_ignores_unrecognized_suffixes_from_either_root_kind() {
+        // The counter itself is observable only via stderr (conformance
+        // asserts the text and that only archive roots emit it). Here we pin
+        // the discovery result: the two odd files contribute no group whether
+        // the root is live or archive-expanded, and the good file still does.
+        for from_archive in [false, true] {
+            let root = tempdir_path("suffix-count");
+            let slug = root.join("slug-a");
+            fs::create_dir_all(&slug).unwrap();
+            fs::write(slug.join("session-1.jsonl"), b"").unwrap();
+            fs::write(slug.join("session-2.jsonl.gz"), b"").unwrap();
+            fs::write(slug.join("notes.txt"), b"").unwrap();
+            let resolved = vec![crate::walker_roots::ResolvedRoot {
+                path: root.clone(),
+                from_archive,
+            }];
+            let groups = discover_groups(&resolved, f64::NEG_INFINITY);
+            assert_eq!(groups.len(), 1);
+            let _ = fs::remove_dir_all(&root);
+        }
     }
 }

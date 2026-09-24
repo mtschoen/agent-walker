@@ -1,0 +1,1 @@
+{"timestamp": "2026-03-20T10:05:00Z", "message": {"role": "user", "content": [{"type": "text", "text": "target pattern in subagent <progress-beacon>{\"version\":\"1.0.0\",\"operation\":\"test\",\"status\":\"in_progress\",\"begin_eta\":200,\"actual_elapsed\":100}</progress-beacon>"}]}, "costUSD": 0.02}

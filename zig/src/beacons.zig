@@ -500,6 +500,7 @@ const LatestArgs = struct {
     session_id: []const u8 = "",
     projects_root: ?[]const u8 = null,
     extra_roots: [][]const u8 = &.{},
+    archive_roots: [][]const u8 = &.{},
     read_config: bool = true,
     now_unix: ?f64 = null,
 };
@@ -507,6 +508,7 @@ const LatestArgs = struct {
 fn parseLatestArgs(alloc: Allocator, args: [][]const u8) !LatestArgs {
     var out = LatestArgs{};
     var extras: std.ArrayList([]const u8) = .empty;
+    var archive_roots: std.ArrayList([]const u8) = .empty;
     var i: usize = 0;
     while (i < args.len) {
         const flag = args[i];
@@ -517,6 +519,8 @@ fn parseLatestArgs(alloc: Allocator, args: [][]const u8) !LatestArgs {
             out.projects_root = main.grab(args, &i, "--projects-root");
         } else if (std.mem.eql(u8, flag, "--extra-projects-root")) {
             try extras.append(alloc, main.grab(args, &i, "--extra-projects-root"));
+        } else if (std.mem.eql(u8, flag, "--archive-root")) {
+            try archive_roots.append(alloc, main.grab(args, &i, "--archive-root"));
         } else if (std.mem.eql(u8, flag, "--no-config")) {
             out.read_config = false;
         } else if (std.mem.eql(u8, flag, "--now")) {
@@ -528,6 +532,7 @@ fn parseLatestArgs(alloc: Allocator, args: [][]const u8) !LatestArgs {
     }
     if (out.session_id.len == 0) main.die("beacons-latest: --session-id is required");
     out.extra_roots = try extras.toOwnedSlice(alloc);
+    out.archive_roots = try archive_roots.toOwnedSlice(alloc);
     return out;
 }
 
@@ -541,12 +546,12 @@ pub fn runLatest(gpa: Allocator, args: [][]const u8) !void {
 
     const parsed = try parseLatestArgs(alloc, args);
     const primary = if (parsed.projects_root) |r| try alloc.dupe(u8, r) else try main.defaultRoot(alloc);
-    const roots = try walker_roots.resolveRoots(alloc, primary, parsed.extra_roots, parsed.read_config);
+    const roots = try walker_roots.resolveRoots(alloc, primary, parsed.projects_root != null, parsed.extra_roots, parsed.archive_roots, parsed.read_config);
     const now_unix: f64 = parsed.now_unix orelse main.nowUnix();
 
     var best: ?Found = null;
     for (roots) |root| {
-        const paths = try findSessionPaths(alloc, root, parsed.session_id);
+        const paths = try findSessionPaths(alloc, root.path, parsed.session_id);
         for (paths.items) |p| {
             if (findLatestInPath(alloc, p)) |f| {
                 if (best == null or f.ts >= best.?.ts) best = f;
@@ -579,6 +584,7 @@ const HistoryArgs = struct {
     win_start_unix: f64 = 0.0,
     projects_root: ?[]const u8 = null,
     extra_roots: [][]const u8 = &.{},
+    archive_roots: [][]const u8 = &.{},
     read_config: bool = true,
     now_unix: ?f64 = null,
 };
@@ -586,6 +592,7 @@ const HistoryArgs = struct {
 fn parseHistoryArgs(alloc: Allocator, args: [][]const u8) !HistoryArgs {
     var out = HistoryArgs{};
     var extras: std.ArrayList([]const u8) = .empty;
+    var archive_roots: std.ArrayList([]const u8) = .empty;
     var got_period = false;
     var i: usize = 0;
     while (i < args.len) {
@@ -600,6 +607,8 @@ fn parseHistoryArgs(alloc: Allocator, args: [][]const u8) !HistoryArgs {
             out.projects_root = main.grab(args, &i, "--projects-root");
         } else if (std.mem.eql(u8, flag, "--extra-projects-root")) {
             try extras.append(alloc, main.grab(args, &i, "--extra-projects-root"));
+        } else if (std.mem.eql(u8, flag, "--archive-root")) {
+            try archive_roots.append(alloc, main.grab(args, &i, "--archive-root"));
         } else if (std.mem.eql(u8, flag, "--no-config")) {
             out.read_config = false;
         } else if (std.mem.eql(u8, flag, "--now")) {
@@ -611,6 +620,7 @@ fn parseHistoryArgs(alloc: Allocator, args: [][]const u8) !HistoryArgs {
     }
     if (!got_period) main.die("beacons-history: --period is required");
     out.extra_roots = try extras.toOwnedSlice(alloc);
+    out.archive_roots = try archive_roots.toOwnedSlice(alloc);
     return out;
 }
 
@@ -628,7 +638,7 @@ pub fn runHistory(gpa: Allocator, args: [][]const u8) !void {
 
     const parsed = try parseHistoryArgs(alloc, args);
     const primary = if (parsed.projects_root) |r| try alloc.dupe(u8, r) else try main.defaultRoot(alloc);
-    const roots = try walker_roots.resolveRoots(alloc, primary, parsed.extra_roots, parsed.read_config);
+    const roots = try walker_roots.resolveRoots(alloc, primary, parsed.projects_root != null, parsed.extra_roots, parsed.archive_roots, parsed.read_config);
     const now_unix: f64 = parsed.now_unix orelse main.nowUnix();
     const period_cutoff = now_unix - @as(f64, @floatFromInt(parsed.period_seconds));
     const window_lo = @max(period_cutoff, parsed.win_start_unix);
@@ -808,10 +818,12 @@ fn findSessionPathsDarwin(alloc: Allocator, out: *std.ArrayList([]const u8), roo
 
         const slug_dir = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ root, slug });
 
-        const parent_path = try std.fmt.allocPrint(alloc, "{s}/{s}.jsonl", .{ slug_dir, sid });
-        if (fileExists(alloc, parent_path)) {
-            try out.append(alloc, parent_path);
-        } else alloc.free(parent_path);
+        for ([_][]const u8{ ".jsonl", ".jsonl.zst" }) |suffix| {
+            const parent_path = try std.fmt.allocPrint(alloc, "{s}/{s}{s}", .{ slug_dir, sid, suffix });
+            if (fileExists(alloc, parent_path)) {
+                try out.append(alloc, parent_path);
+            } else alloc.free(parent_path);
+        }
 
         try findSubagentsForSidDarwin(alloc, out, slug_dir, sid);
     }
@@ -830,10 +842,12 @@ fn findSubagentsForSidDarwin(alloc: Allocator, out: *std.ArrayList([]const u8), 
         if (sess.len == 0) continue;
         if (sess[0] == '.' and (sess.len == 1 or (sess.len == 2 and sess[1] == '.'))) continue;
 
-        const candidate = try std.fmt.allocPrint(alloc, "{s}/{s}/subagents/agent-{s}.jsonl", .{ slug_dir, sess, sid });
-        if (fileExists(alloc, candidate)) {
-            try out.append(alloc, candidate);
-        } else alloc.free(candidate);
+        for ([_][]const u8{ ".jsonl", ".jsonl.zst" }) |suffix| {
+            const candidate = try std.fmt.allocPrint(alloc, "{s}/{s}/subagents/agent-{s}{s}", .{ slug_dir, sess, sid, suffix });
+            if (fileExists(alloc, candidate)) {
+                try out.append(alloc, candidate);
+            } else alloc.free(candidate);
+        }
     }
 }
 
@@ -857,10 +871,12 @@ fn findSessionPathsWindows(alloc: Allocator, out: *std.ArrayList([]const u8), ro
                 const slug = try std.unicode.utf16LeToUtf8Alloc(alloc, name_w);
                 const slug_dir = try std.fmt.allocPrint(alloc, "{s}\\{s}", .{ root, slug });
 
-                const parent_path = try std.fmt.allocPrint(alloc, "{s}\\{s}.jsonl", .{ slug_dir, sid });
-                if (fileExists(alloc, parent_path)) {
-                    try out.append(alloc, parent_path);
-                } else alloc.free(parent_path);
+                for ([_][]const u8{ ".jsonl", ".jsonl.zst" }) |suffix| {
+                    const parent_path = try std.fmt.allocPrint(alloc, "{s}\\{s}{s}", .{ slug_dir, sid, suffix });
+                    if (fileExists(alloc, parent_path)) {
+                        try out.append(alloc, parent_path);
+                    } else alloc.free(parent_path);
+                }
 
                 try findSubagentsForSidWindows(alloc, out, slug_dir, sid);
             }
@@ -887,10 +903,12 @@ fn findSubagentsForSidWindows(alloc: Allocator, out: *std.ArrayList([]const u8),
                 (name_w.len == 2 and name_w[0] == '.' and name_w[1] == '.')))
             {
                 const sess = try std.unicode.utf16LeToUtf8Alloc(alloc, name_w);
-                const candidate = try std.fmt.allocPrint(alloc, "{s}\\{s}\\subagents\\agent-{s}.jsonl", .{ slug_dir, sess, sid });
-                if (fileExists(alloc, candidate)) {
-                    try out.append(alloc, candidate);
-                } else alloc.free(candidate);
+                for ([_][]const u8{ ".jsonl", ".jsonl.zst" }) |suffix| {
+                    const candidate = try std.fmt.allocPrint(alloc, "{s}\\{s}\\subagents\\agent-{s}{s}", .{ slug_dir, sess, sid, suffix });
+                    if (fileExists(alloc, candidate)) {
+                        try out.append(alloc, candidate);
+                    } else alloc.free(candidate);
+                }
             }
         }
         if (platform.FindNextFileW(h, &fd) == 0) break;
@@ -926,10 +944,12 @@ fn findSessionPathsLinux(alloc: Allocator, out: *std.ArrayList([]const u8), root
 
             const slug_dir = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ root, slug });
 
-            const parent_path = try std.fmt.allocPrint(alloc, "{s}/{s}.jsonl", .{ slug_dir, sid });
-            if (fileExists(alloc, parent_path)) {
-                try out.append(alloc, parent_path);
-            } else alloc.free(parent_path);
+            for ([_][]const u8{ ".jsonl", ".jsonl.zst" }) |suffix| {
+                const parent_path = try std.fmt.allocPrint(alloc, "{s}/{s}{s}", .{ slug_dir, sid, suffix });
+                if (fileExists(alloc, parent_path)) {
+                    try out.append(alloc, parent_path);
+                } else alloc.free(parent_path);
+            }
 
             try findSubagentsForSidLinux(alloc, out, slug_dir, sid);
         }
@@ -961,10 +981,12 @@ fn findSubagentsForSidLinux(alloc: Allocator, out: *std.ArrayList([]const u8), s
             if (sess.len == 0) continue;
             if (sess[0] == '.' and (sess.len == 1 or (sess.len == 2 and sess[1] == '.'))) continue;
 
-            const candidate = try std.fmt.allocPrint(alloc, "{s}/{s}/subagents/agent-{s}.jsonl", .{ slug_dir, sess, sid });
-            if (fileExists(alloc, candidate)) {
-                try out.append(alloc, candidate);
-            } else alloc.free(candidate);
+            for ([_][]const u8{ ".jsonl", ".jsonl.zst" }) |suffix| {
+                const candidate = try std.fmt.allocPrint(alloc, "{s}/{s}/subagents/agent-{s}{s}", .{ slug_dir, sess, sid, suffix });
+                if (fileExists(alloc, candidate)) {
+                    try out.append(alloc, candidate);
+                } else alloc.free(candidate);
+            }
         }
     }
 }

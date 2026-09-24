@@ -3,6 +3,7 @@
 // Uses DOM API for reliable JSON parsing.
 
 #include "search.hpp"
+#include "archive.hpp"
 #include "common.hpp"
 #include "discovery.hpp"
 #include "json_writer.hpp"
@@ -255,10 +256,10 @@ static std::vector<ScanMessage> scanFile(const fs::path &path,
   // buffer instead of per-line std::string copies. Mirrors the I/O shape
   // used by cost mode and the beacons walkers. DOM parser reuses its
   // internal buffers across parse() calls, so this is allocation-light.
-  simdjson::padded_string data;
-  if (simdjson::padded_string::load(path.string()).get(data) !=
-      simdjson::SUCCESS)
+  auto loaded = walker::load_transcript(path);
+  if (!loaded)
     return out;
+  simdjson::padded_string &data = *loaded;
 
   std::string_view whole(data);
   if (prefilter && !prefilter->mightContain(whole))
@@ -507,28 +508,45 @@ discoverCodexFiles(const TranscriptRoot &root, std::optional<double> since,
   return out;
 }
 
-static std::vector<DiscoveredFile> discoverFiles(const TranscriptRoot &root,
-                                                 std::optional<double> since,
-                                                 const std::string *cwd_slug) {
+static std::vector<DiscoveredFile>
+discoverFiles(const TranscriptRoot &root, std::optional<double> since,
+              const std::string *cwd_slug,
+              std::unordered_set<std::string> &claimed) {
   if (root.format == TranscriptFormat::Codex)
     return discoverCodexFiles(root, since, cwd_slug);
 
   std::vector<DiscoveredFile> out;
   walker::for_each_transcript(
-      std::vector<fs::path>{root.path}, cwd_slug,
-      [&](const fs::path &, const std::string &slug, const std::string &sid,
+      std::vector<walker::ResolvedRoot>{{root.path, root.from_archive}},
+      cwd_slug,
+      [&](const fs::path &, const std::string &slug,
+          const std::string &session_id, const std::string &agent_id,
           const fs::directory_entry &entry) {
         if (since && walker::entry_mtime_before(entry, *since))
+          return;
+        std::string key = slug;
+        key.push_back('\0');
+        key.append(session_id);
+        key.push_back('\0');
+        key.append(agent_id);
+        if (!claimed.insert(std::move(key)).second)
           return;
         DiscoveredFile df;
         df.path = entry.path();
         df.slug = slug;
-        df.session_id = sid;
+        df.session_id = session_id;
         df.host_root = root.path.string();
         df.format = TranscriptFormat::ClaudeCode;
         out.push_back(std::move(df));
       });
   return out;
+}
+
+static std::vector<DiscoveredFile>
+discoverFiles(const TranscriptRoot &root, std::optional<double> since,
+              const std::string *cwd_slug) {
+  std::unordered_set<std::string> claimed;
+  return discoverFiles(root, since, cwd_slug, claimed);
 }
 
 // === Pattern matching ===
@@ -658,6 +676,7 @@ struct Args {
   uint32_t snippet_chars = 240;
   std::optional<fs::path> projects_root;
   std::vector<fs::path> extra_projects_roots;
+  std::vector<fs::path> archive_roots;
   bool read_config = true;
   double now = 0;
 };
@@ -775,6 +794,10 @@ static Args parseArgs(const std::vector<std::string> &raw) {
       if (++i >= raw.size())
         throw std::runtime_error("--extra-projects-root needs a value");
       args.extra_projects_roots.push_back(fs::path(raw[i]));
+    } else if (s == "--archive-root") {
+      if (++i >= raw.size())
+        throw std::runtime_error("--archive-root needs a value");
+      args.archive_roots.push_back(fs::path(raw[i]));
     } else if (s == "--no-config") {
       args.read_config = false;
     } else if (s.rfind("--", 0) == 0)
@@ -1077,10 +1100,12 @@ int run(const std::vector<std::string> &argv) {
   // perf-pass-2 search rewrite dropped this multi-root resolution.
   std::string *cwd_slug_ptr = args.cwd.empty() ? nullptr : &args.cwd;
   std::vector<TranscriptRoot> roots = walker::resolve_search_roots(
-      args.projects_root, args.extra_projects_roots, args.read_config);
+      args.projects_root, args.extra_projects_roots, args.archive_roots,
+      args.read_config);
   std::vector<DiscoveredFile> files;
+  std::unordered_set<std::string> claimed;
   for (const auto &root : roots) {
-    auto root_files = discoverFiles(root, args.since, cwd_slug_ptr);
+    auto root_files = discoverFiles(root, args.since, cwd_slug_ptr, claimed);
     files.insert(files.end(), std::make_move_iterator(root_files.begin()),
                  std::make_move_iterator(root_files.end()));
   }

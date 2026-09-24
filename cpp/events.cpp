@@ -4,6 +4,7 @@
 // See ../SPEC.md §events for the full contract.
 
 #include "events.hpp"
+#include "archive.hpp"
 #include "common.hpp"
 #include "discovery.hpp"
 #include "json_writer.hpp"
@@ -65,6 +66,7 @@ struct Args {
   std::optional<double> now_unix;
   std::optional<fs::path> projects_root;
   std::vector<fs::path> extra_projects_roots;
+  std::vector<fs::path> archive_roots;
   bool read_config = true;
 };
 
@@ -105,6 +107,8 @@ static Args parse_args(const std::vector<std::string> &argv) {
       args.projects_root = fs::path(next());
     } else if (flag == "--extra-projects-root") {
       args.extra_projects_roots.emplace_back(next());
+    } else if (flag == "--archive-root") {
+      args.archive_roots.emplace_back(next());
     } else if (flag == "--no-config") {
       args.read_config = false;
     } else if (flag == "--version") {
@@ -142,9 +146,10 @@ walk_group_events(const std::vector<fs::path> &paths, const std::string &slug,
   sj::ondemand::parser parser;
 
   for (const auto &path : paths) {
-    sj::padded_string data;
-    if (sj::padded_string::load(path.string()).get(data) != sj::SUCCESS)
+    auto loaded = walker::load_transcript(path);
+    if (!loaded)
       continue;
+    sj::padded_string &data = *loaded;
 
     std::string_view buffer(data);
     size_t pos = 0;
@@ -353,10 +358,9 @@ int run(const std::vector<std::string> &argv) {
   double win_start = args.win_start_set ? args.win_start_unix : period_cutoff;
   double cutoff = std::min(period_cutoff, win_start);
 
-  fs::path primary =
-      args.projects_root.value_or(walker::default_projects_root());
-  std::vector<fs::path> roots = walker::resolve_roots(
-      primary, args.extra_projects_roots, args.read_config);
+  std::vector<walker::ResolvedRoot> roots = walker::resolve_roots(
+      args.projects_root, args.extra_projects_roots, args.archive_roots,
+      args.read_config);
 
   if (roots.empty()) {
     // Primary root doesn't exist — not a hard error; emit no records.
