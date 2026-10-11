@@ -29,6 +29,7 @@ import re
 import shutil
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, overload
 
@@ -1135,6 +1136,10 @@ def check_search_codex(lang: str, binary: Path) -> bool:
         ("all", "all", []),
         ("cwd_filtered", "cwd_filtered", ["--cwd", expected["cwd"]]),
         ("since_mtime_pruned", "cwd_filtered", ["--since", "1h"]),
+        ("record_policy", "record_policy", []),
+        ("current_context", "current_context", ["--role", "assistant"]),
+        ("leading_empty_newline", "leading_empty_newline", []),
+        ("empty_blocks_context", "empty_blocks_context", ["--role", "user"]),
     )
     for case_name, expected_key, flags in cases:
         with tempfile.TemporaryDirectory(prefix="walker-search-codex-") as home:
@@ -1174,17 +1179,18 @@ def check_search_codex(lang: str, binary: Path) -> bool:
             env = dict(os.environ)
             env["HOME"] = str(home_path)
             env["USERPROFILE"] = str(home_path)
+            env.pop("CODEX_HOME", None)
             cmd = [
                 str(binary),
                 "search",
-                expected["pattern"],
+                expected[expected_key].get("pattern", expected["pattern"]),
                 *flags,
                 "--now",
                 repr(expected["_meta"]["now_unix"]),
                 "--format",
                 "jsonl",
                 "--context",
-                "0",
+                str(expected[expected_key].get("context", 0)),
                 "--no-config",
                 "--extra-projects-root",
                 str(invalid_extra),
@@ -1197,7 +1203,7 @@ def check_search_codex(lang: str, binary: Path) -> bool:
             hits = [strip_search_hit(x) for x in records if x.get("type") == "hit"]
             summary_record = next(x for x in records if x.get("type") == "summary")
             large_rollout_ok = (
-                case_name != "all" or summary_record.get("files_walked") == 3
+                case_name != "all" or summary_record.get("files_walked") == 4
             )
             summary_value = strip_search_summary(summary_record)
             ok = (
@@ -1234,6 +1240,7 @@ def check_search_codex(lang: str, binary: Path) -> bool:
         env = dict(os.environ)
         env["HOME"] = str(home_path)
         env["USERPROFILE"] = str(home_path)
+        env.pop("CODEX_HOME", None)
         cmd = [
             str(binary),
             "search",
@@ -1280,6 +1287,7 @@ def check_search_codex(lang: str, binary: Path) -> bool:
         env = dict(os.environ)
         env.pop("HOME", None)
         env.pop("USERPROFILE", None)
+        env.pop("CODEX_HOME", None)
         cmd = [
             str(binary),
             "search",
@@ -1320,6 +1328,209 @@ def check_search_codex(lang: str, binary: Path) -> bool:
         )
         if not ok:
             all_ok = False
+    return all_ok
+
+
+def check_search_transcript_format(lang: str, binary: Path) -> bool:
+    expected_file = SEARCH_CODEX_CORPUS / "expected.json"
+    if not expected_file.is_file() or lang not in IMPLS_WITH_SEARCH:
+        return True
+    expected = json.loads(expected_file.read_text(encoding="utf-8"))
+    pattern = expected["pattern"]
+    now_unix = expected["_meta"]["now_unix"]
+    all_ok = True
+
+    with tempfile.TemporaryDirectory(prefix="walker-search-format-") as tmp:
+        home = Path(tmp)
+        claude_file = home / ".claude" / "projects" / "claude" / "newer.jsonl"
+        claude_file.parent.mkdir(parents=True)
+        claude_file.write_text(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "timestamp": datetime.fromtimestamp(
+                        now_unix - 1, tz=timezone.utc
+                    ).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                    "message": {
+                        "id": "claude-newer",
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": f"{pattern} claude"}],
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        codex_home = home / "codex-home"
+        shutil.copytree(SEARCH_CODEX_CORPUS, codex_home / "sessions")
+
+        env = dict(
+            os.environ,
+            HOME=str(home),
+            USERPROFILE=str(home),
+            CODEX_HOME=str(codex_home),
+        )
+        base = [
+            str(binary),
+            "search",
+            pattern,
+            "--now",
+            repr(now_unix),
+            "--format",
+            "jsonl",
+            "--context",
+            "0",
+            "--no-config",
+        ]
+        codex = run_captured(
+            base + ["--transcript-format", "codex", "--limit", "1"],
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+            env=env,
+        )
+        claude = run_captured(
+            base + ["--transcript-format", "claude-code"],
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+            env=env,
+        )
+        codex_count = run_captured(
+            base + ["--transcript-format", "codex", "--count-only"],
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+            env=env,
+        )
+        invalid = run_captured(
+            base + ["--transcript-format", "unknown"],
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+            env=env,
+        )
+
+        home_codex = home / ".codex"
+        shutil.copytree(SEARCH_CODEX_CORPUS, home_codex / "sessions")
+        empty_codex_env = dict(env, CODEX_HOME="")
+        empty_codex = run_captured(
+            base + ["--transcript-format", "codex", "--limit", "1"],
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+            env=empty_codex_env,
+        )
+
+        tagged_root = home / "mounted-codex"
+        shutil.copytree(SEARCH_CODEX_CORPUS, tagged_root)
+        empty_codex_home = home / "empty-codex-home"
+        (empty_codex_home / "sessions").mkdir(parents=True)
+        (home / ".claude" / "walker-roots.json").write_text(
+            json.dumps(
+                {
+                    "extra_roots": [{"path": str(tagged_root), "format": "codex"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        config_env = dict(env, CODEX_HOME=str(empty_codex_home))
+        tagged = run_captured(
+            [
+                str(binary),
+                "search",
+                pattern,
+                "--transcript-format",
+                "codex",
+                "--now",
+                repr(now_unix),
+                "--format",
+                "jsonl",
+                "--context",
+                "0",
+            ],
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+            env=config_env,
+        )
+
+        def parse(result):
+            records = [
+                json.loads(line) for line in result.stdout.splitlines() if line.strip()
+            ]
+            return (
+                [
+                    strip_search_hit(record)
+                    for record in records
+                    if record.get("type") == "hit"
+                ],
+                strip_search_summary(
+                    next(
+                        record for record in records if record.get("type") == "summary"
+                    )
+                ),
+            )
+
+        try:
+            codex_hits, codex_summary = parse(codex)
+            claude_hits, claude_summary = parse(claude)
+            count_hits, count_summary = parse(codex_count)
+            empty_hits, empty_summary = parse(empty_codex)
+            tagged_hits, tagged_summary = parse(tagged)
+            codex_ok = (
+                codex.returncode == 0
+                and codex_hits == [expected["all"]["hits"][0]]
+                and codex_summary["hits"] == 1
+                and codex_summary["truncated"] is True
+            )
+            claude_ok = (
+                claude.returncode == 0
+                and len(claude_hits) == 1
+                and claude_hits[0]["session_id"] == "newer"
+                and claude_summary["hits"] == 1
+                and claude_summary["sessions_matched"] == 1
+            )
+            count_ok = (
+                codex_count.returncode == 0
+                and count_hits == []
+                and count_summary["hits"] == expected["all"]["summary"]["hits"]
+                and count_summary["sessions_matched"] == 2
+            )
+            invalid_ok = (
+                invalid.returncode != 0 and "transcript-format" in invalid.stderr
+            )
+            empty_codex_ok = (
+                empty_codex.returncode == 0
+                and empty_hits == [expected["all"]["hits"][0]]
+                and empty_summary["hits"] == 1
+            )
+            tagged_ok = (
+                tagged.returncode == 0
+                and tagged_hits == expected["all"]["hits"]
+                and tagged_summary["roots_walked"] == 2
+            )
+            ok = (
+                codex_ok
+                and claude_ok
+                and count_ok
+                and invalid_ok
+                and empty_codex_ok
+                and tagged_ok
+            )
+        except Exception:
+            ok = False
+        print(
+            f"  [{lang:>4s}] search: transcript format isolation       {' OK ' if ok else 'FAIL'}"
+        )
+        if not ok:
+            print(
+                f"        codex={codex.returncode} claude={claude.returncode} "
+                f"count={codex_count.returncode} invalid={invalid.returncode} "
+                f"empty={empty_codex.returncode} tagged={tagged.returncode}"
+            )
+            all_ok = False
+
     return all_ok
 
 
@@ -1939,6 +2150,12 @@ def check_cli_argument_matrix(lang: str, binary: Path) -> bool:
             ["search", "hello", "--snippet-chars"],
             2,
             "--snippet-chars",
+        ),
+        (
+            "search: --transcript-format missing value",
+            ["search", "hello", "--transcript-format"],
+            2,
+            "--transcript-format",
         ),
         (
             "search: --projects-root missing value",
@@ -3857,6 +4074,8 @@ def main():
         if not check_search_duplicate_root(lang, binary):
             overall_ok = False
         if not check_search_codex(lang, binary):
+            overall_ok = False
+        if not check_search_transcript_format(lang, binary):
             overall_ok = False
         if not check_events(lang, binary):
             overall_ok = False

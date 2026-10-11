@@ -170,6 +170,9 @@ func archiveRootsInEffectiveOrder(primaryExplicit bool, cliArchives, configArchi
 }
 
 func defaultCodexRoot() string {
+	if codexHome := os.Getenv("CODEX_HOME"); codexHome != "" {
+		return filepath.Join(codexHome, "sessions")
+	}
 	if home := homeDirectory(); home != "" {
 		return filepath.Join(home, ".codex", "sessions")
 	}

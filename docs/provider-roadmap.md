@@ -53,7 +53,11 @@ provenance so results are not mistaken for one linear conversation.
 ### 3. Codex CLI
 
 Native `walker search` discovers `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`
-and reads searchable user and agent events directly from the rollout stream.
+and reads searchable legacy user and agent events plus current canonical message
+items directly from the rollout stream.
+`CODEX_HOME` relocates that default root to `$CODEX_HOME/sessions`; MCP runs
+the native Claude Code and Codex sources separately so result provenance and
+global limits remain accurate.
 This phase tracks MCP-level Codex aggregation, honoring `$CODEX_HOME` and
 including `archived_sessions` on request. Use SQLite/index files only to enrich
 metadata; rollout files remain discoverable when indexes drift.

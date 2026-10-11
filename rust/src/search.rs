@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, UNIX_EPOCH};
 
 use crate::content::{
-    extract_codex_event, extract_queue_op_text, extract_text, is_only_tool_blocks,
+    extract_codex_event, extract_codex_response_item, extract_queue_op_text, extract_text,
+    is_only_tool_blocks,
 };
 use crate::walker_roots::{TranscriptFormat, TranscriptRoot};
 use crate::{current_unix, parse_iso8601, walker_roots};
@@ -46,6 +47,7 @@ struct SearchArgs {
     include_queue_ops: bool,
     format: Format,
     snippet_chars: u32,
+    transcript_format: Option<TranscriptFormat>,
     projects_root: Option<PathBuf>,
     extra_projects_roots: Vec<PathBuf>,
     archive_roots: Vec<PathBuf>,
@@ -68,6 +70,7 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
     let mut include_queue_ops = false;
     let mut format = Format::Pretty;
     let mut snippet_chars: u32 = 240;
+    let mut transcript_format: Option<TranscriptFormat> = None;
     let mut projects_root: Option<PathBuf> = None;
     let mut extra_projects_roots: Vec<PathBuf> = Vec::new();
     let mut archive_roots: Vec<PathBuf> = Vec::new();
@@ -131,6 +134,18 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
                     .ok_or("--snippet-chars needs a value")?
                     .parse()
                     .map_err(|e| format!("--snippet-chars: {e}"))?;
+            }
+            "--transcript-format" => {
+                let value = iter.next().ok_or("--transcript-format needs a value")?;
+                transcript_format = match value.as_str() {
+                    "claude-code" => Some(TranscriptFormat::ClaudeCode),
+                    "codex" => Some(TranscriptFormat::Codex),
+                    other => {
+                        return Err(format!(
+                        "--transcript-format: invalid value {other}; expected claude-code|codex"
+                    ))
+                    }
+                };
             }
             "--projects-root" => {
                 projects_root = Some(PathBuf::from(
@@ -205,6 +220,7 @@ fn parse_args(raw: &[String]) -> Result<SearchArgs, String> {
         include_queue_ops,
         format,
         snippet_chars,
+        transcript_format,
         projects_root,
         extra_projects_roots,
         archive_roots,
@@ -286,13 +302,15 @@ fn scan_file(
             Err(_) => continue,
         };
         if transcript_format == TranscriptFormat::Codex {
-            if entry.get("type").and_then(Value::as_str) != Some("event_msg") {
-                continue;
-            }
             let Some(payload) = entry.get("payload") else {
                 continue;
             };
-            let Some((role, text)) = extract_codex_event(payload) else {
+            let message = match entry.get("type").and_then(Value::as_str) {
+                Some("event_msg") => extract_codex_event(payload),
+                Some("response_item") => extract_codex_response_item(payload),
+                _ => None,
+            };
+            let Some((role, text)) = message else {
                 continue;
             };
             let timestamp_str = entry
@@ -1056,6 +1074,13 @@ pub fn run(raw: &[String]) {
         &args.archive_roots,
         args.read_config,
     );
+    let roots: Vec<TranscriptRoot> = roots
+        .into_iter()
+        .filter(|root| {
+            args.transcript_format
+                .is_none_or(|format| root.format == format)
+        })
+        .collect();
     let files = discover_files(&roots, args.since, args.cwd.as_deref());
     let files_walked = files.len();
     let roots_walked = roots.len();

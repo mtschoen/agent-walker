@@ -229,19 +229,50 @@ void test_codex_scan_messages() {
              "\"message\":\"wrong payload\"}}\n"
              "{\"timestamp\":\"2026-05-10T11:05:00.000Z\",\"type\":"
              "\"event_msg\",\"payload\":{\"type\":\"agent_message\","
-             "\"message\":\"needle from agent\"}}\n");
+             "\"message\":\"needle from agent\"}}\n"
+             "{\"timestamp\":\"2026-05-10T11:06:00.000Z\",\"type\":"
+             "\"response_item\",\"payload\":{\"type\":\"message\","
+             "\"role\":\"user\",\"content\":[{\"type\":\"input_text\","
+             "\"text\":\"needle from current user\"},{\"type\":\"output_text\","
+             "\"text\":\"ignored\"}]}}\n"
+             "{\"timestamp\":\"2026-05-10T11:07:00.000Z\",\"type\":"
+             "\"response_item\",\"payload\":{\"type\":\"message\","
+             "\"role\":\"assistant\",\"content\":[{\"type\":\"input_text\","
+             "\"text\":\"ignored\"},{\"type\":\"output_text\","
+             "\"text\":\"needle current one\"},{\"type\":\"output_text\","
+             "\"text\":\"needle current two\"}]}}\n"
+             "{\"timestamp\":\"2026-05-10T11:08:00.000Z\",\"type\":"
+             "\"item_completed\",\"payload\":{\"type\":\"message\","
+             "\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\","
+             "\"text\":\"needle current one\"}]}}\n"
+             "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\","
+             "\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\","
+             "\"text\":\"\"},{\"type\":\"output_text\",\"text\":\"answer\"}]}}\n"
+             "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\","
+             "\"role\":\"user\",\"content\":[{\"type\":\"input_text\","
+             "\"text\":\"\"},{\"type\":\"input_text\",\"text\":\"\"}]}}\n");
 
   auto messages = walker::search::scanFile(
       transcript, walker::TranscriptFormat::Codex, false, false, nullptr);
-  expect(messages.size() == 2,
-         "Codex scanner accepts only string user and agent event messages");
-  if (messages.size() == 2) {
+  expect(messages.size() == 6,
+         "Codex scanner accepts legacy and canonical conversation messages");
+  if (messages.size() == 6) {
     expect(messages[0].line_number == 2 && messages[0].role == "user" &&
                messages[0].text_default == "needle from user",
            "Codex scanner maps user message fields");
     expect(messages[1].line_number == 6 && messages[1].role == "assistant" &&
                messages[1].text_default == "needle from agent",
            "Codex scanner maps agent message fields");
+    expect(messages[2].line_number == 7 && messages[2].role == "user" &&
+               messages[2].text_default == "needle from current user",
+           "Codex scanner maps canonical user input blocks");
+    expect(messages[3].line_number == 8 && messages[3].role == "assistant" &&
+               messages[3].text_default == "needle current one\nneedle current two",
+           "Codex scanner maps canonical assistant output blocks");
+    expect(messages[4].line_number == 10 && messages[4].text_default == "\nanswer",
+           "Codex scanner preserves a leading empty string block");
+    expect(messages[5].line_number == 11 && messages[5].text_default == "\n",
+           "Codex scanner retains multiple empty string blocks as a turn");
   }
   fs::remove_all(dir);
 }

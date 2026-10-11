@@ -147,7 +147,8 @@ not to the archive root itself, so an archive root that overlaps a live extra
 root is handled by session-key dedup in `## Discovery` rather than by path.
 
 For search only, when `--projects-root` is omitted, a second implicit root is
-added with path `~/.codex/sessions` and format `codex`. Supplying
+added with path `$CODEX_HOME/sessions` when `CODEX_HOME` is non-empty, otherwise
+`~/.codex/sessions`, and format `codex`. Supplying
 `--projects-root` preserves the historical single-primary behavior and tags
 that path `claude-code`. CLI extra roots are also `claude-code`; use a tagged
 config object for an additional Codex root. The implicit Codex root is inserted
@@ -576,6 +577,7 @@ pattern is an error.
 | `--format <pretty\|jsonl>` | pretty | `jsonl` is agent-consumable (one record per line). |
 | `--snippet-chars <N>` | 240 | Max snippet preview chars per hit. |
 | `--archive-root <path>` | none | Compressed archive root; repeatable. Adds a `claude-archive` root. |
+| `--transcript-format <claude-code\|codex>` | both | Restrict roots before discovery, matching, counts, and limits. |
 
 **Discovery.** For `claude-code` roots, search walks parent transcripts
 (`<root>/<slug>/<sid>.jsonl`) AND subagent transcripts
@@ -586,7 +588,10 @@ hits group with their parent in `sessions_matched`. `--cwd <slug>`
 restricts both forms; the `--since` mtime fast-path prune applies per
 file to parents and subagents alike.
 
-For `codex` roots, search walks exactly
+When `--transcript-format` is set, it filters format-tagged resolved roots
+before discovery. This applies to the implicit defaults and tagged config
+extras, so source-specific search cannot lose hits to another format's per-call
+limit or count. For `codex` roots, search walks exactly
 `<root>/YYYY/MM/DD/rollout-<iso>-<uuid>.jsonl`; there is no slug directory and
 no subagent layout. The first record must be `type: "session_meta"`. Its
 `payload.session_id` (or legacy `payload.id`) is the result `session_id`, and
@@ -603,12 +608,24 @@ and concatenate the `{"type":"text"}` blocks — strict typed deserialization
 silently drops ~10% of older user prompts. Search reaches `role: user` and
 `role: assistant` messages only.
 
-For Codex, search indexes only `type: "event_msg"` records whose payload is
+For Codex, search indexes legacy `type: "event_msg"` records whose payload is
 `{"type":"user_message","message":"..."}` or
 `{"type":"agent_message","message":"..."}`. They map to roles `user` and
-`assistant`, respectively. Other event types and non-string messages are
-ignored. The record's top-level `timestamp` supplies search ordering and time
-filtering. Claude Code extraction remains unchanged.
+`assistant`, respectively. It also indexes current `type: "response_item"`
+records whose payload has `type: "message"`: a `user` record contributes its
+string `input_text` blocks and an `assistant` record contributes its string
+`output_text` blocks, newline-joined in content order. Other roles, block types,
+wrong-typed fields, and non-`response_item` envelopes are ignored. In particular,
+`item_completed` message mirrors are not indexed, so they cannot duplicate the
+canonical assistant response. The record's top-level `timestamp` supplies search
+ordering and time filtering. Claude Code extraction remains unchanged.
+Empty string blocks contribute separators; only messages whose joined text is empty (including zero accepted string blocks) are skipped, so two empty blocks remain a turn containing `"\n"`.
+
+Search preserves distinct `event_msg` and `response_item` records even when
+their role and text match. These envelopes do not provide a shared message
+identity, so text equality alone cannot distinguish a mirror from a repeated
+prompt. Counts and context are record-based; no cross-envelope text deduplication
+is performed. Only the known `item_completed` mirror envelope is excluded.
 
 **Queue operations.** When you type into the prompt while the agent is busy,
 Claude Code queues the input as a `type: "queue-operation"` entry with no
@@ -696,7 +713,7 @@ search, no mutation.
 ## MCP shim
 
 `mcp/server.py` is a FastMCP stdio server exposing provider-neutral historical
-recall. `agent_walker_search` searches Claude Code and OpenCode by default,
+recall. `agent_walker_search` searches Claude Code, Codex, and OpenCode by default,
 normalizes each hit with a `provider` field, sorts the merged result
 newest-first, and returns `{hits, summary, note}`. Per-provider summaries live
 under `summary.providers`. It is the only MCP search tool; callers scope it with
@@ -711,6 +728,9 @@ tracking, and every native bare-flag invocation remain Claude-specific.
   (deprecated alias), then `PATH`.
 - **Claude provider:** subprocesses `walker search ... --format jsonl`, retaining
   native multi-root and mounted-host behavior.
+- **Codex provider:** runs the same native search with
+  `--transcript-format codex`, so its pre-discovery selection happens before
+  per-provider limits and counts.
 - **OpenCode provider:** opens `~/.local/share/opencode/opencode.db` read-only,
   validates the `session` / `message` / `part` schema, searches text parts and
   optional tool input/output, and reads the live WAL through SQLite. Override

@@ -296,25 +296,69 @@ static std::vector<ScanMessage> scanFile(const fs::path &path,
       continue;
     if (transcript_format == TranscriptFormat::Codex) {
       std::string_view doc_type;
-      if (doc["type"].get_string().get(doc_type) != simdjson::SUCCESS ||
-          doc_type != "event_msg")
+      if (doc["type"].get_string().get(doc_type) != simdjson::SUCCESS)
         continue;
       simdjson::dom::object payload;
       if (doc["payload"].get_object().get(payload) != simdjson::SUCCESS)
         continue;
-      std::string_view payload_type;
-      if (payload["type"].get_string().get(payload_type) != simdjson::SUCCESS)
-        continue;
       std::string role;
-      if (payload_type == "user_message")
-        role = "user";
-      else if (payload_type == "agent_message")
-        role = "assistant";
-      else
+      std::string text;
+      if (doc_type == "event_msg") {
+        std::string_view payload_type;
+        if (payload["type"].get_string().get(payload_type) != simdjson::SUCCESS)
+          continue;
+        if (payload_type == "user_message")
+          role = "user";
+        else if (payload_type == "agent_message")
+          role = "assistant";
+        else
+          continue;
+        std::string_view message;
+        if (payload["message"].get_string().get(message) != simdjson::SUCCESS)
+          continue;
+        text = std::string(message);
+      } else if (doc_type == "response_item") {
+        std::string_view payload_type;
+        if (payload["type"].get_string().get(payload_type) != simdjson::SUCCESS ||
+            payload_type != "message")
+          continue;
+        std::string_view payload_role;
+        if (payload["role"].get_string().get(payload_role) != simdjson::SUCCESS)
+          continue;
+        std::string_view expected_block_type;
+        if (payload_role == "user") {
+          role = "user";
+          expected_block_type = "input_text";
+        } else if (payload_role == "assistant") {
+          role = "assistant";
+          expected_block_type = "output_text";
+        } else {
+          continue;
+        }
+        simdjson::dom::array content;
+        if (payload["content"].get_array().get(content) != simdjson::SUCCESS)
+          continue;
+        bool accepted_block = false;
+        for (auto block : content) {
+          simdjson::dom::object object;
+          if (block.get_object().get(object) != simdjson::SUCCESS)
+            continue;
+          std::string_view block_type;
+          std::string_view block_text;
+          if (object["type"].get_string().get(block_type) != simdjson::SUCCESS ||
+              block_type != expected_block_type ||
+              object["text"].get_string().get(block_text) != simdjson::SUCCESS)
+            continue;
+          if (accepted_block)
+            text.push_back('\n');
+          text.append(block_text);
+          accepted_block = true;
+        }
+        if (text.empty())
+          continue;
+      } else {
         continue;
-      std::string_view message;
-      if (payload["message"].get_string().get(message) != simdjson::SUCCESS)
-        continue;
+      }
       std::string_view timestamp;
       if (doc["timestamp"].get_string().get(timestamp) != simdjson::SUCCESS)
         timestamp = "";
@@ -322,7 +366,7 @@ static std::vector<ScanMessage> scanFile(const fs::path &path,
       ScanMessage codex_message;
       codex_message.line_number = idx;
       codex_message.role = std::move(role);
-      codex_message.text_default = std::string(message);
+      codex_message.text_default = std::move(text);
       codex_message.text_with_tools = codex_message.text_default;
       if (!timestamp.empty()) {
         codex_message.timestamp_str = std::string(timestamp);
@@ -674,6 +718,7 @@ struct Args {
   bool include_queue_ops = false;
   std::string format = "pretty";
   uint32_t snippet_chars = 240;
+  std::optional<TranscriptFormat> transcript_format;
   std::optional<fs::path> projects_root;
   std::vector<fs::path> extra_projects_roots;
   std::vector<fs::path> archive_roots;
@@ -778,6 +823,17 @@ static Args parseArgs(const std::vector<std::string> &raw) {
       } catch (...) {
         throw std::runtime_error("--snippet-chars: invalid value");
       }
+    } else if (s == "--transcript-format") {
+      if (++i >= raw.size())
+        throw std::runtime_error("--transcript-format needs a value");
+      if (raw[i] == "claude-code")
+        args.transcript_format = TranscriptFormat::ClaudeCode;
+      else if (raw[i] == "codex")
+        args.transcript_format = TranscriptFormat::Codex;
+      else
+        throw std::runtime_error(
+            "--transcript-format: invalid value " + raw[i] +
+            "; expected claude-code|codex");
     } else if (s == "--projects-root") {
       if (++i >= raw.size())
         throw std::runtime_error("--projects-root needs a value");
@@ -1102,6 +1158,11 @@ int run(const std::vector<std::string> &argv) {
   std::vector<TranscriptRoot> roots = walker::resolve_search_roots(
       args.projects_root, args.extra_projects_roots, args.archive_roots,
       args.read_config);
+  if (args.transcript_format) {
+    roots.erase(std::remove_if(roots.begin(), roots.end(), [&](const auto &root) {
+      return root.format != *args.transcript_format;
+    }), roots.end());
+  }
   std::vector<DiscoveredFile> files;
   std::unordered_set<std::string> claimed;
   for (const auto &root : roots) {

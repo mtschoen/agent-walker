@@ -177,6 +177,9 @@ archive_roots_in_effective_order(bool primary_explicit,
 }
 
 inline fs::path default_codex_root() {
+  if (auto codex_home = read_environment_variable("CODEX_HOME");
+      codex_home && !codex_home->empty())
+    return fs::path(*codex_home) / "sessions";
   if (auto home = home_directory())
     return fs::path(*home) / ".codex" / "sessions";
   return fs::path(".codex/sessions");

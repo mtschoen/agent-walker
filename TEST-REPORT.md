@@ -1,53 +1,71 @@
-claude-walker test report — 2026-07-16T18:44:30+00:00
-============================================================
+# agent-walker - Test Report
 
-Status:       PASS (100% all impls)
-Conformance:  PASS (995 checks across measured impls)
-Cumulative:   100.00% line/statement coverage (8039/8039 pooled across 4 impls)
-Git:          61e4d1d (feat/cross-agent-session-search)
-Target:       100% line/statement coverage in all four implementations
+`2026-10-11` (Linux)
 
-Per-implementation coverage
-------------------------------------------------------------
-impl   metric         covered/total    cover   conformance
-rust   lines              1660/1660  100.00%   PASS (249 ok)
-cpp    lines              2869/2869  100.00%   PASS (249 ok)
-go     statements         1330/1330  100.00%   PASS (249 ok)
-zig    lines              2180/2180  100.00%   PASS (248 ok)
+| Field | Value |
+| --- | --- |
+| Status | PARTIAL: required behavioral checks pass; full multi-language coverage unmeasured |
+| Mode | best-effort |
+| Git | `e9db042` plus Codex empty-block and conformance-environment fixes |
+| Conformance | 1,168 passed, 0 failed, 0 skipped; 292 per implementation |
+| Codex environment matrix | 36 passed with CODEX_HOME unset; 36 passed with CODEX_HOME pointing at an empty worktree directory |
+| MCP | NOT RUN: mcp/ unchanged |
+| Rust unit tests | 128 passed, 0 failed, 0 ignored |
+| C++ unit tests | 59 assertions passed, 0 failed |
+| Go unit tests | 107 top-level tests passed, 0 failed; 6 subtests passed |
+| Coverage | Go native/conformance block union: 1,959/1,959 statements (100%); 0 uncovered |
+| Other coverage | Rust, C++, Zig: NOT RUN; full Linux coverage gate unverified |
+| Exclusions | No exclusions or thresholds changed |
 
-### rust — 100.00% (0 lines uncovered)
-    beacons.rs               375/375   100.00%
-    content.rs                66/66    100.00%
-    events.rs                166/166   100.00%
-    main.rs                  208/208   100.00%
-    search.rs                666/666   100.00%
-    transcript.rs            107/107   100.00%
-    walker_roots.rs           72/72    100.00%
+## Lint
 
-### cpp — 100.00% (0 lines uncovered)
-    beacons.cpp              879/879   100.00%
-    common.hpp               120/120   100.00%
-    cost_walk.hpp            174/174   100.00%
-    discovery.hpp             72/72    100.00%
-    events.cpp               377/377   100.00%
-    json_writer.hpp           46/46    100.00%
-    main.cpp                 197/197   100.00%
-    pricing.hpp               36/36    100.00%
-    search.cpp               874/874   100.00%
-    walker_roots.hpp          94/94    100.00%
+| Tool | Result |
+| --- | --- |
+| `aislop scan .` | Initial scan: 137 warnings including 1 fixable formatting warning; formatting corrected with ruff |
+| `aislop ci .` | PASS: score 57, configured floor 20; 0 errors, 136 warnings, 527 informational findings; 0 fixable findings |
+| `cargo clippy --all-targets` | PASS: 0 findings |
+| `go vet ./...` | PASS: 0 findings |
+| `staticcheck ./...` | FAIL: 4 import errors; installed analyzer cannot decode Go 1.27 export data |
+| `zig fmt --check src/` | PASS |
+| `clang-tidy` | Exit 0; 9 emitted warnings: 7 project findings outside changed parser logic, 2 vendored simdjson findings |
+| golangci-lint via aislop | SKIPPED: analyzer built with Go 1.26 cannot analyze targeted Go 1.27.1 |
+| `aislop scan --staged` | PASS: score 70; 0 errors, 71 warnings, 0 fixable findings; formatting/security: 0 issues |
 
-### go — 100.00% (0 statements uncovered)
-    beacons.go               380/380   100.00%
-    events.go                130/130   100.00%
-    main.go                  274/274   100.00%
-    search.go                498/498   100.00%
-    walker_roots.go           48/48    100.00%
+## Commands
 
-### zig — 100.00% (0 lines uncovered)
-    beacons.zig              496/496   100.00%
-    events.zig               197/197   100.00%
-    main.zig                 548/548   100.00%
-    search.zig               864/864   100.00%
-    walker_roots.zig          75/75    100.00%
+```bash
+# rust/
+cargo build --release
+cargo test
+cargo clippy --all-targets
 
-Regenerate: `python shared/coverage.py`  (see CLAUDE.md)
+# repository root
+python shared/generate_search_corpus.py
+cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release -DWALKER_BUILD_TESTS=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake --build cpp/build --config Release -j 4
+TMPDIR="$PWD/.claude" cpp/build/walker_unit_tests
+clang-tidy -p cpp/build --header-filter='\.hpp$' '-checks=-*,bugprone-*,performance-*,clang-analyzer-*' cpp/main.cpp cpp/beacons.cpp cpp/events.cpp cpp/search.cpp
+ruff format shared/generate_search_corpus.py
+aislop scan .
+aislop ci .
+aislop scan --staged
+
+# go/
+go build -o walker .
+go test -count=1 -v ./...
+go vet ./...
+staticcheck ./...
+go build -cover -o walker-cov .
+TMPDIR="$PWD/../.claude" go test -count=1 -coverprofile=../.claude/lane/go-native-coverage.txt ./...
+go tool covdata textfmt -i=../.claude/go-coverage -o=../.claude/lane/go-conformance-coverage.txt
+
+# zig/
+zig build
+zig fmt --check src/
+
+# repository root
+TMPDIR="$PWD/.claude" CODEX_HOME="$PWD/.claude/empty-codex-home" GOCOVERDIR="$PWD/.claude/go-coverage" WALKER_BIN_GO="$PWD/go/walker-cov" python shared/conformance.py rust cpp go zig
+env -u CODEX_HOME TMPDIR="$PWD/.claude" PYTHONPATH=shared python -c "import conformance; results = [conformance.check_search_codex(language, conformance.find_binary(language)) for language in ['rust', 'cpp', 'go', 'zig']]; raise SystemExit(not all(results))"
+CODEX_HOME="$PWD/.claude/empty-codex-home" TMPDIR="$PWD/.claude" PYTHONPATH=shared python -c "import conformance; results = [conformance.check_search_codex(language, conformance.find_binary(language)) for language in ['rust', 'cpp', 'go', 'zig']]; raise SystemExit(not all(results))"
+jq -R -s '[split("\n")[] | select(length > 0 and (startswith("mode:") | not)) | split(" ") | {position: .[0], statements: (.[1] | tonumber), count: (.[2] | tonumber)}] | group_by(.position) | map(.[0] + {count: (map(.count) | max)}) | {total: (map(.statements) | add), covered: (map(select(.count > 0) | .statements) | add), uncovered: map(select(.count == 0))}' .claude/lane/go-native-coverage.txt .claude/lane/go-conformance-coverage.txt
+```

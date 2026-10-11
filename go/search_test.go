@@ -134,20 +134,40 @@ func TestSearchScanCodexFileIndexesOnlyStringMessages(t *testing.T) {
 		`{"timestamp":"2025-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","message":"ignored"}}` + "\n" +
 		`{"timestamp":"2025-01-01T00:00:03Z","type":"event_msg","payload":{"type":"agent_message","message":"from agent"}}` + "\n" +
 		`{"timestamp":"2025-01-01T00:00:04Z","type":"event_msg","payload":{"type":"agent_message","message":42}}` + "\n" +
-		`{"timestamp":"2025-01-01T00:00:05Z","type":"response_item","payload":{"type":"agent_message","message":"ignored envelope"}}` + "\n"
+		`{"timestamp":"2025-01-01T00:00:05Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"current user"},{"type":"output_text","text":"ignored"}]}}` + "\n" +
+		`{"timestamp":"2025-01-01T00:00:06Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"input_text","text":"ignored"},{"type":"output_text","text":"current answer one"},{"type":"output_text","text":"current answer two"}]}}` + "\n" +
+		`{"timestamp":"2025-01-01T00:00:07Z","type":"item_completed","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"duplicate"}]}}` + "\n" +
+		`{"type":"response_item"}` + "\n" +
+		`{"type":"response_item","payload":{"type":"function_call"}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":{}}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[]}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":""},{"type":"output_text","text":"answer"}]}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":""},{"type":"input_text","text":""}]}}` + "\n"
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	msgs := searchScanFile(path, transcriptFormatCodex, false, false)
-	if len(msgs) != 2 {
-		t.Fatalf("Codex messages = %+v; want user and agent messages only", msgs)
+	if len(msgs) != 6 {
+		t.Fatalf("Codex messages = %+v; want legacy and canonical conversation messages", msgs)
 	}
 	if msgs[0].LineNumber != 3 || msgs[0].Role != "user" || msgs[0].TextDefault != "from user" {
 		t.Errorf("user message = %+v", msgs[0])
 	}
 	if msgs[1].LineNumber != 5 || msgs[1].Role != "assistant" || msgs[1].TextDefault != "from agent" {
 		t.Errorf("agent message = %+v", msgs[1])
+	}
+	if msgs[2].LineNumber != 7 || msgs[2].Role != "user" || msgs[2].TextDefault != "current user" {
+		t.Errorf("current user message = %+v", msgs[2])
+	}
+	if msgs[3].LineNumber != 8 || msgs[3].Role != "assistant" || msgs[3].TextDefault != "current answer one\ncurrent answer two" {
+		t.Errorf("current assistant message = %+v", msgs[3])
+	}
+	if msgs[4].LineNumber != 14 || msgs[4].TextDefault != "\nanswer" {
+		t.Errorf("leading empty block message = %+v", msgs[4])
+	}
+	if msgs[5].LineNumber != 15 || msgs[5].TextDefault != "\n" {
+		t.Errorf("multiple empty blocks message = %+v", msgs[5])
 	}
 }
 
@@ -437,7 +457,7 @@ func TestParseSearchArgsErrors(t *testing.T) {
 	for _, flag := range []string{
 		"--role", "--since", "--until", "--cwd", "--context", "--limit",
 		"--format", "--snippet-chars", "--projects-root",
-		"--extra-projects-root", "--now",
+		"--extra-projects-root", "--now", "--transcript-format",
 	} {
 		if _, err := parseSearchArgs([]string{flag}); err == nil {
 			t.Errorf("%s without value should error", flag)

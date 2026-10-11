@@ -186,6 +186,57 @@ func searchParseCodexEvent(root searchRootRecord, lineNumber uint32) (searchMsg,
 	if err := sonic.Unmarshal(payload.Message, &message); err != nil {
 		return searchMsg{}, false
 	}
+	return searchCodexMessage(root, lineNumber, role, message), true
+}
+
+func searchParseCodexResponseItem(root searchRootRecord, lineNumber uint32) (searchMsg, bool) {
+	if root.Type != "response_item" || len(root.Payload) == 0 {
+		return searchMsg{}, false
+	}
+	var payload struct {
+		Type    string            `json:"type"`
+		Role    string            `json:"role"`
+		Content []json.RawMessage `json:"content"`
+	}
+	if err := sonic.Unmarshal(root.Payload, &payload); err != nil || payload.Type != "message" {
+		return searchMsg{}, false
+	}
+	expectedBlockType := ""
+	switch payload.Role {
+	case "user":
+		expectedBlockType = "input_text"
+	case "assistant":
+		expectedBlockType = "output_text"
+	default:
+		return searchMsg{}, false
+	}
+	var text strings.Builder
+	acceptedBlock := false
+	for _, content := range payload.Content {
+		var block struct {
+			Type string          `json:"type"`
+			Text json.RawMessage `json:"text"`
+		}
+		if err := sonic.Unmarshal(content, &block); err != nil || block.Type != expectedBlockType {
+			continue
+		}
+		var part *string
+		if err := sonic.Unmarshal(block.Text, &part); err != nil || part == nil {
+			continue
+		}
+		if acceptedBlock {
+			text.WriteByte('\n')
+		}
+		text.WriteString(*part)
+		acceptedBlock = true
+	}
+	if text.Len() == 0 {
+		return searchMsg{}, false
+	}
+	return searchCodexMessage(root, lineNumber, payload.Role, text.String()), true
+}
+
+func searchCodexMessage(root searchRootRecord, lineNumber uint32, role, text string) searchMsg {
 	var timestamp float64
 	hasTimestamp := false
 	if root.Timestamp != "" {
@@ -200,10 +251,10 @@ func searchParseCodexEvent(root searchRootRecord, lineNumber uint32) (searchMsg,
 		HasTimestamp:     hasTimestamp,
 		TimestampStr:     root.Timestamp,
 		Role:             role,
-		TextDefault:      message,
-		TextWithTools:    message,
+		TextDefault:      text,
+		TextWithTools:    text,
 		IsOnlyToolBlocks: false,
-	}, true
+	}
 }
 
 func searchScanFile(path string, format transcriptFormat, includeQueueOps, includeToolBlocks bool) []searchMsg {
@@ -233,7 +284,14 @@ func searchScanFile(path string, format transcriptFormat, includeQueueOps, inclu
 			continue
 		}
 		if format == transcriptFormatCodex {
-			message, ok := searchParseCodexEvent(root, uint32(idx))
+			var message searchMsg
+			var ok bool
+			switch root.Type {
+			case "event_msg":
+				message, ok = searchParseCodexEvent(root, uint32(idx))
+			case "response_item":
+				message, ok = searchParseCodexResponseItem(root, uint32(idx))
+			}
 			if ok {
 				out = append(out, message)
 			}
@@ -654,6 +712,7 @@ type searchArgs struct {
 	IncludeQueueOps      bool
 	Format               string
 	SnippetChars         uint32
+	TranscriptFormat     *transcriptFormat
 	ProjectsRoot         string
 	ProjectsRootExplicit bool
 	ExtraProjectsRoots   []string
@@ -755,6 +814,16 @@ func parseSearchArgs(raw []string) (searchArgs, error) {
 				return args, fmt.Errorf("--snippet-chars: %v", err)
 			}
 			args.SnippetChars = uint32(v)
+		case "--transcript-format":
+			if i+1 >= len(raw) {
+				return args, fmt.Errorf("--transcript-format needs a value")
+			}
+			i++
+			format := transcriptFormat(raw[i])
+			if format != transcriptFormatClaudeCode && format != transcriptFormatCodex {
+				return args, fmt.Errorf("--transcript-format: invalid value %s; expected claude-code|codex", raw[i])
+			}
+			args.TranscriptFormat = &format
 		case "--projects-root":
 			if i+1 >= len(raw) {
 				return args, fmt.Errorf("--projects-root needs a value")
@@ -1116,6 +1185,15 @@ func runSearch(argv []string) {
 
 	// Resolve roots (primary + CLI extras + config extras + archive roots).
 	roots := ResolveSearchRoots(args.ProjectsRoot, args.ProjectsRootExplicit, args.ExtraProjectsRoots, args.ArchiveRoots, args.ReadConfig)
+	if args.TranscriptFormat != nil {
+		selectedRoots := roots[:0]
+		for _, root := range roots {
+			if root.Format == *args.TranscriptFormat {
+				selectedRoots = append(selectedRoots, root)
+			}
+		}
+		roots = selectedRoots
+	}
 	rootsWalked := uint64(len(roots))
 
 	// Discover files

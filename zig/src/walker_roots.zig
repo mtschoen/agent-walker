@@ -141,6 +141,13 @@ pub fn readTaggedExtraRootsFromConfig(alloc: Allocator) ![]TranscriptRoot {
 }
 
 pub fn defaultCodexRoot(alloc: Allocator) ![]const u8 {
+    const codex_home = main.getEnvVar(alloc, "CODEX_HOME");
+    if (codex_home) |home| {
+        defer alloc.free(home);
+        if (home.len > 0) {
+            return std.fmt.allocPrint(alloc, "{s}{c}sessions", .{ home, PATH_SEP });
+        }
+    }
     if (main.homeDir(alloc)) |home| {
         defer alloc.free(home);
         return std.fmt.allocPrint(alloc, "{s}{c}.codex{c}sessions", .{ home, PATH_SEP, PATH_SEP });

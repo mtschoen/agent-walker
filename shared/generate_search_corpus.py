@@ -29,6 +29,7 @@ CORPUS_SEARCH = ROOT / "corpus" / "search"
 CORPUS_SEARCH_MULTI_ROOT = ROOT / "corpus" / "search_multi_root"
 CORPUS_SEARCH_CODEX = ROOT / "corpus" / "search_codex"
 CORPUS_SEARCH_ARCHIVE = ROOT / "corpus" / "search_archive"
+OUTPUT_NEWLINE = "\n"
 
 NOW_UNIX = 1778414400.0  # 2026-05-09 12:00:00 UTC -- matches beacon corpus
 
@@ -100,6 +101,15 @@ def codex_event(unix_ts: float, event_type: str, message: object) -> dict:
         "timestamp": iso(unix_ts),
         "type": "event_msg",
         "payload": {"type": event_type, "message": message},
+    }
+
+
+def codex_response_item(unix_ts: float, role: str, content: list[object]) -> dict:
+    """Current Codex response_item message record."""
+    return {
+        "timestamp": iso(unix_ts),
+        "type": "response_item",
+        "payload": {"type": "message", "role": role, "content": content},
     }
 
 
@@ -2469,6 +2479,16 @@ def search_archive_01_archive_only():
             "summary": summary(hits=1, sessions_matched=1, roots_walked=2),
         },
     }
+    combos["claude_format"] = {
+        **combos["default"],
+        "flags": ["--transcript-format", "claude-code"],
+    }
+    combos["codex_format"] = {
+        "pattern": "archiveneedle",
+        "flags": ["--transcript-format", "codex"],
+        "hits": [],
+        "summary": summary(hits=0, sessions_matched=0, roots_walked=0),
+    }
     return scenario, live_files, archive_files, combos
 
 
@@ -2666,6 +2686,7 @@ def main() -> None:
         expected_path.write_text(
             json.dumps({"_meta": meta, "combos": combos}, indent=2) + "\n",
             encoding="utf-8",
+            newline=OUTPUT_NEWLINE,
         )
 
     # Multi-root search scenarios live in a sibling corpus dir with their own
@@ -2700,6 +2721,7 @@ def main() -> None:
             )
             + "\n",
             encoding="utf-8",
+            newline=OUTPUT_NEWLINE,
         )
 
     print(f"Wrote {total_files} JSONL fixtures across {len(SCENARIOS)} scenarios")
@@ -2738,6 +2760,7 @@ def main() -> None:
         (scenario_dir / "expected.json").write_text(
             json.dumps({"_meta": meta, "combos": combos}, indent=2) + "\n",
             encoding="utf-8",
+            newline=OUTPUT_NEWLINE,
         )
     print(f"Wrote search archive fixtures under {CORPUS_SEARCH_ARCHIVE}")
 
@@ -2760,7 +2783,101 @@ def main() -> None:
             codex_event(NOW_UNIX - 3400, "token_count", "codexneedle ignored"),
             codex_event(NOW_UNIX - 3300, "agent_message", "codexneedle from agent"),
             codex_event(NOW_UNIX - 3200, "agent_message", {"not": "text"}),
-            {"timestamp": iso(NOW_UNIX - 3100), "type": "event_msg"},
+            codex_response_item(
+                NOW_UNIX - 3000,
+                "user",
+                [
+                    42,
+                    {"type": 42, "text": "codexneedle ignored invalid type"},
+                    {"type": "input_text", "text": 42},
+                    {"type": "input_text"},
+                    {"type": "input_text", "text": "codexneedle current user"},
+                    {"type": "output_text", "text": "codexneedle ignored user output"},
+                    {"type": "image", "text": "codexneedle ignored image"},
+                ],
+            ),
+            codex_response_item(
+                NOW_UNIX - 2900,
+                "assistant",
+                [
+                    {
+                        "type": "input_text",
+                        "text": "codexneedle ignored assistant input",
+                    },
+                    {
+                        "type": "output_text",
+                        "text": "codexneedle current assistant one",
+                    },
+                    {"type": "output_text", "text": None},
+                    {
+                        "type": "output_text",
+                        "text": "codexneedle current assistant two",
+                    },
+                    {"type": "output_text", "text": None},
+                ],
+            ),
+            codex_response_item(
+                NOW_UNIX - 2800,
+                "developer",
+                [
+                    {"type": "input_text", "text": "codexneedle ignored developer"},
+                ],
+            ),
+            {
+                "timestamp": iso(NOW_UNIX - 2700),
+                "type": "item_completed",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "codexneedle current assistant one",
+                        },
+                        {
+                            "type": "output_text",
+                            "text": "codexneedle current assistant two",
+                        },
+                    ],
+                },
+            },
+            {"timestamp": iso(NOW_UNIX - 2600), "type": "event_msg"},
+            {"type": "response_item", "payload": []},
+            {"type": "response_item", "payload": {"type": "function_call"}},
+            {"type": "response_item", "payload": {"type": 42}},
+            {"type": "response_item", "payload": {"type": "message", "role": 42}},
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": {},
+                },
+            },
+            codex_response_item(NOW_UNIX - 2500, "assistant", []),
+            codex_response_item(
+                NOW_UNIX - 2500,
+                "system",
+                [
+                    {"type": "input_text", "text": "codexneedle ignored system"},
+                ],
+            ),
+            codex_response_item(
+                NOW_UNIX - 1800,
+                "assistant",
+                [
+                    {"type": "output_text", "text": ""},
+                    {"type": "output_text", "text": "answer"},
+                ],
+            ),
+            codex_response_item(
+                NOW_UNIX - 1700,
+                "user",
+                [
+                    {"type": "input_text", "text": ""},
+                    {"type": "input_text", "text": ""},
+                ],
+            ),
         ],
         f"2026/05/09/rollout-2026-05-09T10-00-00-{other_session_id}.jsonl": [
             {
@@ -2769,6 +2886,32 @@ def main() -> None:
                 "payload": {"id": other_session_id, "cwd": other_cwd},
             },
             codex_event(NOW_UNIX - 7100, "agent_message", "codexneedle other cwd"),
+        ],
+        "2026/05/09/rollout-record-policy.jsonl": [
+            codex_session_meta(NOW_UNIX - 2400, "record-policy", codex_cwd),
+            codex_response_item(
+                NOW_UNIX - 2300,
+                "user",
+                [
+                    {"type": "input_text", "text": "repeatneedle question"},
+                ],
+            ),
+            codex_event(NOW_UNIX - 2200, "user_message", "repeatneedle question"),
+            codex_response_item(
+                NOW_UNIX - 2100,
+                "user",
+                [
+                    {"type": "input_text", "text": "repeatneedle question"},
+                ],
+            ),
+            codex_response_item(
+                NOW_UNIX - 2000,
+                "assistant",
+                [
+                    {"type": "output_text", "text": "repeatneedle answer"},
+                ],
+            ),
+            codex_event(NOW_UNIX - 1900, "agent_message", "repeatneedle answer"),
         ],
         "2026/05/09/not-a-rollout.jsonl": [
             codex_session_meta(NOW_UNIX - 100, "ignored", codex_cwd),
@@ -2808,9 +2951,22 @@ def main() -> None:
         write_jsonl(CORPUS_SEARCH_CODEX / rel, lines)
 
     def codex_hit(
-        session: str, cwd: str, line: int, timestamp: float, role: str, text: str
+        session: str,
+        cwd: str,
+        line: int,
+        timestamp: float,
+        role: str,
+        text: str,
     ) -> dict:
-        start = text.index("codexneedle")
+        pattern = "codexneedle"
+        offsets = []
+        start = 0
+        while True:
+            start = text.find(pattern, start)
+            if start < 0:
+                break
+            offsets.append([start, start + len(pattern)])
+            start += len(pattern)
         return hit(
             session_id=session,
             cwd_slug=cwd,
@@ -2818,7 +2974,7 @@ def main() -> None:
             timestamp=iso(timestamp),
             role=role,
             snippet=text,
-            match_offsets=[[start, start + len("codexneedle")]],
+            match_offsets=offsets,
         )
 
     codex_expected = {
@@ -2827,6 +2983,22 @@ def main() -> None:
         "cwd": codex_cwd,
         "all": {
             "hits": [
+                codex_hit(
+                    session_id,
+                    codex_cwd,
+                    7,
+                    NOW_UNIX - 2900,
+                    "assistant",
+                    "codexneedle current assistant one\ncodexneedle current assistant two",
+                ),
+                codex_hit(
+                    session_id,
+                    codex_cwd,
+                    6,
+                    NOW_UNIX - 3000,
+                    "user",
+                    "codexneedle current user",
+                ),
                 codex_hit(
                     session_id,
                     codex_cwd,
@@ -2852,10 +3024,26 @@ def main() -> None:
                     "codexneedle other cwd",
                 ),
             ],
-            "summary": summary(hits=3, sessions_matched=2, roots_walked=2),
+            "summary": summary(hits=5, sessions_matched=2, roots_walked=2),
         },
         "cwd_filtered": {
             "hits": [
+                codex_hit(
+                    session_id,
+                    codex_cwd,
+                    7,
+                    NOW_UNIX - 2900,
+                    "assistant",
+                    "codexneedle current assistant one\ncodexneedle current assistant two",
+                ),
+                codex_hit(
+                    session_id,
+                    codex_cwd,
+                    6,
+                    NOW_UNIX - 3000,
+                    "user",
+                    "codexneedle current user",
+                ),
                 codex_hit(
                     session_id,
                     codex_cwd,
@@ -2873,11 +3061,87 @@ def main() -> None:
                     "codexneedle from user",
                 ),
             ],
-            "summary": summary(hits=2, sessions_matched=1, roots_walked=2),
+            "summary": summary(hits=4, sessions_matched=1, roots_walked=2),
+        },
+        "record_policy": {
+            "pattern": "repeatneedle",
+            "hits": [
+                hit(
+                    session_id="record-policy",
+                    cwd_slug=codex_cwd,
+                    line_number=line,
+                    timestamp=iso(NOW_UNIX - timestamp),
+                    role=role,
+                    snippet=text,
+                    match_offsets=[[0, len("repeatneedle")]],
+                )
+                for line, timestamp, role, text in [
+                    (6, 1900, "assistant", "repeatneedle answer"),
+                    (5, 2000, "assistant", "repeatneedle answer"),
+                    (4, 2100, "user", "repeatneedle question"),
+                    (3, 2200, "user", "repeatneedle question"),
+                    (2, 2300, "user", "repeatneedle question"),
+                ]
+            ],
+            "summary": summary(hits=5, sessions_matched=1, roots_walked=2),
+        },
+        "current_context": {
+            "pattern": "codexneedle current assistant one",
+            "context": 1,
+            "hits": [
+                hit(
+                    session_id=session_id,
+                    cwd_slug=codex_cwd,
+                    line_number=7,
+                    timestamp=iso(NOW_UNIX - 2900),
+                    role="assistant",
+                    snippet="codexneedle current assistant one\ncodexneedle current assistant two",
+                    match_offsets=[[0, len("codexneedle current assistant one")]],
+                    context_before=[
+                        ctx("user", "codexneedle current user", iso(NOW_UNIX - 3000))
+                    ],
+                    context_after=[ctx("assistant", "\nanswer", iso(NOW_UNIX - 1800))],
+                ),
+            ],
+            "summary": summary(hits=1, sessions_matched=1, roots_walked=2),
+        },
+        "leading_empty_newline": {
+            "pattern": "\nanswer",
+            "hits": [
+                hit(
+                    session_id=session_id,
+                    cwd_slug=codex_cwd,
+                    line_number=18,
+                    timestamp=iso(NOW_UNIX - 1800),
+                    role="assistant",
+                    snippet="\nanswer",
+                    match_offsets=[[0, 7]],
+                ),
+            ],
+            "summary": summary(hits=1, sessions_matched=1, roots_walked=2),
+        },
+        "empty_blocks_context": {
+            "pattern": "\n",
+            "context": 1,
+            "hits": [
+                hit(
+                    session_id=session_id,
+                    cwd_slug=codex_cwd,
+                    line_number=19,
+                    timestamp=iso(NOW_UNIX - 1700),
+                    role="user",
+                    snippet="\n",
+                    match_offsets=[[0, 1]],
+                    context_before=[ctx("assistant", "\nanswer", iso(NOW_UNIX - 1800))],
+                ),
+            ],
+            "summary": summary(hits=1, sessions_matched=1, roots_walked=2),
         },
     }
     (CORPUS_SEARCH_CODEX / "expected.json").write_text(
-        json.dumps(codex_expected, indent=2) + "\n", encoding="utf-8"
+        json.dumps(codex_expected, indent=2) + "\n",
+        encoding="utf-8",
+        newline=OUTPUT_NEWLINE,
     )
     print(f"Wrote codex rollout fixtures under {CORPUS_SEARCH_CODEX}")
 

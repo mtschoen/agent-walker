@@ -11,6 +11,44 @@
         "type": "hit",
         "session_id": "019fb6bc-1111-7222-8333-444444444444",
         "cwd_slug": "/worktrees/codex-project",
+        "line_number": 7,
+        "timestamp": "2026-05-10T11:11:40.000Z",
+        "role": "assistant",
+        "snippet": "codexneedle current assistant one\ncodexneedle current assistant two",
+        "match_offsets": [
+          [
+            0,
+            11
+          ],
+          [
+            34,
+            45
+          ]
+        ],
+        "context_before": [],
+        "context_after": []
+      },
+      {
+        "type": "hit",
+        "session_id": "019fb6bc-1111-7222-8333-444444444444",
+        "cwd_slug": "/worktrees/codex-project",
+        "line_number": 6,
+        "timestamp": "2026-05-10T11:10:00.000Z",
+        "role": "user",
+        "snippet": "codexneedle current user",
+        "match_offsets": [
+          [
+            0,
+            11
+          ]
+        ],
+        "context_before": [],
+        "context_after": []
+      },
+      {
+        "type": "hit",
+        "session_id": "019fb6bc-1111-7222-8333-444444444444",
+        "cwd_slug": "/worktrees/codex-project",
         "line_number": 4,
         "timestamp": "2026-05-10T11:05:00.000Z",
         "role": "assistant",
@@ -61,7 +99,7 @@
     ],
     "summary": {
       "type": "summary",
-      "hits": 3,
+      "hits": 5,
       "sessions_matched": 2,
       "roots_walked": 2,
       "truncated": false
@@ -69,6 +107,44 @@
   },
   "cwd_filtered": {
     "hits": [
+      {
+        "type": "hit",
+        "session_id": "019fb6bc-1111-7222-8333-444444444444",
+        "cwd_slug": "/worktrees/codex-project",
+        "line_number": 7,
+        "timestamp": "2026-05-10T11:11:40.000Z",
+        "role": "assistant",
+        "snippet": "codexneedle current assistant one\ncodexneedle current assistant two",
+        "match_offsets": [
+          [
+            0,
+            11
+          ],
+          [
+            34,
+            45
+          ]
+        ],
+        "context_before": [],
+        "context_after": []
+      },
+      {
+        "type": "hit",
+        "session_id": "019fb6bc-1111-7222-8333-444444444444",
+        "cwd_slug": "/worktrees/codex-project",
+        "line_number": 6,
+        "timestamp": "2026-05-10T11:10:00.000Z",
+        "role": "user",
+        "snippet": "codexneedle current user",
+        "match_offsets": [
+          [
+            0,
+            11
+          ]
+        ],
+        "context_before": [],
+        "context_after": []
+      },
       {
         "type": "hit",
         "session_id": "019fb6bc-1111-7222-8333-444444444444",
@@ -106,7 +182,211 @@
     ],
     "summary": {
       "type": "summary",
-      "hits": 2,
+      "hits": 4,
+      "sessions_matched": 1,
+      "roots_walked": 2,
+      "truncated": false
+    }
+  },
+  "record_policy": {
+    "pattern": "repeatneedle",
+    "hits": [
+      {
+        "type": "hit",
+        "session_id": "record-policy",
+        "cwd_slug": "/worktrees/codex-project",
+        "line_number": 6,
+        "timestamp": "2026-05-10T11:28:20.000Z",
+        "role": "assistant",
+        "snippet": "repeatneedle answer",
+        "match_offsets": [
+          [
+            0,
+            12
+          ]
+        ],
+        "context_before": [],
+        "context_after": []
+      },
+      {
+        "type": "hit",
+        "session_id": "record-policy",
+        "cwd_slug": "/worktrees/codex-project",
+        "line_number": 5,
+        "timestamp": "2026-05-10T11:26:40.000Z",
+        "role": "assistant",
+        "snippet": "repeatneedle answer",
+        "match_offsets": [
+          [
+            0,
+            12
+          ]
+        ],
+        "context_before": [],
+        "context_after": []
+      },
+      {
+        "type": "hit",
+        "session_id": "record-policy",
+        "cwd_slug": "/worktrees/codex-project",
+        "line_number": 4,
+        "timestamp": "2026-05-10T11:25:00.000Z",
+        "role": "user",
+        "snippet": "repeatneedle question",
+        "match_offsets": [
+          [
+            0,
+            12
+          ]
+        ],
+        "context_before": [],
+        "context_after": []
+      },
+      {
+        "type": "hit",
+        "session_id": "record-policy",
+        "cwd_slug": "/worktrees/codex-project",
+        "line_number": 3,
+        "timestamp": "2026-05-10T11:23:20.000Z",
+        "role": "user",
+        "snippet": "repeatneedle question",
+        "match_offsets": [
+          [
+            0,
+            12
+          ]
+        ],
+        "context_before": [],
+        "context_after": []
+      },
+      {
+        "type": "hit",
+        "session_id": "record-policy",
+        "cwd_slug": "/worktrees/codex-project",
+        "line_number": 2,
+        "timestamp": "2026-05-10T11:21:40.000Z",
+        "role": "user",
+        "snippet": "repeatneedle question",
+        "match_offsets": [
+          [
+            0,
+            12
+          ]
+        ],
+        "context_before": [],
+        "context_after": []
+      }
+    ],
+    "summary": {
+      "type": "summary",
+      "hits": 5,
+      "sessions_matched": 1,
+      "roots_walked": 2,
+      "truncated": false
+    }
+  },
+  "current_context": {
+    "pattern": "codexneedle current assistant one",
+    "context": 1,
+    "hits": [
+      {
+        "type": "hit",
+        "session_id": "019fb6bc-1111-7222-8333-444444444444",
+        "cwd_slug": "/worktrees/codex-project",
+        "line_number": 7,
+        "timestamp": "2026-05-10T11:11:40.000Z",
+        "role": "assistant",
+        "snippet": "codexneedle current assistant one\ncodexneedle current assistant two",
+        "match_offsets": [
+          [
+            0,
+            33
+          ]
+        ],
+        "context_before": [
+          {
+            "role": "user",
+            "text": "codexneedle current user",
+            "timestamp": "2026-05-10T11:10:00.000Z"
+          }
+        ],
+        "context_after": [
+          {
+            "role": "assistant",
+            "text": "\nanswer",
+            "timestamp": "2026-05-10T11:30:00.000Z"
+          }
+        ]
+      }
+    ],
+    "summary": {
+      "type": "summary",
+      "hits": 1,
+      "sessions_matched": 1,
+      "roots_walked": 2,
+      "truncated": false
+    }
+  },
+  "leading_empty_newline": {
+    "pattern": "\nanswer",
+    "hits": [
+      {
+        "type": "hit",
+        "session_id": "019fb6bc-1111-7222-8333-444444444444",
+        "cwd_slug": "/worktrees/codex-project",
+        "line_number": 18,
+        "timestamp": "2026-05-10T11:30:00.000Z",
+        "role": "assistant",
+        "snippet": "\nanswer",
+        "match_offsets": [
+          [
+            0,
+            7
+          ]
+        ],
+        "context_before": [],
+        "context_after": []
+      }
+    ],
+    "summary": {
+      "type": "summary",
+      "hits": 1,
+      "sessions_matched": 1,
+      "roots_walked": 2,
+      "truncated": false
+    }
+  },
+  "empty_blocks_context": {
+    "pattern": "\n",
+    "context": 1,
+    "hits": [
+      {
+        "type": "hit",
+        "session_id": "019fb6bc-1111-7222-8333-444444444444",
+        "cwd_slug": "/worktrees/codex-project",
+        "line_number": 19,
+        "timestamp": "2026-05-10T11:31:40.000Z",
+        "role": "user",
+        "snippet": "\n",
+        "match_offsets": [
+          [
+            0,
+            1
+          ]
+        ],
+        "context_before": [
+          {
+            "role": "assistant",
+            "text": "\nanswer",
+            "timestamp": "2026-05-10T11:30:00.000Z"
+          }
+        ],
+        "context_after": []
+      }
+    ],
+    "summary": {
+      "type": "summary",
+      "hits": 1,
       "sessions_matched": 1,
       "roots_walked": 2,
       "truncated": false

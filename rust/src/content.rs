@@ -76,6 +76,35 @@ pub fn extract_codex_event(payload: &Value) -> Option<(&'static str, String)> {
     Some((role, message.to_string()))
 }
 
+/// Extract searchable text from a current Codex `response_item` message.
+/// A user message owns input_text blocks and an assistant message owns
+/// output_text blocks. Other roles and blocks are not conversation turns.
+pub fn extract_codex_response_item(payload: &Value) -> Option<(&'static str, String)> {
+    if payload.get("type").and_then(Value::as_str)? != "message" {
+        return None;
+    }
+    let (role, text_type) = match payload.get("role").and_then(Value::as_str)? {
+        "user" => ("user", "input_text"),
+        "assistant" => ("assistant", "output_text"),
+        _ => return None,
+    };
+    let content = payload.get("content")?.as_array()?;
+    let mut text = String::new();
+    let mut accepted_block = false;
+    for block in content {
+        if block.get("type").and_then(Value::as_str) == Some(text_type) {
+            if let Some(part) = block.get("text").and_then(Value::as_str) {
+                if accepted_block {
+                    text.push('\n');
+                }
+                text.push_str(part);
+                accepted_block = true;
+            }
+        }
+    }
+    (!text.is_empty()).then_some((role, text))
+}
+
 /// True when content is an array entirely composed of `tool_use`/`tool_result`
 /// blocks (no text blocks). Search uses this to skip pure tool messages under
 /// default rules. Returns false for bare-string content (legacy form is always
@@ -183,6 +212,52 @@ mod tests {
         );
         assert_eq!(
             extract_codex_event(&json!({"type":"agent_message","message":42})),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_codex_response_item_keeps_canonical_role_blocks() {
+        for (role, block_type) in [("user", "input_text"), ("assistant", "output_text")] {
+            for (parts, expected) in [(["", "answer"], "\nanswer"), (["", ""], "\n")] {
+                assert_eq!(
+                    extract_codex_response_item(&json!({
+                        "type": "message", "role": role,
+                        "content": parts.map(|text| json!({"type": block_type, "text": text}))
+                    })),
+                    Some((role, expected.to_string()))
+                );
+            }
+        }
+        assert_eq!(
+            extract_codex_response_item(&json!({
+                "type":"message",
+                "role":"user",
+                "content":[
+                    {"type":"input_text","text":"question"},
+                    {"type":"output_text","text":"ignored"},
+                    {"type":"input_text","text":"follow-up"}
+                ]
+            })),
+            Some(("user", "question\nfollow-up".to_string()))
+        );
+        assert_eq!(
+            extract_codex_response_item(&json!({
+                "type":"message",
+                "role":"assistant",
+                "content":[
+                    {"type":"input_text","text":"ignored"},
+                    {"type":"output_text","text":"answer"}
+                ]
+            })),
+            Some(("assistant", "answer".to_string()))
+        );
+        assert_eq!(
+            extract_codex_response_item(&json!({
+                "type":"message",
+                "role":"developer",
+                "content":[{"type":"input_text","text":"ignored"}]
+            })),
             None
         );
     }

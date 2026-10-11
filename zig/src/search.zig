@@ -35,6 +35,7 @@ const SearchArgs = struct {
     include_queue_ops: bool,
     format: Format,
     snippet_chars: u32,
+    transcript_format: ?walker_roots.TranscriptFormat,
     projects_root: ?[]const u8,
     extra_roots: [][]const u8,
     archive_roots: [][]const u8,
@@ -58,6 +59,7 @@ fn parseArgs(alloc: Allocator, raw: [][]const u8) !SearchArgs {
     var include_queue_ops = false;
     var format: Format = .pretty;
     var snippet_chars: u32 = 240;
+    var transcript_format: ?walker_roots.TranscriptFormat = null;
     var projects_root: ?[]const u8 = null;
     var extra_roots: std.ArrayList([]const u8) = .empty;
     var archive_roots: std.ArrayList([]const u8) = .empty;
@@ -113,6 +115,16 @@ fn parseArgs(alloc: Allocator, raw: [][]const u8) !SearchArgs {
                 writeStderrFmt(alloc, "walker: search: --snippet-chars: invalid value\n", .{});
                 std.process.exit(2);
             };
+        } else if (std.mem.eql(u8, arg, "--transcript-format")) {
+            const value = main.grab(raw, &i, "--transcript-format");
+            if (std.mem.eql(u8, value, "claude-code")) {
+                transcript_format = .claude_code;
+            } else if (std.mem.eql(u8, value, "codex")) {
+                transcript_format = .codex;
+            } else {
+                writeStderrFmt(alloc, "walker: search: --transcript-format: invalid value {s}; expected claude-code|codex\n", .{value});
+                std.process.exit(2);
+            }
         } else if (std.mem.eql(u8, arg, "--projects-root")) {
             projects_root = main.grab(raw, &i, "--projects-root");
         } else if (std.mem.eql(u8, arg, "--extra-projects-root")) {
@@ -183,6 +195,7 @@ fn parseArgs(alloc: Allocator, raw: [][]const u8) !SearchArgs {
         .include_queue_ops = include_queue_ops,
         .format = format,
         .snippet_chars = snippet_chars,
+        .transcript_format = transcript_format,
         .projects_root = projects_root,
         .extra_roots = try extra_roots.toOwnedSlice(alloc),
         .archive_roots = try archive_roots.toOwnedSlice(alloc),
@@ -751,8 +764,8 @@ fn scanFile(
     return out.toOwnedSlice(alloc);
 }
 
-/// Parse the searchable subset of a Codex rollout event. Only event_msg
-/// user_message and agent_message payloads with string messages are indexed.
+/// Parse the searchable subset of a Codex rollout event. Legacy event_msg
+/// messages and canonical response_item messages are indexed.
 fn parseCodexScanMessage(alloc: Allocator, line: []const u8, idx: u32) !?ScanMessage {
     var parsed = try std.json.parseFromSlice(std.json.Value, alloc, line, .{});
     defer parsed.deinit();
@@ -764,25 +777,78 @@ fn parseCodexScanMessage(alloc: Allocator, line: []const u8, idx: u32) !?ScanMes
         .string => |value| value,
         else => return null,
     };
-    if (!std.mem.eql(u8, entry_type, "event_msg")) return null;
     const payload = switch (object.get("payload") orelse return null) {
         .object => |value| value,
         else => return null,
     };
-    const event_type = switch (payload.get("type") orelse return null) {
-        .string => |value| value,
-        else => return null,
-    };
-    const role = if (std.mem.eql(u8, event_type, "user_message"))
-        "user"
-    else if (std.mem.eql(u8, event_type, "agent_message"))
-        "assistant"
-    else
+    var role: []const u8 = undefined;
+    var text: []const u8 = undefined;
+    if (std.mem.eql(u8, entry_type, "event_msg")) {
+        const event_type = switch (payload.get("type") orelse return null) {
+            .string => |value| value,
+            else => return null,
+        };
+        role = if (std.mem.eql(u8, event_type, "user_message"))
+            "user"
+        else if (std.mem.eql(u8, event_type, "agent_message"))
+            "assistant"
+        else
+            return null;
+        const message = switch (payload.get("message") orelse return null) {
+            .string => |value| value,
+            else => return null,
+        };
+        text = try alloc.dupe(u8, message);
+    } else if (std.mem.eql(u8, entry_type, "response_item")) {
+        const payload_type = switch (payload.get("type") orelse return null) {
+            .string => |value| value,
+            else => return null,
+        };
+        if (!std.mem.eql(u8, payload_type, "message")) return null;
+        const payload_role = switch (payload.get("role") orelse return null) {
+            .string => |value| value,
+            else => return null,
+        };
+        const expected_block_type = if (std.mem.eql(u8, payload_role, "user")) blk: {
+            role = "user";
+            break :blk "input_text";
+        } else if (std.mem.eql(u8, payload_role, "assistant")) blk: {
+            role = "assistant";
+            break :blk "output_text";
+        } else {
+            return null;
+        };
+        const content = switch (payload.get("content") orelse return null) {
+            .array => |value| value,
+            else => return null,
+        };
+        // alloc is arena-backed; an error path reclaims the list at arena
+        // deinit, so no errdefer cleanup is needed.
+        var parts: std.ArrayList(u8) = .empty;
+        var accepted_block = false;
+        for (content.items) |block| {
+            const block_object = switch (block) {
+                .object => |value| value,
+                else => continue,
+            };
+            const block_type = switch (block_object.get("type") orelse continue) {
+                .string => |value| value,
+                else => continue,
+            };
+            if (!std.mem.eql(u8, block_type, expected_block_type)) continue;
+            const block_text = switch (block_object.get("text") orelse continue) {
+                .string => |value| value,
+                else => continue,
+            };
+            if (accepted_block) try parts.append(alloc, '\n');
+            try parts.appendSlice(alloc, block_text);
+            accepted_block = true;
+        }
+        if (parts.items.len == 0) return null;
+        text = try parts.toOwnedSlice(alloc);
+    } else {
         return null;
-    const message = switch (payload.get("message") orelse return null) {
-        .string => |value| value,
-        else => return null,
-    };
+    }
     const timestamp_string = if (object.get("timestamp")) |timestamp_value|
         switch (timestamp_value) {
             .string => |value| value,
@@ -790,7 +856,6 @@ fn parseCodexScanMessage(alloc: Allocator, line: []const u8, idx: u32) !?ScanMes
         }
     else
         "";
-    const text = try alloc.dupe(u8, message);
     const timestamp = try alloc.dupe(u8, timestamp_string);
     return .{
         .line_number = idx,
@@ -2077,7 +2142,15 @@ pub fn run(gpa: Allocator, argv: [][]const u8) !void {
     };
     defer pattern.deinit();
 
-    const roots = try walker_roots.resolveSearchRoots(alloc, args.projects_root, args.extra_roots, args.archive_roots, args.read_config);
+    const resolved_roots = try walker_roots.resolveSearchRoots(alloc, args.projects_root, args.extra_roots, args.archive_roots, args.read_config);
+    var selected_roots: std.ArrayList(walker_roots.TranscriptRoot) = .empty;
+    for (resolved_roots) |root| {
+        if (args.transcript_format) |format| {
+            if (root.format != format) continue;
+        }
+        try selected_roots.append(alloc, root);
+    }
+    const roots = try selected_roots.toOwnedSlice(alloc);
     const files = try discoverFiles(alloc, roots, args.since, args.cwd);
     const files_walked: u64 = files.len;
     const roots_walked: u64 = roots.len;

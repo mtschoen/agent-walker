@@ -143,6 +143,11 @@ pub(crate) fn read_tagged_extra_roots_from_config() -> Vec<TranscriptRoot> {
 }
 
 pub(crate) fn default_codex_root() -> PathBuf {
+    if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
+        if !codex_home.is_empty() {
+            return PathBuf::from(codex_home).join("sessions");
+        }
+    }
     match home_directory() {
         Some(home) => PathBuf::from(home).join(".codex").join("sessions"),
         None => PathBuf::from(".codex/sessions"),

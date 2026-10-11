@@ -33,6 +33,54 @@
         "roots_walked": 2,
         "truncated": false
       }
+    },
+    "claude_format": {
+      "pattern": "archiveneedle",
+      "flags": [
+        "--transcript-format",
+        "claude-code"
+      ],
+      "hits": [
+        {
+          "type": "hit",
+          "session_id": "archived-session",
+          "cwd_slug": "archived-slug",
+          "line_number": 1,
+          "timestamp": "2026-05-10T11:00:00.000Z",
+          "role": "assistant",
+          "snippet": "archiveneedle only in the archive",
+          "match_offsets": [
+            [
+              0,
+              13
+            ]
+          ],
+          "context_before": [],
+          "context_after": []
+        }
+      ],
+      "summary": {
+        "type": "summary",
+        "hits": 1,
+        "sessions_matched": 1,
+        "roots_walked": 2,
+        "truncated": false
+      }
+    },
+    "codex_format": {
+      "pattern": "archiveneedle",
+      "flags": [
+        "--transcript-format",
+        "codex"
+      ],
+      "hits": [],
+      "summary": {
+        "type": "summary",
+        "hits": 0,
+        "sessions_matched": 0,
+        "roots_walked": 0,
+        "truncated": false
+      }
     }
   }
 }

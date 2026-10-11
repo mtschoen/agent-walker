@@ -3,4 +3,17 @@
 {"timestamp": "2026-05-10T11:03:20.000Z", "type": "event_msg", "payload": {"type": "token_count", "message": "codexneedle ignored"}}
 {"timestamp": "2026-05-10T11:05:00.000Z", "type": "event_msg", "payload": {"type": "agent_message", "message": "codexneedle from agent"}}
 {"timestamp": "2026-05-10T11:06:40.000Z", "type": "event_msg", "payload": {"type": "agent_message", "message": {"not": "text"}}}
-{"timestamp": "2026-05-10T11:08:20.000Z", "type": "event_msg"}
+{"timestamp": "2026-05-10T11:10:00.000Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [42, {"type": 42, "text": "codexneedle ignored invalid type"}, {"type": "input_text", "text": 42}, {"type": "input_text"}, {"type": "input_text", "text": "codexneedle current user"}, {"type": "output_text", "text": "codexneedle ignored user output"}, {"type": "image", "text": "codexneedle ignored image"}]}}
+{"timestamp": "2026-05-10T11:11:40.000Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "input_text", "text": "codexneedle ignored assistant input"}, {"type": "output_text", "text": "codexneedle current assistant one"}, {"type": "output_text", "text": null}, {"type": "output_text", "text": "codexneedle current assistant two"}, {"type": "output_text", "text": null}]}}
+{"timestamp": "2026-05-10T11:13:20.000Z", "type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "codexneedle ignored developer"}]}}
+{"timestamp": "2026-05-10T11:15:00.000Z", "type": "item_completed", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "codexneedle current assistant one"}, {"type": "output_text", "text": "codexneedle current assistant two"}]}}
+{"timestamp": "2026-05-10T11:16:40.000Z", "type": "event_msg"}
+{"type": "response_item", "payload": []}
+{"type": "response_item", "payload": {"type": "function_call"}}
+{"type": "response_item", "payload": {"type": 42}}
+{"type": "response_item", "payload": {"type": "message", "role": 42}}
+{"type": "response_item", "payload": {"type": "message", "role": "user", "content": {}}}
+{"timestamp": "2026-05-10T11:18:20.000Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": []}}
+{"timestamp": "2026-05-10T11:18:20.000Z", "type": "response_item", "payload": {"type": "message", "role": "system", "content": [{"type": "input_text", "text": "codexneedle ignored system"}]}}
+{"timestamp": "2026-05-10T11:30:00.000Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": ""}, {"type": "output_text", "text": "answer"}]}}
+{"timestamp": "2026-05-10T11:31:40.000Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": ""}, {"type": "input_text", "text": ""}]}}

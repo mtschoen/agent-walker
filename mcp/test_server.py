@@ -112,14 +112,20 @@ def test_timeout_raises_runtimeerror_not_process_timeout(monkeypatch):
 
 
 def test_agent_search_merges_and_sorts_providers(monkeypatch):
-    monkeypatch.setattr(
-        server,
-        "_run_search",
-        lambda arguments: {
+    native_formats = []
+
+    def search_native(arguments):
+        format_value = arguments[arguments.index("--transcript-format") + 1]
+        native_formats.append(format_value)
+        return {
             "hits": [
                 {
-                    "session_id": "claude",
-                    "timestamp": "2024-01-01T00:00:00Z",
+                    "session_id": format_value,
+                    "timestamp": (
+                        "2024-01-01T00:00:00Z"
+                        if format_value == "claude-code"
+                        else "2024-06-01T00:00:00Z"
+                    ),
                     "line_number": 1,
                 }
             ],
@@ -131,7 +137,12 @@ def test_agent_search_merges_and_sorts_providers(monkeypatch):
                 "truncated": False,
             },
             "note": None,
-        },
+        }
+
+    monkeypatch.setattr(
+        server,
+        "_run_search",
+        search_native,
     )
     monkeypatch.setattr(
         server,
@@ -156,9 +167,14 @@ def test_agent_search_merges_and_sorts_providers(monkeypatch):
         },
     )
     result = server._run_agent_search(server.SearchOptions(pattern="needle"), None)
-    assert [hit["provider"] for hit in result["hits"]] == ["opencode", "claude"]
-    assert result["summary"]["hits"] == 2
-    assert set(result["summary"]["providers"]) == {"claude", "opencode"}
+    assert native_formats == ["claude-code", "codex"]
+    assert [hit["provider"] for hit in result["hits"]] == [
+        "opencode",
+        "codex",
+        "claude",
+    ]
+    assert result["summary"]["hits"] == 3
+    assert set(result["summary"]["providers"]) == {"claude", "codex", "opencode"}
 
 
 def test_agent_search_degrades_when_one_provider_fails(monkeypatch):
@@ -185,15 +201,22 @@ def test_agent_search_degrades_when_one_provider_fails(monkeypatch):
     result = server._run_agent_search(server.SearchOptions(pattern="needle"), None)
     assert result["hits"] == []
     assert "claude: binary missing" in result["note"]
+    assert "codex: binary missing" in result["note"]
     assert result["summary"]["providers"]["claude"]["available"] is False
     assert result["summary"]["providers"]["claude"]["error"] == "binary missing"
+    assert result["summary"]["providers"]["codex"]["available"] is False
 
 
 def test_agent_search_raises_when_every_provider_fails(monkeypatch):
+    def fail_native(arguments):
+        source = arguments[arguments.index("--transcript-format") + 1]
+        provider = "claude" if source == "claude-code" else source
+        raise RuntimeError(f"{provider} failed")
+
     monkeypatch.setattr(
         server,
         "_run_search",
-        lambda arguments: (_ for _ in ()).throw(RuntimeError("claude failed")),
+        fail_native,
     )
     monkeypatch.setattr(
         server,
@@ -203,7 +226,7 @@ def test_agent_search_raises_when_every_provider_fails(monkeypatch):
         ),
     )
     with pytest.raises(
-        RuntimeError, match="all selected.*claude failed.*opencode failed"
+        RuntimeError, match="all selected.*claude failed.*codex failed.*opencode failed"
     ):
         server._run_agent_search(server.SearchOptions(pattern="needle"), None)
 
@@ -249,6 +272,10 @@ def test_search_argument_builder_maps_every_option():
         "--count-only",
         "--include-tool-blocks",
     ]
+    assert server._search_arguments(options, "codex")[-2:] == [
+        "--transcript-format",
+        "codex",
+    ]
 
 
 def test_merge_count_only_and_global_truncation():
@@ -277,6 +304,64 @@ def test_merge_count_only_and_global_truncation():
     assert result["note"] == "claude: note"
 
 
+def test_agent_search_applies_global_limit_after_native_source_selection(monkeypatch):
+    calls = []
+
+    def search_native(arguments):
+        source = arguments[arguments.index("--transcript-format") + 1]
+        calls.append(arguments)
+        return {
+            "hits": [
+                {
+                    "session_id": source,
+                    "timestamp": (
+                        "2024-01-01T00:00:00Z"
+                        if source == "claude-code"
+                        else "2025-01-01T00:00:00Z"
+                    ),
+                    "line_number": 1,
+                }
+            ],
+            "summary": {"hits": 1, "sessions_matched": 1, "truncated": True},
+            "note": None,
+        }
+
+    monkeypatch.setattr(server, "_run_search", search_native)
+    result = server._run_agent_search(
+        server.SearchOptions(pattern="needle", limit=1), ["claude", "codex"]
+    )
+    assert [call[call.index("--transcript-format") + 1] for call in calls] == [
+        "claude-code",
+        "codex",
+    ]
+    assert all(call[call.index("--limit") + 1] == "1" for call in calls)
+    assert [hit["provider"] for hit in result["hits"]] == ["codex"]
+    assert set(result["summary"]["providers"]) == {"claude", "codex"}
+    assert result["summary"]["truncated"] is True
+
+
+def test_agent_search_count_only_sums_separate_native_sources(monkeypatch):
+    calls = []
+
+    def search_native(arguments):
+        calls.append(arguments)
+        return {
+            "hits": [],
+            "summary": {"hits": 7, "sessions_matched": 2, "truncated": False},
+            "note": None,
+        }
+
+    monkeypatch.setattr(server, "_run_search", search_native)
+    result = server._run_agent_search(
+        server.SearchOptions(pattern="needle", count_only=True), ["claude", "codex"]
+    )
+    assert len(calls) == 2
+    assert all("--count-only" in call for call in calls)
+    assert result["hits"] == []
+    assert result["summary"]["hits"] == 14
+    assert result["summary"]["sessions_matched"] == 4
+
+
 def test_agent_search_validates_numeric_options():
     with pytest.raises(ValueError, match="limit"):
         server._run_agent_search(
@@ -294,7 +379,7 @@ def test_agent_search_honors_single_provider_selection(monkeypatch):
         server,
         "_run_search",
         lambda arguments: (
-            calls.append("claude")
+            calls.append(arguments[arguments.index("--transcript-format") + 1])
             or {
                 "hits": [],
                 "summary": {},
@@ -316,7 +401,10 @@ def test_agent_search_honors_single_provider_selection(monkeypatch):
     )
     options = server.SearchOptions(pattern="x")
     server._run_agent_search(options, ["claude"])
-    assert calls == ["claude"]
+    assert calls == ["claude-code"]
+    calls.clear()
+    server._run_agent_search(options, ["codex"])
+    assert calls == ["codex"]
     calls.clear()
     server._run_agent_search(options, ["opencode"])
     assert calls == ["opencode"]

@@ -1,6 +1,6 @@
 """MCP server for provider-aware historical agent-session search.
 
-Claude Code search remains delegated to the native agent-walker binary
+Claude Code and Codex search are delegated to the native agent-walker binary
 (installed as `claude-walker` as a back-compat alias). Provider modules
 handle stores with different formats, beginning with OpenCode's SQLite
 database. Cost, event, and beacon modes remain Claude-only.
@@ -240,7 +240,10 @@ def _run_search(arguments: list[str]) -> dict[str, Any]:
     return {"hits": hits, "summary": summary, "note": stderr or None}
 
 
-def _search_arguments(options: SearchOptions) -> list[str]:
+def _search_arguments(
+    options: SearchOptions,
+    transcript_format: Literal["claude-code", "codex"] | None = None,
+) -> list[str]:
     arguments: list[str] = [options.pattern]
     if options.regex:
         arguments.append("--regex")
@@ -264,6 +267,8 @@ def _search_arguments(options: SearchOptions) -> list[str]:
         arguments.append("--count-only")
     if options.include_tool_blocks:
         arguments.append("--include-tool-blocks")
+    if transcript_format is not None:
+        arguments += ["--transcript-format", transcript_format]
     return arguments
 
 
@@ -340,8 +345,12 @@ def _run_agent_search(
     options: SearchOptions,
     providers: list[str] | None,
 ) -> dict[str, Any]:
-    selected = ["claude", "opencode"] if providers is None else providers
-    unknown = sorted(set(selected) - {"claude", "opencode"})
+    selected = ["claude", "codex", "opencode"] if providers is None else providers
+    native_formats: dict[str, Literal["claude-code", "codex"]] = {
+        "claude": "claude-code",
+        "codex": "codex",
+    }
+    unknown = sorted(set(selected) - {*native_formats, "opencode"})
     if unknown:
         raise ValueError(f"unknown search providers: {', '.join(unknown)}")
     if not selected:
@@ -353,12 +362,15 @@ def _run_agent_search(
     started = time.monotonic()
     results: dict[str, dict[str, Any]] = {}
     failures: dict[str, str] = {}
-    arguments = _search_arguments(options)
-    if "claude" in selected:
+    for provider, transcript_format in native_formats.items():
+        if provider not in selected:
+            continue
         try:
-            results["claude"] = _run_search(arguments)
+            results[provider] = _run_search(
+                _search_arguments(options, transcript_format)
+            )
         except RuntimeError as error:
-            failures["claude"] = str(error)
+            failures[provider] = str(error)
     if "opencode" in selected:
         try:
             results["opencode"] = search_opencode(options)
@@ -400,7 +412,7 @@ def create_mcp_server() -> MCPServer:
         "agent-walker",
         instructions=(
             "Search past coding-agent sessions. Use agent_walker_search when the user "
-            "refers to an earlier conversation; it searches Claude Code and OpenCode by "
+            "refers to an earlier conversation; it searches Claude Code, Codex, and OpenCode by "
             "default. Set providers to scope recall to one or more agent harnesses."
         ),
     )
@@ -423,7 +435,7 @@ def create_mcp_server() -> MCPServer:
     @server.tool()
     def agent_walker_search(
         pattern: str,
-        providers: list[Literal["claude", "opencode"]] | None = None,
+        providers: list[Literal["claude", "codex", "opencode"]] | None = None,
         regex: bool = False,
         case_sensitive: bool = False,
         role: Literal["user", "assistant", "both"] = "both",
@@ -438,7 +450,7 @@ def create_mcp_server() -> MCPServer:
     ) -> dict[str, Any]:
         """Search historical sessions across coding-agent providers.
 
-        Claude Code JSONLs and OpenCode's SQLite store are searched by default.
+        Claude Code JSONLs, Codex rollouts, and OpenCode's SQLite store are searched by default.
         Results carry a `provider` field and retain source-specific provenance.
         This tool is historical recall only: statusline costs, events, and progress
         beacons remain isolated to their native agent session source.
@@ -454,7 +466,8 @@ def create_mcp_server() -> MCPServer:
             since: RFC3339 timestamp or relative value such as 7d or 12h.
             until: RFC3339 timestamp or relative upper bound.
             cwd: Project identifier/path filter. Claude expects its project slug;
-                OpenCode matches against the stored session directory.
+                Codex matches an exact rollout cwd; OpenCode matches the stored
+                session directory.
             context_turns: Messages before and after each hit.
             limit: Global cap after provider results are merged newest-first.
             count_only: Return aggregate and per-provider counts without hits.
