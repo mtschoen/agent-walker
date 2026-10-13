@@ -202,13 +202,13 @@ fn fileOpen(alloc: Allocator, path: []const u8) !PlatformFd {
         if (h == platform.INVALID_HANDLE_VALUE) return error.OpenFailed;
         return h;
     } else if (is_darwin) {
-        const zpath = try alloc.dupeZ(u8, path);
+        const zpath = try alloc.dupeSentinel(u8, path, 0);
         defer alloc.free(zpath);
         const fd = std.c.openat(std.c.AT.FDCWD, zpath, .{});
         if (fd < 0) return error.OpenFailed;
         return fd;
     } else {
-        const zpath = try alloc.dupeZ(u8, path);
+        const zpath = try alloc.dupeSentinel(u8, path, 0);
         defer alloc.free(zpath);
         const ret = platform.linux.openat(platform.linux.AT.FDCWD, zpath, .{}, 0);
         const fd: i32 = @bitCast(@as(u32, @truncate(ret)));
@@ -351,7 +351,7 @@ fn mtimeOk(alloc: Allocator, path: []const u8, earliest: f64) bool {
         if (platform.GetFileAttributesExW(wpath.ptr, 0, &info) == 0) return true;
         return info.ftLastWriteTime.toUnix() >= earliest;
     } else if (is_darwin) {
-        const zpath = alloc.dupeZ(u8, path) catch return true;
+        const zpath = alloc.dupeSentinel(u8, path, 0) catch return true;
         defer alloc.free(zpath);
         var st: std.c.Stat = undefined;
         if (std.c.fstatat(std.c.AT.FDCWD, zpath, &st, 0) != 0) return true;
@@ -360,7 +360,7 @@ fn mtimeOk(alloc: Allocator, path: []const u8, earliest: f64) bool {
             @as(f64, @floatFromInt(mt.nsec)) / 1_000_000_000.0;
         return mtime >= earliest;
     } else {
-        const zpath = alloc.dupeZ(u8, path) catch return true;
+        const zpath = alloc.dupeSentinel(u8, path, 0) catch return true;
         defer alloc.free(zpath);
         var statx_buf: platform.linux.Statx = std.mem.zeroes(platform.linux.Statx);
         const ret = platform.linux.statx(
@@ -485,7 +485,7 @@ pub fn getEnvVar(alloc: Allocator, name: []const u8) ?[]const u8 {
         if (len == 0) return null;
         return std.unicode.utf16LeToUtf8Alloc(alloc, wv[0..len]) catch null;
     } else if (is_darwin) {
-        const name_z = alloc.dupeZ(u8, name) catch return null;
+        const name_z = alloc.dupeSentinel(u8, name, 0) catch return null;
         defer alloc.free(name_z);
         const v = std.c.getenv(name_z) orelse return null;
         return alloc.dupe(u8, std.mem.span(v)) catch null;
@@ -1034,14 +1034,14 @@ pub fn isDirectory(path: []const u8) bool {
         if (platform.GetFileAttributesExW(wpath.ptr, 0, &info) == 0) return false;
         return (info.dwFileAttributes & platform.FILE_ATTRIBUTE_DIRECTORY) != 0;
     } else if (is_darwin) {
-        const zpath = alloc.dupeZ(u8, path) catch return false;
+        const zpath = alloc.dupeSentinel(u8, path, 0) catch return false;
         defer alloc.free(zpath);
         var st: std.c.Stat = undefined;
         if (std.c.fstatat(std.c.AT.FDCWD, zpath, &st, 0) != 0) return false;
         return (st.mode & 0o170000) == 0o040000;
     } else {
         const linux = platform.linux;
-        const zpath = alloc.dupeZ(u8, path) catch return false;
+        const zpath = alloc.dupeSentinel(u8, path, 0) catch return false;
         defer alloc.free(zpath);
         var statx_buf: linux.Statx = std.mem.zeroes(linux.Statx);
         const ret = linux.statx(linux.AT.FDCWD, zpath, 0, .{}, &statx_buf);
@@ -1069,7 +1069,7 @@ pub fn listSubdirectories(alloc: Allocator, path: []const u8) ![][]const u8 {
             try list.append(alloc, sub);
         }
     } else if (is_darwin) {
-        const path_z = try alloc.dupeZ(u8, path);
+        const path_z = try alloc.dupeSentinel(u8, path, 0);
         defer alloc.free(path_z);
         const dir = std.c.opendir(path_z) orelse return error.OpenFailed;
         defer _ = std.c.closedir(dir);
@@ -1084,7 +1084,7 @@ pub fn listSubdirectories(alloc: Allocator, path: []const u8) ![][]const u8 {
         }
     } else {
         const linux = platform.linux;
-        const path_z = try alloc.dupeZ(u8, path);
+        const path_z = try alloc.dupeSentinel(u8, path, 0);
         defer alloc.free(path_z);
         const fd_ret = linux.openat(linux.AT.FDCWD, path_z, .{ .DIRECTORY = true }, 0);
         const fd: i32 = @bitCast(@as(u32, @truncate(fd_ret)));
@@ -1168,7 +1168,7 @@ pub fn discoverOneRoot(alloc: Allocator, root_path: []const u8, earliest: f64, s
 // Mirrors the structure of discoverLinux below.
 fn discoverDarwin(alloc: Allocator, root_path: []const u8, earliest: f64, skipped_suffixes: *u64) !FileMap {
     var map = FileMap.init(alloc);
-    const root_z = try alloc.dupeZ(u8, root_path);
+    const root_z = try alloc.dupeSentinel(u8, root_path, 0);
     defer alloc.free(root_z);
     const root_dir = std.c.opendir(root_z) orelse return map;
     defer _ = std.c.closedir(root_dir);
@@ -1187,7 +1187,7 @@ fn discoverDarwin(alloc: Allocator, root_path: []const u8, earliest: f64, skippe
 }
 
 fn scanSlugDirDarwin(alloc: Allocator, map: *FileMap, slug: []const u8, slug_dir: []const u8, earliest: f64, skipped_suffixes: *u64) !void {
-    const slug_z = try alloc.dupeZ(u8, slug_dir);
+    const slug_z = try alloc.dupeSentinel(u8, slug_dir, 0);
     defer alloc.free(slug_z);
     const dir = std.c.opendir(slug_z) orelse return;
     defer _ = std.c.closedir(dir);
@@ -1217,7 +1217,7 @@ fn scanSlugDirDarwin(alloc: Allocator, map: *FileMap, slug: []const u8, slug_dir
 }
 
 fn scanSubagentsDarwin(alloc: Allocator, map: *FileMap, slug: []const u8, sid: []const u8, subagents_dir: []const u8, earliest: f64, skipped_suffixes: *u64) !void {
-    const sub_z = try alloc.dupeZ(u8, subagents_dir);
+    const sub_z = try alloc.dupeSentinel(u8, subagents_dir, 0);
     defer alloc.free(sub_z);
     const dir = std.c.opendir(sub_z) orelse return;
     defer _ = std.c.closedir(dir);
@@ -1245,7 +1245,7 @@ fn discoverLinux(alloc: Allocator, root_path: []const u8, earliest: f64, skipped
     const linux = platform.linux;
     var map = FileMap.init(alloc);
 
-    const root_z = try alloc.dupeZ(u8, root_path);
+    const root_z = try alloc.dupeSentinel(u8, root_path, 0);
     defer alloc.free(root_z);
     const root_fd_ret = linux.openat(linux.AT.FDCWD, root_z, .{ .DIRECTORY = true }, 0);
     const root_fd: i32 = @bitCast(@as(u32, @truncate(root_fd_ret)));
@@ -1281,7 +1281,7 @@ fn discoverLinux(alloc: Allocator, root_path: []const u8, earliest: f64, skipped
 
 fn scanSlugDir(alloc: Allocator, map: *FileMap, slug: []const u8, slug_dir: []const u8, earliest: f64, skipped_suffixes: *u64) !void {
     const linux = platform.linux;
-    const slug_z = try alloc.dupeZ(u8, slug_dir);
+    const slug_z = try alloc.dupeSentinel(u8, slug_dir, 0);
     defer alloc.free(slug_z);
     const slug_fd: i32 = @bitCast(@as(u32, @truncate(linux.openat(linux.AT.FDCWD, slug_z, .{ .DIRECTORY = true }, 0))));
     if (slug_fd < 0) return;
@@ -1325,7 +1325,7 @@ fn scanSlugDir(alloc: Allocator, map: *FileMap, slug: []const u8, slug_dir: []co
 
 fn scanSubagents(alloc: Allocator, map: *FileMap, slug: []const u8, sid: []const u8, subagents_dir: []const u8, earliest: f64, skipped_suffixes: *u64) !void {
     const linux = platform.linux;
-    const sub_z = try alloc.dupeZ(u8, subagents_dir);
+    const sub_z = try alloc.dupeSentinel(u8, subagents_dir, 0);
     defer alloc.free(sub_z);
     const sub_fd: i32 = @bitCast(@as(u32, @truncate(linux.openat(linux.AT.FDCWD, sub_z, .{ .DIRECTORY = true }, 0))));
     if (sub_fd < 0) return;

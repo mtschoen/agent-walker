@@ -251,7 +251,7 @@ const Class = enum { digit, non_digit, word, non_word, space, non_space };
 const CharClass = struct {
     negated: bool,
     // Bitset of 256 bits indicating which bytes are in the class.
-    bits: [32]u8 = [_]u8{0} ** 32,
+    bits: [32]u8 = @splat(0),
 
     fn set(self: *CharClass, b: u8) void {
         self.bits[b / 8] |= @as(u8, 1) << @intCast(b % 8);
@@ -1330,7 +1330,7 @@ fn listCodexRolloutsWindows(alloc: Allocator, path: []const u8, since: ?f64) ![]
 }
 
 fn listCodexDirectoriesDarwin(alloc: Allocator, path: []const u8) ![]DateDirectory {
-    const zero_path = try alloc.dupeZ(u8, path);
+    const zero_path = try alloc.dupeSentinel(u8, path, 0);
     defer alloc.free(zero_path);
     const directory = std.c.opendir(zero_path) orelse return &.{};
     defer _ = std.c.closedir(directory);
@@ -1352,7 +1352,7 @@ fn listCodexDirectoriesDarwin(alloc: Allocator, path: []const u8) ![]DateDirecto
 }
 
 fn listCodexRolloutsDarwin(alloc: Allocator, path: []const u8, since: ?f64) ![][]const u8 {
-    const zero_path = try alloc.dupeZ(u8, path);
+    const zero_path = try alloc.dupeSentinel(u8, path, 0);
     defer alloc.free(zero_path);
     const directory = std.c.opendir(zero_path) orelse return &.{};
     defer _ = std.c.closedir(directory);
@@ -1377,7 +1377,7 @@ fn listCodexRolloutsDarwin(alloc: Allocator, path: []const u8, since: ?f64) ![][
 
 fn listCodexDirectoriesLinux(alloc: Allocator, path: []const u8) ![]DateDirectory {
     const linux = main.platform.linux;
-    const zero_path = try alloc.dupeZ(u8, path);
+    const zero_path = try alloc.dupeSentinel(u8, path, 0);
     defer alloc.free(zero_path);
     const descriptor: i32 = @bitCast(@as(u32, @truncate(linux.openat(linux.AT.FDCWD, zero_path, .{ .DIRECTORY = true }, 0))));
     if (descriptor < 0) return &.{};
@@ -1410,7 +1410,7 @@ fn listCodexDirectoriesLinux(alloc: Allocator, path: []const u8) ![]DateDirector
 
 fn listCodexRolloutsLinux(alloc: Allocator, path: []const u8, since: ?f64) ![][]const u8 {
     const linux = main.platform.linux;
-    const zero_path = try alloc.dupeZ(u8, path);
+    const zero_path = try alloc.dupeSentinel(u8, path, 0);
     defer alloc.free(zero_path);
     const descriptor: i32 = @bitCast(@as(u32, @truncate(linux.openat(linux.AT.FDCWD, zero_path, .{ .DIRECTORY = true }, 0))));
     if (descriptor < 0) return &.{};
@@ -1594,7 +1594,7 @@ fn scanSubagentsWindows(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), s
 }
 
 fn discoverDarwin(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), root: []const u8, since: ?f64, cwd_filter: ?[]const u8, claimed: *std.StringHashMap(void), skipped_suffixes: *u64) !void {
-    const root_z = try alloc.dupeZ(u8, root);
+    const root_z = try alloc.dupeSentinel(u8, root, 0);
     defer alloc.free(root_z);
     const root_dir = std.c.opendir(root_z) orelse return;
     defer _ = std.c.closedir(root_dir);
@@ -1616,7 +1616,7 @@ fn discoverDarwin(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), root: [
 
 fn scanSlugJsonlDarwin(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), root: []const u8, slug: []const u8, since: ?f64, claimed: *std.StringHashMap(void), skipped_suffixes: *u64) !void {
     const slug_dir = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ root, slug });
-    const slug_z = try alloc.dupeZ(u8, slug_dir);
+    const slug_z = try alloc.dupeSentinel(u8, slug_dir, 0);
     defer alloc.free(slug_z);
     const dir = std.c.opendir(slug_z) orelse {
         alloc.free(slug_dir);
@@ -1668,7 +1668,7 @@ fn scanSlugJsonlDarwin(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), ro
 /// with the parent in sessions_matched.
 fn scanSubagentsDarwin(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), slug_dir: []const u8, slug: []const u8, sess: []const u8, root: []const u8, since: ?f64, claimed: *std.StringHashMap(void), skipped_suffixes: *u64) !void {
     const sub_dir = try std.fmt.allocPrint(alloc, "{s}/{s}/subagents", .{ slug_dir, sess });
-    const sub_z = try alloc.dupeZ(u8, sub_dir);
+    const sub_z = try alloc.dupeSentinel(u8, sub_dir, 0);
     defer alloc.free(sub_z);
     const dir = std.c.opendir(sub_z) orelse {
         alloc.free(sub_dir);
@@ -1709,7 +1709,7 @@ fn scanSubagentsDarwin(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), sl
 }
 
 fn mtimeOkDarwin(alloc: Allocator, path: []const u8, earliest: f64) bool {
-    const zpath = alloc.dupeZ(u8, path) catch return true;
+    const zpath = alloc.dupeSentinel(u8, path, 0) catch return true;
     defer alloc.free(zpath);
     var st: std.c.Stat = undefined;
     if (std.c.fstatat(std.c.AT.FDCWD, zpath, &st, 0) != 0) return true;
@@ -1721,7 +1721,7 @@ fn mtimeOkDarwin(alloc: Allocator, path: []const u8, earliest: f64) bool {
 
 fn discoverLinux(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), root: []const u8, since: ?f64, cwd_filter: ?[]const u8, claimed: *std.StringHashMap(void), skipped_suffixes: *u64) !void {
     const linux = main.platform.linux;
-    const root_z = try alloc.dupeZ(u8, root);
+    const root_z = try alloc.dupeSentinel(u8, root, 0);
     defer alloc.free(root_z);
     const root_fd_ret = linux.openat(linux.AT.FDCWD, root_z, .{ .DIRECTORY = true }, 0);
     const root_fd: i32 = @bitCast(@as(u32, @truncate(root_fd_ret)));
@@ -1757,7 +1757,7 @@ fn discoverLinux(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), root: []
 fn scanSlugJsonlLinux(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), root: []const u8, slug: []const u8, since: ?f64, claimed: *std.StringHashMap(void), skipped_suffixes: *u64) !void {
     const linux = main.platform.linux;
     const slug_dir = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ root, slug });
-    const slug_z = try alloc.dupeZ(u8, slug_dir);
+    const slug_z = try alloc.dupeSentinel(u8, slug_dir, 0);
     defer alloc.free(slug_z);
     const slug_fd: i32 = @bitCast(@as(u32, @truncate(linux.openat(linux.AT.FDCWD, slug_z, .{ .DIRECTORY = true }, 0))));
     // Non-directory root entries (e.g. a stray file in the slug position)
@@ -1821,7 +1821,7 @@ fn scanSlugJsonlLinux(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), roo
 fn scanSubagentsLinux(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), slug_dir: []const u8, slug: []const u8, sess: []const u8, root: []const u8, since: ?f64, claimed: *std.StringHashMap(void), skipped_suffixes: *u64) !void {
     const linux = main.platform.linux;
     const sub_dir = try std.fmt.allocPrint(alloc, "{s}/{s}/subagents", .{ slug_dir, sess });
-    const sub_z = try alloc.dupeZ(u8, sub_dir);
+    const sub_z = try alloc.dupeSentinel(u8, sub_dir, 0);
     defer alloc.free(sub_z);
     const sub_fd: i32 = @bitCast(@as(u32, @truncate(linux.openat(linux.AT.FDCWD, sub_z, .{ .DIRECTORY = true }, 0))));
     if (sub_fd < 0) {
@@ -1875,7 +1875,7 @@ fn scanSubagentsLinux(alloc: Allocator, out: *std.ArrayList(DiscoveredFile), slu
 
 fn mtimeOkLinux(alloc: Allocator, path: []const u8, earliest: f64) bool {
     const linux = main.platform.linux;
-    const zpath = alloc.dupeZ(u8, path) catch return true;
+    const zpath = alloc.dupeSentinel(u8, path, 0) catch return true;
     defer alloc.free(zpath);
     var statx_buf: linux.Statx = std.mem.zeroes(linux.Statx);
     const ret = linux.statx(linux.AT.FDCWD, zpath, 0, .{ .MTIME = true }, &statx_buf);

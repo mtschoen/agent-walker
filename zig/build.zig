@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) void {
     // takes effect behind an explicit -Drelease flag and still defaults a bare
     // build to Debug. Override with `-Doptimize=Debug` (shared/coverage.py does
     // this for kcov line mapping).
-    const optimize = b.option(std.builtin.OptimizeMode, "optimize", "Optimization mode (default: ReleaseFast)") orelse .ReleaseFast;
+    const optimize = b.option(std.lang.Optimize, "optimize", "Optimization mode (default: ReleaseFast)") orelse .fast;
 
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -42,9 +42,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     const run_step = b.step("run", "Run the walker");
     run_step.dependOn(&run_cmd.step);

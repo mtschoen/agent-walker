@@ -391,14 +391,14 @@ fn isExistingDir(alloc: Allocator, path: []const u8) bool {
         if (platform.GetFileAttributesExW(wpath.ptr, 0, &info) == 0) return false;
         return (info.dwFileAttributes & platform.FILE_ATTRIBUTE_DIRECTORY) != 0;
     } else if (is_darwin) {
-        const zpath = alloc.dupeZ(u8, path) catch return false;
+        const zpath = alloc.dupeSentinel(u8, path, 0) catch return false;
         defer alloc.free(zpath);
         var st: std.c.Stat = undefined;
         if (std.c.fstatat(std.c.AT.FDCWD, zpath, &st, 0) != 0) return false;
         return (st.mode & 0o170000) == 0o040000;
     } else {
         const linux = main.platform.linux;
-        const zpath = alloc.dupeZ(u8, path) catch return false;
+        const zpath = alloc.dupeSentinel(u8, path, 0) catch return false;
         defer alloc.free(zpath);
         var statx_buf: linux.Statx = std.mem.zeroes(linux.Statx);
         const ret = linux.statx(linux.AT.FDCWD, zpath, 0, .{}, &statx_buf);

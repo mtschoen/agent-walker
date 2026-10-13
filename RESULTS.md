@@ -422,7 +422,7 @@ because Linux Zig 0.16 currently embeds debug info even in
 ```bash
 # Prerequisites: gcc/g++, cmake 3.20+, rustc/cargo, python3, plus:
 # Go 1.26+:  extract go*.linux-amd64.tar.gz to ~/.local/go,  add ~/.local/go/bin to PATH
-# Zig 0.16+: extract zig-x86_64-linux-*.tar.xz to ~/.local/zig, add to PATH
+# Zig 0.17.0+: extract zig-x86_64-linux-*.tar.xz to ~/.local/zig, add to PATH
 
 cd rust && cargo build --release && cd ..
 cd go   && go build -o walker .  && cd ..

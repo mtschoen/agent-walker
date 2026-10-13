@@ -160,13 +160,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         if: needs.detect-changes.outputs.rust == 'true'
 
-      - name: Install Zig 0.16.0
+      - name: Install Zig 0.17.0
         if: needs.detect-changes.outputs.zig == 'true'
         # Asset name changed in 0.16.0 from `zig-{os}-{arch}-{ver}` to
         # `zig-{arch}-{os}-{ver}`.
         run: |
           set -e
-          ZIG_VERSION=0.16.0
+          ZIG_VERSION=0.17.0
           curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
           mkdir -p "$HOME/.local/zig"
           tar -xf /tmp/zig.tar.xz -C "$HOME/.local/zig" --strip-components=1
@@ -388,11 +388,11 @@ jobs:
         # conformance harness (see shared/coverage.py::cov_rust).
         run: cargo install cargo-llvm-cov --locked
 
-      - name: Install Zig 0.16.0
+      - name: Install Zig 0.17.0
         if: needs.detect-changes.outputs.zig == 'true'
         run: |
           set -e
-          ZIG_VERSION=0.16.0
+          ZIG_VERSION=0.17.0
           curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
           mkdir -p "$HOME/.local/zig"
           tar -xf /tmp/zig.tar.xz -C "$HOME/.local/zig" --strip-components=1

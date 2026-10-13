@@ -185,10 +185,10 @@ Add a `lint` job to `.gitea/workflows/ci.yml`. It can run in parallel with the e
         with:
           components: clippy,rustfmt
 
-      - name: Install Zig 0.16.0
+      - name: Install Zig 0.17.0
         run: |
           set -e
-          ZIG_VERSION=0.16.0
+          ZIG_VERSION=0.17.0
           curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
           mkdir -p "$HOME/.local/zig"
           tar -xf /tmp/zig.tar.xz -C "$HOME/.local/zig" --strip-components=1

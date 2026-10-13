@@ -804,7 +804,7 @@ fn findSessionPaths(alloc: Allocator, root: []const u8, sid: []const u8) !std.Ar
 }
 
 fn findSessionPathsDarwin(alloc: Allocator, out: *std.ArrayList([]const u8), root: []const u8, sid: []const u8) !void {
-    const root_z = try alloc.dupeZ(u8, root);
+    const root_z = try alloc.dupeSentinel(u8, root, 0);
     defer alloc.free(root_z);
     const root_dir = std.c.opendir(root_z) orelse return;
     defer _ = std.c.closedir(root_dir);
@@ -830,7 +830,7 @@ fn findSessionPathsDarwin(alloc: Allocator, out: *std.ArrayList([]const u8), roo
 }
 
 fn findSubagentsForSidDarwin(alloc: Allocator, out: *std.ArrayList([]const u8), slug_dir: []const u8, sid: []const u8) !void {
-    const slug_z = try alloc.dupeZ(u8, slug_dir);
+    const slug_z = try alloc.dupeSentinel(u8, slug_dir, 0);
     defer alloc.free(slug_z);
     const dir = std.c.opendir(slug_z) orelse return;
     defer _ = std.c.closedir(dir);
@@ -918,7 +918,7 @@ fn findSubagentsForSidWindows(alloc: Allocator, out: *std.ArrayList([]const u8),
 fn findSessionPathsLinux(alloc: Allocator, out: *std.ArrayList([]const u8), root: []const u8, sid: []const u8) !void {
     const platform = main.platform;
     const linux = platform.linux;
-    const root_z = try alloc.dupeZ(u8, root);
+    const root_z = try alloc.dupeSentinel(u8, root, 0);
     defer alloc.free(root_z);
     const root_fd_ret = linux.openat(linux.AT.FDCWD, root_z, .{ .DIRECTORY = true }, 0);
     const root_fd: i32 = @bitCast(@as(u32, @truncate(root_fd_ret)));
@@ -959,7 +959,7 @@ fn findSessionPathsLinux(alloc: Allocator, out: *std.ArrayList([]const u8), root
 fn findSubagentsForSidLinux(alloc: Allocator, out: *std.ArrayList([]const u8), slug_dir: []const u8, sid: []const u8) !void {
     const platform = main.platform;
     const linux = platform.linux;
-    const slug_z = try alloc.dupeZ(u8, slug_dir);
+    const slug_z = try alloc.dupeSentinel(u8, slug_dir, 0);
     defer alloc.free(slug_z);
     const slug_fd: i32 = @bitCast(@as(u32, @truncate(linux.openat(linux.AT.FDCWD, slug_z, .{ .DIRECTORY = true }, 0))));
     if (slug_fd < 0) return;
@@ -1000,14 +1000,14 @@ fn fileExists(alloc: Allocator, path: []const u8) bool {
         if (platform.GetFileAttributesExW(wpath.ptr, 0, &info) == 0) return false;
         return (info.dwFileAttributes & platform.FILE_ATTRIBUTE_DIRECTORY) == 0;
     } else if (is_darwin) {
-        const zpath = alloc.dupeZ(u8, path) catch return false;
+        const zpath = alloc.dupeSentinel(u8, path, 0) catch return false;
         defer alloc.free(zpath);
         var st: std.c.Stat = undefined;
         if (std.c.fstatat(std.c.AT.FDCWD, zpath, &st, 0) != 0) return false;
         return (st.mode & 0o170000) != 0o040000;
     } else {
         const linux = main.platform.linux;
-        const zpath = alloc.dupeZ(u8, path) catch return false;
+        const zpath = alloc.dupeSentinel(u8, path, 0) catch return false;
         defer alloc.free(zpath);
         var statx_buf: linux.Statx = std.mem.zeroes(linux.Statx);
         const ret = linux.statx(linux.AT.FDCWD, zpath, 0, .{}, &statx_buf);
