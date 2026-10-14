@@ -45,7 +45,13 @@ jobs:
           fi
           echo "AISLOP_FORK_COMMIT=$commit" >> "$GITHUB_ENV"
 
+      - name: Detect toolchain baked into the runner image
+        id: baked
+        shell: bash
+        run: bash ci/baked-toolchain.sh node
+
       - uses: actions/setup-node@v4
+        if: steps.baked.outputs.node != 'true'
         with:
           # 22, not 20: the `npm install` below builds the fork via its
           # "prepare": "tsdown" script, and tsdown >= 0.22 requires node
@@ -148,7 +154,13 @@ jobs:
           $SUDO apt-get install -y --no-install-recommends cmake
           cmake --version
 
+      - name: Detect toolchain baked into the runner image
+        id: baked
+        shell: bash
+        run: bash ci/baked-toolchain.sh python
+
       - uses: actions/setup-python@v5
+        if: steps.baked.outputs.python != 'true'
         with:
           python-version: '3.11'
 
@@ -368,7 +380,13 @@ jobs:
               { echo "::error::libclang_rt.profile-x86_64.a missing after install"; exit 1; }
           fi
 
+      - name: Detect toolchain baked into the runner image
+        id: baked
+        shell: bash
+        run: bash ci/baked-toolchain.sh python
+
       - uses: actions/setup-python@v5
+        if: steps.baked.outputs.python != 'true'
         with:
           python-version: '3.11'
 
