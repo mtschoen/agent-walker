@@ -732,8 +732,16 @@ tracking, and every native bare-flag invocation remain Claude-specific.
   `--transcript-format codex`, so its pre-discovery selection happens before
   per-provider limits and counts.
 - **OpenCode provider:** opens `~/.local/share/opencode/opencode.db` read-only,
-  validates the `session` / `message` / `part` schema, searches text parts and
-  optional tool input/output, and reads the live WAL through SQLite. Override
+  validates legacy `session` / `message` / `part` and V2
+  `session_v2` / `session_message` schemas, searches prose and optional tool
+  input/output, and reads the live WAL through SQLite. V2 user text comes from
+  `data.text`; assistant text and tools come from `data.content`. Tool output
+  includes text blocks in `state.content`. Mixed stores use V2 messages for
+  session IDs present in both schemas; V2-only stores are available. V2 provenance
+  uses the message rowid and block ID, or `message_id:block_index` when no block
+  ID exists. Incomplete schemas and unsupported V2 message shapes raise a
+  compatibility error rather than returning incomplete history. Non-chat rows,
+  reasoning, and non-text attachments are not searched. Override
   discovery with `AGENT_WALKER_OPENCODE_DB` or the `opencode_db` parameter.
   Literal matching is supported. Regex queries report this provider unavailable
   until a linear-time RE2-compatible matcher is available; they never fall back

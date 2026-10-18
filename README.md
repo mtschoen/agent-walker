@@ -19,8 +19,9 @@ costs, events, progress beacons, or active-session calculations.
 
 OpenCode discovery uses `~/.local/share/opencode/opencode.db`. Override it with
 the tool's `opencode_db` parameter or `AGENT_WALKER_OPENCODE_DB`. The provider
-opens SQLite read-only and validates the `session`, `message`, and `part`
-columns it consumes. See [`docs/provider-roadmap.md`](docs/provider-roadmap.md)
+opens SQLite read-only and validates legacy `session` / `message` / `part`
+and V2 `session_v2` / `session_message` columns. Both schemas are searched when
+present, preferring V2 for duplicate session IDs. See [`docs/provider-roadmap.md`](docs/provider-roadmap.md)
 for the Pi, Hermes, and Agy aggregation phases.
 
 OpenCode search currently supports literal substring matching. For `regex=true`,

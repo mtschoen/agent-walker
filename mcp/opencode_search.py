@@ -1,4 +1,7 @@
-"""Read-only historical search over OpenCode's SQLite session store."""
+"""Read-only historical search over OpenCode's SQLite session store.
+
+Legacy and V2 readers stay together to share the provider's filtering contract.
+"""
 
 from __future__ import annotations
 
@@ -78,6 +81,10 @@ _REQUIRED_COLUMNS = {
     "message": {"id", "session_id", "time_created", "data"},
     "part": {"id", "message_id", "session_id", "time_created", "data"},
 }
+_V2_REQUIRED_COLUMNS = {
+    "session_v2": {"id", "slug", "directory", "title"},
+    "session_message": {"id", "session_id", "type", "seq", "time_created", "data"},
+}
 
 
 def _database_candidates(override: str | None) -> list[Path]:
@@ -109,28 +116,36 @@ def _open_database(path: Path) -> sqlite3.Connection:
     return connection
 
 
-def _validate_schema(connection: sqlite3.Connection) -> None:
+def _validate_schema(connection: sqlite3.Connection) -> tuple[bool, bool]:
     tables = {
         row["name"]
         for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         )
     }
-    missing_tables = _REQUIRED_COLUMNS.keys() - tables
-    if missing_tables:
-        raise OpenCodeSearchError(
-            f"OpenCode database is missing tables: {', '.join(sorted(missing_tables))}"
-        )
-    for table, required in _REQUIRED_COLUMNS.items():
-        columns = {
-            row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
-        }
-        missing_columns = required - columns
-        if missing_columns:
+    legacy = bool(_REQUIRED_COLUMNS.keys() & tables)
+    v2 = bool(_V2_REQUIRED_COLUMNS.keys() & tables)
+    schemas = ([_REQUIRED_COLUMNS] if legacy or not v2 else []) + (
+        [_V2_REQUIRED_COLUMNS] if v2 else []
+    )
+    for schema in schemas:
+        missing_tables = schema.keys() - tables
+        if missing_tables:
             raise OpenCodeSearchError(
-                f"OpenCode table {table} is missing columns: "
-                f"{', '.join(sorted(missing_columns))}"
+                f"OpenCode tables {', '.join(sorted(missing_tables))} are missing; "
+                "missing tables prevent complete historical search"
             )
+        for table, required in schema.items():
+            columns = {
+                row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+            missing_columns = required - columns
+            if missing_columns:
+                raise OpenCodeSearchError(
+                    f"OpenCode table {table} is missing columns: "
+                    f"{', '.join(sorted(missing_columns))}"
+                )
+    return legacy, v2
 
 
 def _tool_text(part: dict[str, Any]) -> str:
@@ -145,6 +160,15 @@ def _tool_text(part: dict[str, Any]) -> str:
     output = state.get("output")
     if isinstance(output, str) and output:
         values.append(output)
+    content = state.get("content", [])
+    if isinstance(content, list):
+        values.extend(
+            block["text"]
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+        )
     return "\n".join(values)
 
 
@@ -201,6 +225,64 @@ def _load_messages(
                     _PartSegment(row["part_rowid"], row["part_id"], text)
                 )
     return list(messages.values())
+
+
+def _load_v2_messages(
+    connection: sqlite3.Connection, include_tools: bool
+) -> list[_Message]:
+    rows = connection.execute("""
+        SELECT m.rowid AS message_rowid, m.id, m.session_id, m.type, m.time_created,
+               m.data, s.directory, s.slug, s.title
+          FROM session_message AS m JOIN session_v2 AS s ON s.id = m.session_id
+         WHERE m.type IN ('user', 'assistant')
+         ORDER BY m.session_id, m.seq
+    """)
+    messages = []
+    for row in rows:
+        try:
+            data = json.loads(row["data"])
+        except (TypeError, json.JSONDecodeError) as error:
+            raise OpenCodeSearchError(
+                f"OpenCode V2 message {row['id']} has invalid JSON"
+            ) from error
+        content = data.get("content") if isinstance(data, dict) else None
+        if (
+            row["type"] == "user"
+            and isinstance(data, dict)
+            and isinstance(data.get("text"), str)
+        ):
+            content = [{"type": "text", "text": data["text"]}]
+        if not isinstance(content, list):
+            raise OpenCodeSearchError(
+                f"OpenCode V2 message {row['id']} has unsupported content shape"
+            )
+        message = _Message(
+            row["id"],
+            row["session_id"],
+            row["time_created"],
+            row["type"],
+            row["directory"],
+            row["slug"],
+            row["title"] or "",
+        )
+        for index, part in enumerate(content):
+            if not isinstance(part, dict):
+                raise OpenCodeSearchError(
+                    f"OpenCode V2 message {row['id']} has unsupported content block"
+                )
+            part_type = part.get("type")
+            text = part.get("text") if part_type == "text" else ""
+            if part_type == "tool" and include_tools:
+                text = _tool_text(part)
+            if isinstance(text, str) and text:
+                segment = _PartSegment(
+                    row["message_rowid"], part.get("id") or f"{row['id']}:{index}", text
+                )
+                (
+                    message.tool_parts if part_type == "tool" else message.text_parts
+                ).append(segment)
+        messages.append(message)
+    return messages
 
 
 def _parse_time(value: str | None, now: float) -> int | None:
@@ -380,8 +462,24 @@ def search(options: SearchOptions) -> dict[str, Any]:
     pattern = _compile_pattern(options)
     try:
         with closing(_open_database(database)) as connection:
-            _validate_schema(connection)
-            messages = _load_messages(connection, options.include_tool_blocks)
+            legacy, v2 = _validate_schema(connection)
+            messages = (
+                _load_messages(connection, options.include_tool_blocks)
+                if legacy
+                else []
+            )
+            if v2:
+                migrated = {
+                    row["id"] for row in connection.execute("SELECT id FROM session_v2")
+                }
+                messages = [
+                    message
+                    for message in messages
+                    if message.session_id not in migrated
+                ]
+                messages.extend(
+                    _load_v2_messages(connection, options.include_tool_blocks)
+                )
     except sqlite3.Error as error:
         raise OpenCodeSearchError(
             f"cannot read OpenCode database {database}: {error}"

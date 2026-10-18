@@ -33,8 +33,14 @@ the main database file.
 Claude remains the native baseline. The generic `agent_walker_search` MCP tool
 merges native Claude JSONL results with OpenCode's
 `~/.local/share/opencode/opencode.db` by default. OpenCode support reads
-`session`, `message`, and `part`, searches prose plus optional tool inputs and
-outputs, and reports its source database on each result.
+legacy `session`, `message`, and `part` tables and V2 `session_v2` and
+`session_message` tables. V2 user messages contain `data.text`; assistant
+messages contain `data.content` blocks, including tools with text output in
+`state.content`. Both schemas may coexist; V2 takes precedence by session ID.
+The reader searches prose plus optional tool inputs and outputs, and reports its
+source database and row/block provenance on each result. Incomplete schemas and
+unsupported V2 message shapes produce compatibility errors. Non-chat messages,
+reasoning, and non-text attachments are not searched.
 
 The OpenCode MVP supports literal matching. Regex requests continue through
 Claude's native RE2 implementation and expose an unavailable OpenCode provider

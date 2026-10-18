@@ -1,4 +1,7 @@
-"""Tests for the read-only OpenCode SQLite search provider."""
+"""Tests for the read-only OpenCode SQLite search provider.
+
+Legacy and V2 fixtures stay together to exercise the same search contract.
+"""
 
 import json
 import sqlite3
@@ -116,11 +119,62 @@ def test_database_candidates_honor_xdg_then_default(monkeypatch, tmp_path):
     ]
 
 
-def test_search_returns_newest_first_with_context(opencode_db):
+@pytest.fixture(
+    params=["legacy", "v2", "mixed"], ids=["legacy", "v2-issue-59", "mixed-issue-59"]
+)
+def searchable_db(request, opencode_db):
+    if request.param == "legacy":
+        return opencode_db
+    with sqlite3.connect(opencode_db) as connection:
+        connection.executescript("""
+            CREATE TABLE session_v2 AS SELECT * FROM session;
+            CREATE TABLE session_message (
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL,
+                seq INTEGER NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL
+            );
+        """)
+        for identifier, session_id, timestamp, data in connection.execute(
+            "SELECT * FROM message"
+        ):
+            role = json.loads(data)["role"]
+            parts = [
+                json.loads(row[0])
+                for row in connection.execute(
+                    "SELECT data FROM part WHERE message_id = ? ORDER BY time_created",
+                    (identifier,),
+                )
+            ]
+            content = (
+                {"text": parts[0]["text"]} if role == "user" else {"content": parts}
+            )
+            if role == "assistant":
+                for part in parts:
+                    if part["type"] == "tool":
+                        part["id"] = "tool-59"
+                        part["state"]["content"] = [
+                            {"type": "text", "text": part["state"].pop("output")}
+                        ]
+            connection.execute(
+                "INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?)",
+                (identifier, session_id, role, timestamp, timestamp, _json(content)),
+            )
+        if request.param == "v2":
+            connection.executescript(
+                "DROP TABLE part; DROP TABLE message; DROP TABLE session;"
+            )
+        else:
+            connection.execute("DELETE FROM session_v2 WHERE id = 'ses_old'")
+            connection.execute(
+                "DELETE FROM session_message WHERE session_id = 'ses_old'"
+            )
+    return opencode_db
+
+
+def test_search_returns_newest_first_with_context(searchable_db):
     result = search(
         SearchOptions(
             pattern="violet lighthouse",
-            db_path=str(opencode_db),
+            db_path=str(searchable_db),
             context_turns=1,
         )
     )
@@ -132,15 +186,16 @@ def test_search_returns_newest_first_with_context(opencode_db):
     assert newest["context_after"][0]["text"] == "No prose match here"
     assert newest["match_offsets"] == [[0, 17]]
     assert result["summary"]["sessions_matched"] == 2
+    assert result["summary"]["available"] is True
 
 
-def test_filters_count_and_truncation(opencode_db):
+def test_filters_count_and_truncation(searchable_db):
     result = search(
         SearchOptions(
             pattern="remember",
             role="user",
             cwd="alpha",
-            db_path=str(opencode_db),
+            db_path=str(searchable_db),
             since="2023-01-01T00:00:00Z",
             until="2024-01-01T00:00:00Z",
             context_turns=0,
@@ -347,14 +402,14 @@ def test_bad_time_is_rejected(opencode_db, value):
         search(SearchOptions(pattern="violet", since=value, db_path=str(opencode_db)))
 
 
-def test_relative_time_and_filters_exclude_messages(opencode_db, monkeypatch):
+def test_relative_time_and_filters_exclude_messages(searchable_db, monkeypatch):
     monkeypatch.setattr(opencode_search.time, "time", lambda: 1_720_000_000.0)
     result = search(
         SearchOptions(
             pattern="violet lighthouse",
             since="180d",
             cwd="beta",
-            db_path=str(opencode_db),
+            db_path=str(searchable_db),
         )
     )
     assert [hit["session_id"] for hit in result["hits"]] == ["ses_new"]
@@ -362,7 +417,7 @@ def test_relative_time_and_filters_exclude_messages(opencode_db, monkeypatch):
         SearchOptions(
             pattern="remember",
             cwd="beta",
-            db_path=str(opencode_db),
+            db_path=str(searchable_db),
         )
     )
     assert cwd_filtered["hits"] == []
@@ -391,3 +446,118 @@ def test_empty_pattern_and_sqlite_read_error(opencode_db, monkeypatch):
 def test_invalid_options_are_rejected(options, message):
     with pytest.raises(OpenCodeSearchError, match=message):
         search(options)
+
+
+@pytest.mark.parametrize(
+    ("pattern", "include_tools", "source"),
+    [
+        ("No prose", False, "m4:0"),
+        ("beacon", False, None),
+        ("beacon", True, "tool-59"),
+        ("violet lighthouse", True, "tool-59"),
+    ],
+)
+def test_v2_assistant_provenance(opencode_db, pattern, include_tools, source):
+    # Build the same schema as the live V2 store without requiring user data.
+    with sqlite3.connect(opencode_db) as connection:
+        connection.executescript("""
+            CREATE TABLE session_v2 AS SELECT * FROM session;
+            CREATE TABLE session_message (
+                id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT
+            );
+        """)
+        connection.execute(
+            "INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "m4",
+                "ses_new",
+                "assistant",
+                1,
+                1_710_000_001_000,
+                _json(
+                    {
+                        "content": [
+                            {"type": "text", "text": "No prose match here"},
+                            {
+                                "type": "tool",
+                                "id": "tool-59",
+                                "state": {
+                                    "input": {"query": "violet lighthouse"},
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": "tool found the beacon",
+                                        }
+                                    ],
+                                },
+                            },
+                        ]
+                    }
+                ),
+            ),
+        )
+    result = search(
+        SearchOptions(
+            pattern=pattern,
+            role="assistant",
+            db_path=str(opencode_db),
+            include_tool_blocks=include_tools,
+            limit=1,
+        )
+    )
+    assert [hit["source_id"] for hit in result["hits"]] == (
+        [] if source is None else [source]
+    )
+    assert result["summary"]["truncated"] is False
+    if source:
+        assert result["hits"][0]["line_number"] == 1
+        assert result["hits"][0]["file_path"] == str(opencode_db)
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        "CREATE TABLE session_v2 (id TEXT)",
+        "CREATE TABLE session_v2 AS SELECT * FROM session; CREATE TABLE session_message (id TEXT)",
+    ],
+)
+def test_incomplete_v2_schema_is_not_silently_ignored(opencode_db, schema):
+    with sqlite3.connect(opencode_db) as connection:
+        connection.executescript(schema)
+    with pytest.raises(OpenCodeSearchError, match="session_message.*missing"):
+        search(SearchOptions(pattern="violet", db_path=str(opencode_db)))
+
+
+@pytest.mark.parametrize("data", ["not-json", "[]", "{}", '{"content":[null]}'])
+def test_unsupported_v2_message_has_actionable_error(searchable_db, data):
+    with sqlite3.connect(searchable_db) as connection:
+        connection.executescript("""
+            CREATE TABLE IF NOT EXISTS session_v2 AS SELECT * FROM session;
+            CREATE TABLE IF NOT EXISTS session_message (
+                id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT
+            );
+        """)
+        connection.execute(
+            "INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?)",
+            ("bad-59", "ses_new", "assistant", 99, 1_710_000_002_000, data),
+        )
+    with pytest.raises(OpenCodeSearchError, match="V2 message bad-59"):
+        search(SearchOptions(pattern="violet", db_path=str(searchable_db)))
+
+
+@pytest.mark.parametrize("count_only", [False, True])
+def test_schema_results_respect_limit(searchable_db, count_only):
+    result = search(
+        SearchOptions(
+            pattern="violet lighthouse",
+            db_path=str(searchable_db),
+            limit=1,
+            count_only=count_only,
+        )
+    )
+    assert result["summary"]["sessions_matched"] == 2
+    assert result["summary"]["truncated"] is True
+    assert result["summary"]["hits"] == (2 if count_only else 1)
+    assert [hit["session_id"] for hit in result["hits"]] == (
+        [] if count_only else ["ses_new"]
+    )
