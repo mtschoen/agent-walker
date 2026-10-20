@@ -53,12 +53,12 @@ jobs:
       - uses: actions/setup-node@v4
         if: steps.baked.outputs.node != 'true'
         with:
-          # 22, not 20: the `npm install` below builds the fork via its
+          # 24, the fleet image's Node: the `npm install` below builds the fork via its
           # "prepare": "tsdown" script, and tsdown >= 0.22 requires node
           # ^22.18 || >=24.11 at build time (it calls Promise.withResolvers,
           # added in node 22). The built CLI still targets node18, so this is
           # aislop's build floor, not its runtime floor.
-          node-version: 22
+          node-version: 24
 
       - name: Build aislop (pinned fork commit)
         # Cloned outside the workspace so aislop does not scan the fork's own source.
@@ -162,7 +162,7 @@ jobs:
       - uses: actions/setup-python@v5
         if: steps.baked.outputs.python != 'true'
         with:
-          python-version: '3.11'
+          python-version: '3.14'
 
       - uses: actions/setup-go@v5
         if: needs.detect-changes.outputs.go == 'true'
@@ -388,7 +388,7 @@ jobs:
       - uses: actions/setup-python@v5
         if: steps.baked.outputs.python != 'true'
         with:
-          python-version: '3.11'
+          python-version: '3.14'
 
       - uses: actions/setup-go@v5
         if: needs.detect-changes.outputs.go == 'true'
