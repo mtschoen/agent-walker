@@ -1,6 +1,6 @@
 module walker
 
-go 1.26.1
+go 1.27.2
 
 require (
 	github.com/bytedance/sonic v1.15.1

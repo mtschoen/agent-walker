@@ -157,7 +157,7 @@ jobs:
       - name: Detect toolchain baked into the runner image
         id: baked
         shell: bash
-        run: bash ci/baked-toolchain.sh python
+        run: bash ci/baked-toolchain.sh python go rust zig
 
       - uses: actions/setup-python@v5
         if: steps.baked.outputs.python != 'true'
@@ -165,15 +165,15 @@ jobs:
           python-version: '3.14'
 
       - uses: actions/setup-go@v5
-        if: needs.detect-changes.outputs.go == 'true'
+        if: needs.detect-changes.outputs.go == 'true' && steps.baked.outputs.go != 'true'
         with:
           go-version-file: go/go.mod
 
       - uses: dtolnay/rust-toolchain@stable
-        if: needs.detect-changes.outputs.rust == 'true'
+        if: needs.detect-changes.outputs.rust == 'true' && steps.baked.outputs.rust != 'true'
 
       - name: Install Zig 0.17.0
-        if: needs.detect-changes.outputs.zig == 'true'
+        if: needs.detect-changes.outputs.zig == 'true' && steps.baked.outputs.zig != 'true'
         # Asset name changed in 0.16.0 from `zig-{os}-{arch}-{ver}` to
         # `zig-{arch}-{os}-{ver}`.
         run: |
@@ -383,7 +383,7 @@ jobs:
       - name: Detect toolchain baked into the runner image
         id: baked
         shell: bash
-        run: bash ci/baked-toolchain.sh python
+        run: bash ci/baked-toolchain.sh python go rust zig kcov
 
       - uses: actions/setup-python@v5
         if: steps.baked.outputs.python != 'true'
@@ -391,12 +391,12 @@ jobs:
           python-version: '3.14'
 
       - uses: actions/setup-go@v5
-        if: needs.detect-changes.outputs.go == 'true'
+        if: needs.detect-changes.outputs.go == 'true' && steps.baked.outputs.go != 'true'
         with:
           go-version-file: go/go.mod
 
       - uses: dtolnay/rust-toolchain@stable
-        if: needs.detect-changes.outputs.rust == 'true'
+        if: needs.detect-changes.outputs.rust == 'true' && steps.baked.outputs.rust != 'true'
         with:
           components: llvm-tools-preview
 
@@ -407,7 +407,7 @@ jobs:
         run: cargo install cargo-llvm-cov --locked
 
       - name: Install Zig 0.17.0
-        if: needs.detect-changes.outputs.zig == 'true'
+        if: needs.detect-changes.outputs.zig == 'true' && steps.baked.outputs.zig != 'true'
         run: |
           set -e
           ZIG_VERSION=0.17.0
@@ -418,12 +418,15 @@ jobs:
           "$HOME/.local/zig/zig" version
 
       - name: Build kcov-master (DWARF5-capable)
-        if: needs.detect-changes.outputs.zig == 'true'
+        if: needs.detect-changes.outputs.zig == 'true' && steps.baked.outputs.kcov != 'true'
         # Stock kcov 43 and liyu1981/zig-kcov both fail on Zig 0.16's
         # LLVM-backend DWARF5 output (see CLAUDE.md / COVERAGE-PLAN.md).
         # SimonKagstrom/kcov master is the only one that parses it.
         # shared/coverage.py discovers it at this exact path (or via
         # $KCOV) — do not move without updating find_kcov().
+        # The fleet image bakes a pinned master commit (manifest kcov_linux)
+        # and puts it on PATH via the baked probe; this build is only the
+        # fallback for runners without it.
         run: |
           set -e
           KCOV_SRC="$HOME/.local/src/kcov-master"

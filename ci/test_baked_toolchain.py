@@ -76,9 +76,17 @@ class BakedToolchainTests(unittest.TestCase):
         self.assertIn("TOOL...", stderr)
 
     def test_rejects_unknown_toolchain(self) -> None:
-        returncode, _stdout, stderr, _output_content, _path_content = self.run_script(["uv"])
+        returncode, _stdout, stderr, _output_content, _path_content = self.run_script(["bogus"])
         self.assertEqual(returncode, 2)
-        self.assertIn("unknown toolchain: uv", stderr)
+        self.assertIn("unknown toolchain: bogus", stderr)
+
+    def test_reports_false_for_go_rust_zig_kcov_outside_fleet_image(self) -> None:
+        returncode, _stdout, _stderr, output_content, path_content = self.run_script(
+            ["go", "rust", "zig", "kcov"]
+        )
+        self.assertEqual(returncode, 0)
+        self.assertEqual(output_content, "go=false\nrust=false\nzig=false\nkcov=false\n")
+        self.assertEqual(path_content, "")
 
     def test_reports_false_outside_fleet_image(self) -> None:
         returncode, _stdout, _stderr, output_content, path_content = self.run_script(
