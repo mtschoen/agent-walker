@@ -340,46 +340,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build + coverage + kcov runtime deps
-        if: needs.detect-changes.outputs.cpp == 'true' || needs.detect-changes.outputs.zig == 'true'
-        # clang + llvm: required for the C++ source-based coverage path
-        #   (clang++ produces .profraw via -fprofile-instr-generate, then
-        #   llvm-profdata/llvm-cov merge + report).
-        # libclang-rt-NN-dev: provides libclang_rt.profile-x86_64.a, the
-        #   runtime linked when `-fprofile-instr-generate` is used. The
-        #   unversioned `clang` apt meta-package does NOT pull this in
-        #   automatically — installed separately after we learn the
-        #   actual clang major version from `clang --version`.
-        # libdw/libcurl/libelf/binutils-dev: kcov build dependencies.
-        # cmake: needed for both kcov and the C++ instrumented build.
-        run: |
-          set -e
-          if command -v sudo >/dev/null 2>&1; then SUDO=sudo; else SUDO=; fi
-          $SUDO apt-get update
-          packages=(cmake build-essential pkg-config)
-          if [ "$RUN_CPP" = "true" ]; then
-            packages+=(clang llvm)
-          fi
-          if [ "$RUN_ZIG" = "true" ]; then
-            packages+=(
-              git curl tar xz-utils libdw-dev libcurl4-openssl-dev
-              libelf-dev libiberty-dev binutils-dev zlib1g-dev
-            )
-          fi
-          $SUDO apt-get install -y --no-install-recommends "${packages[@]}"
-          if [ "$RUN_CPP" = "true" ]; then
-            CLANG_VERSION=$(clang --version | grep -oP 'clang version \K\d+' | head -1)
-            if [ -z "$CLANG_VERSION" ]; then
-              echo "::error::could not detect installed clang major version"
-              exit 1
-            fi
-            echo "installed clang major version: $CLANG_VERSION"
-            $SUDO apt-get install -y --no-install-recommends \
-              "libclang-rt-${CLANG_VERSION}-dev"
-            test -f "/usr/lib/llvm-${CLANG_VERSION}/lib/clang/${CLANG_VERSION}/lib/linux/libclang_rt.profile-x86_64.a" ||
-              { echo "::error::libclang_rt.profile-x86_64.a missing after install"; exit 1; }
-          fi
-
       - name: Detect toolchain baked into the runner image
         id: baked
         shell: bash
@@ -397,14 +357,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         if: needs.detect-changes.outputs.rust == 'true' && steps.baked.outputs.rust != 'true'
-        with:
-          components: llvm-tools-preview
-
-      - name: Install cargo-llvm-cov
-        if: needs.detect-changes.outputs.rust == 'true'
-        # External-test workflow for collecting Rust coverage off the
-        # conformance harness (see shared/coverage.py::cov_rust).
-        run: cargo install cargo-llvm-cov --locked
 
       - name: Install Zig 0.17.0
         if: needs.detect-changes.outputs.zig == 'true' && steps.baked.outputs.zig != 'true'
@@ -416,26 +368,6 @@ jobs:
           tar -xf /tmp/zig.tar.xz -C "$HOME/.local/zig" --strip-components=1
           echo "$HOME/.local/zig" >> "$GITHUB_PATH"
           "$HOME/.local/zig/zig" version
-
-      - name: Build kcov-master (DWARF5-capable)
-        if: needs.detect-changes.outputs.zig == 'true' && steps.baked.outputs.kcov != 'true'
-        # Stock kcov 43 and liyu1981/zig-kcov both fail on Zig 0.16's
-        # LLVM-backend DWARF5 output (see CLAUDE.md / COVERAGE-PLAN.md).
-        # SimonKagstrom/kcov master is the only one that parses it.
-        # shared/coverage.py discovers it at this exact path (or via
-        # $KCOV) — do not move without updating find_kcov().
-        # The fleet image bakes a pinned master commit (manifest kcov_linux)
-        # and puts it on PATH via the baked probe; this build is only the
-        # fallback for runners without it.
-        run: |
-          set -e
-          KCOV_SRC="$HOME/.local/src/kcov-master"
-          if [ ! -x "$KCOV_SRC/build/src/kcov" ]; then
-            git clone --depth=1 https://github.com/SimonKagstrom/kcov.git "$KCOV_SRC"
-            cmake -S "$KCOV_SRC" -B "$KCOV_SRC/build" -DCMAKE_BUILD_TYPE=Release
-            cmake --build "$KCOV_SRC/build" -j
-          fi
-          "$KCOV_SRC/build/src/kcov" --version
 
       - name: Run coverage gate
         # Target is the strict 100% gate (no flags). TEMPORARY baseline

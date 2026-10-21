@@ -142,8 +142,10 @@ Per-impl mechanism (see module docstring for detail):
   `compiler_rt` but not our module → 0 lines). Runs under a **DWARF5-capable
   kcov** — stock kcov 43 and the liyu1981/zig-kcov fork both fail (crash on
   clang DWARF5, silent 0 lines on Zig); a build of **SimonKagstrom/kcov
-  master** works. `coverage.py` looks for it at
-  `~/.local/src/kcov-master/build/src/kcov` or `$KCOV`. Each conformance
+  master** works. CI uses the fleet image's baked kcov on PATH.
+  `coverage.py` looks for it via `$KCOV`, then
+  `~/.local/src/kcov-master/build/src/kcov`, then
+  `~/.local/bin/kcov-master`, then `kcov` on PATH. Each conformance
   invocation collects into its OWN outdir (`--collect-only`) and a final
   `kcov --merge` unions them — kcov's in-place accumulation into a shared
   outdir silently drops lines hit only by earlier runs (verified
