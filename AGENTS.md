@@ -265,9 +265,13 @@ none is present the script reports that and exits non-zero.
 Both scripts also install the stdlib-only Python 3.10+ session-search CLI.
 POSIX installs `search/session_search.py` as the executable
 `~/.local/bin/agent-walker-search`. Windows installs it as
-`agent-walker-search.py` with an `agent-walker-search.bat` launcher. The
+`agent-walker-search.py` with an `agent-walker-search.bat` launcher for cmd and
+PowerShell, plus an extensionless `agent-walker-search` POSIX shim (source
+`search/agent-walker-search.sh`, LF line endings) so Git Bash can run the
+command by name; it picks the same Python interpreter as the `.bat`. The
 OpenCode provider and process wrapper are copied beside the command, and the
-installer smoke-tests `agent-walker-search --help`.
+installer smoke-tests `agent-walker-search --help` through the `.bat` and, when
+`bash` is available, through the shim.
 
 The agent-facing skill at `skills/session-search/SKILL.md` teaches historical
 recall through the CLI, including provider filters, limits, and `--json`

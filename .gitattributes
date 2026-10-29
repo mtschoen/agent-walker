@@ -1,3 +1,6 @@
 # Corpus fixtures carry exact bytes (CRLF rungs, invalid-UTF-8 rungs).
 # Never let git text-convert them on checkout.
 shared/corpus/** -text
+
+# The Git Bash shim must stay LF or bash rejects its shebang line.
+search/agent-walker-search.sh text eol=lf

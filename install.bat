@@ -49,9 +49,17 @@ copy /Y "%SCRIPT_DIR%search\session_search.py" "%INSTALL_DIR%\agent-walker-searc
 copy /Y "%SCRIPT_DIR%search\opencode_search.py" "%INSTALL_DIR%\opencode_search.py" >nul || goto :error
 copy /Y "%SCRIPT_DIR%shared\process_safe.py" "%INSTALL_DIR%\process_safe.py" >nul || goto :error
 copy /Y "%SCRIPT_DIR%search\agent-walker-search.bat" "%INSTALL_DIR%\agent-walker-search.bat" >nul || goto :error
-echo installed session-search CLI -^> %INSTALL_DIR%\agent-walker-search.bat
+REM Git Bash does not run a .bat by its extensionless name, so also install a POSIX
+REM shim next to the .bat. The source is LF-only (see .gitattributes).
+copy /Y "%SCRIPT_DIR%search\agent-walker-search.sh" "%INSTALL_DIR%\agent-walker-search" >nul || goto :error
+echo installed session-search CLI -^> %INSTALL_DIR%\agent-walker-search.bat ^(Git Bash shim: agent-walker-search^)
 call "%INSTALL_DIR%\agent-walker-search.bat" --help >nul || goto :smoke_failed
 echo session-search smoke test ok
+REM Smoke the Git Bash shim when Git for Windows is present. bash is located
+REM beside git (not by a bare `where bash`, which can resolve to the WSL launcher);
+REM without Git for Windows this step is skipped silently.
+call :smoke_gitbash_shim || goto :smoke_failed
+
 
 REM Warn only if INSTALL_DIR isn't on the PERSISTED PATH (User or Machine).
 REM Deliberately NOT a grep of this session's %PATH%: after the user adds the
@@ -81,6 +89,14 @@ echo   powershell -NoProfile -Command "$p=[Environment]::GetEnvironmentVariable(
 echo Or edit it via the GUI: rundll32 sysdm.cpl,EditEnvironmentVariables
 echo Then open a new terminal for the change to take effect.
 goto :eof
+
+:smoke_gitbash_shim
+set "GIT_BASH="
+for /f "delims=" %%g in ('where git 2^>nul') do if not defined GIT_BASH if exist "%%~dpg..\bin\bash.exe" set "GIT_BASH=%%~dpg..\bin\bash.exe"
+if not defined GIT_BASH exit /b 0
+"%GIT_BASH%" "%INSTALL_DIR%\agent-walker-search" --help >nul || exit /b 1
+echo git bash shim smoke test ok
+exit /b 0
 
 :smoke_failed
 echo smoke test FAILED
