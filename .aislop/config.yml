@@ -14,7 +14,6 @@ exclude:
   - cpp/build-cov/**
   - go/covdata/**
   - go/covdata-unit/**
-  - mcp/.venv/**
   - rust/target/**
   - zig/.zig-cache/**
   - zig/zig-cache/**

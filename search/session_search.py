@@ -1,39 +1,33 @@
-"""MCP server for provider-aware historical agent-session search.
+#!/usr/bin/env python3
+"""Provider-aware historical agent-session search CLI.
 
 Claude Code and Codex search are delegated to the native agent-walker binary
-(installed as `claude-walker` as a back-compat alias). Provider modules
-handle stores with different formats, beginning with OpenCode's SQLite
-database. Cost, event, and beacon modes remain Claude-only.
+(installed as `claude-walker` as a back-compat alias). OpenCode search reads
+its SQLite database through the sibling opencode_search module. Cost, event,
+and beacon modes remain Claude-only.
 
-Launched by absolute path (`python <repo>/mcp/server.py`) rather than
-`python -m mcp` — the directory is named `mcp/` to match the spec, but `-m mcp`
-would collide with the `mcp` SDK package on sys.path. Running by script path
-puts only this directory on sys.path[0], so `import mcp.server` resolves to the
-installed SDK, not this folder.
+The installed command is `agent-walker-search`. Use `--json` for the structured
+`{hits, summary, note}` result.
 """
 
 from __future__ import annotations
 
-import functools
+import argparse
 import json
 import os
 import shutil
 import sys
 import time
-import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Literal
 
-# shared/ is a sibling of this file's parent (repo layout: <repo>/mcp/server.py,
-# <repo>/shared/process_safe.py); it is NOT on sys.path[0] the way `shared/`
-# scripts get it for free, since this file's own directory (`mcp/`) is what
-# lands there when launched by absolute path (see the module docstring above).
+# Source checkouts keep process_safe in shared/. Installed commands use the
+# sibling copy beside this script.
 _SHARED_DIR = Path(__file__).resolve().parent.parent / "shared"
-if str(_SHARED_DIR) not in sys.path:
+if _SHARED_DIR.is_dir() and str(_SHARED_DIR) not in sys.path:
     sys.path.insert(0, str(_SHARED_DIR))
 
-from mcp.server import MCPServer
 from opencode_search import (
     OpenCodeSearchError,
     SearchOptions,
@@ -41,92 +35,13 @@ from opencode_search import (
 )
 from process_safe import ProcessTimeout, run_captured
 
-# Per-process request log, mirroring projdash's pattern: one JSON line per
-# event (session_start / call / return / error). Tail it to diagnose a hung
-# tool — a `call` with no matching `return` for the same session pinpoints it.
-LOG_PATH: Path = Path.home() / ".claude-walker-mcp.log"
-
 # The walker should never take this long unless a network root is hung; the
 # CLI is supposed to degrade gracefully, so the timeout is just the safety net.
 SUBPROCESS_TIMEOUT_SECONDS = 30
 
-_ARGUMENT_REPR_LIMIT = 200
-_ERROR_MESSAGE_LIMIT = 500
-
-
-def _write_log(session_id: str, payload: dict[str, Any]) -> None:
-    record = {
-        "ts": datetime.now(tz=timezone.utc).isoformat(timespec="milliseconds"),
-        "session": session_id,
-        "pid": os.getpid(),
-        "ppid": os.getppid(),
-        **payload,
-    }
-    try:
-        with LOG_PATH.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, default=str) + "\n")
-    except OSError:
-        # Logging must never break a tool call.
-        pass
-
-
-def _truncate_argument(value: Any) -> Any:
-    text = repr(value)
-    if len(text) <= _ARGUMENT_REPR_LIMIT:
-        return value
-    return text[:_ARGUMENT_REPR_LIMIT] + "...<truncated>"
-
-
-def _instrument_tool(
-    session_id: str, function: Callable[..., Any]
-) -> Callable[..., Any]:
-    """Bracket each tool call with call/return/error log entries.
-
-    `functools.wraps` keeps `inspect.signature` (which MCPServer uses to derive
-    the parameter schema) following `__wrapped__` back to the original.
-    """
-    tool_name = function.__name__
-
-    @functools.wraps(function)
-    def wrapper(**kwargs: Any) -> Any:
-        start = time.monotonic()
-        _write_log(
-            session_id,
-            {
-                "event": "call",
-                "tool": tool_name,
-                "args": {
-                    key: _truncate_argument(value) for key, value in kwargs.items()
-                },
-            },
-        )
-        try:
-            result = function(**kwargs)
-        except Exception as error:
-            duration_ms = int((time.monotonic() - start) * 1000)
-            _write_log(
-                session_id,
-                {
-                    "event": "error",
-                    "tool": tool_name,
-                    "duration_ms": duration_ms,
-                    "error_type": type(error).__name__,
-                    "error": str(error)[:_ERROR_MESSAGE_LIMIT],
-                },
-            )
-            raise
-        duration_ms = int((time.monotonic() - start) * 1000)
-        _write_log(
-            session_id,
-            {"event": "return", "tool": tool_name, "duration_ms": duration_ms},
-        )
-        return result
-
-    return wrapper
-
 
 def _binary_candidates() -> list[Path]:
-    """Discovery chain, first existing wins (per SPEC.md MCP shim section).
+    """Discovery chain, first existing wins (per SPEC.md CLI section).
 
     1. $AGENT_WALKER_BINARY (exact path).
     2. $CLAUDE_WALKER_BINARY (exact path; back-compat alias for #1).
@@ -173,19 +88,14 @@ def _resolve_binary() -> Path:
 
 
 def _run_search(arguments: list[str]) -> dict[str, Any]:
-    """Subprocess `walker search ... --format jsonl` and reshape the output.
+    """Run `walker search ... --format jsonl` and reshape the output.
 
     Returns {"hits": [...], "summary": {...} | None, "note": str | None}.
-    `note` carries the walker's stderr (e.g. the truncation hint) on success.
-    Raises RuntimeError on a non-zero exit (bad pattern / regex / time / flag)
-    or a subprocess timeout - MCPServer surfaces it as an MCP tool error.
+    `note` carries the walker's stderr (for example, the truncation hint) on
+    success. A non-zero exit or subprocess timeout raises RuntimeError.
 
-    Shells out via process_safe.run_captured rather than bare subprocess.run:
-    this is the live MCP server behind agent_walker_search, so a wedged
-    child (e.g. a grandchild process inheriting the stdout pipe on Windows,
-    bpo-31935) would stall the whole stdio connection, not just one call.
-    run_captured's abandon-reader-thread pattern guarantees the timeout below
-    is a hard wall clock even in that case.
+    process_safe.run_captured prevents a grandchild that inherits the stdout
+    pipe on Windows from stalling the CLI beyond the timeout below.
     """
     binary = _resolve_binary()
     command = [str(binary), "search", *arguments, "--format", "jsonl"]
@@ -198,7 +108,7 @@ def _run_search(arguments: list[str]) -> dict[str, Any]:
         )
     except ProcessTimeout as error:
         raise RuntimeError(
-            f"walker search timed out after {SUBPROCESS_TIMEOUT_SECONDS}s — a configured "
+            f"walker search timed out after {SUBPROCESS_TIMEOUT_SECONDS}s; a configured "
             f"root may be unreachable. Command: {' '.join(command)}"
         ) from error
 
@@ -209,12 +119,9 @@ def _run_search(arguments: list[str]) -> dict[str, Any]:
             f"walker search failed (exit {completed.returncode}): {stderr or 'no stderr output'}"
         )
 
-    # stdout can be None even on a clean exit — observed on Windows when the
-    # target .jsonl is mid-write by a live session (see
-    # BUG-mcp-search-stdout-none.md). Guard it, and since a successful run
-    # always emits at least a summary line, treat empty stdout on exit 0 as a
-    # transient read failure with a real error rather than an opaque
-    # AttributeError downstream.
+    # A successful run always emits at least a summary line. Treat empty stdout
+    # as a transient read failure, which can occur while a live session is
+    # writing a target transcript.
     stdout = (completed.stdout or "").strip()
     if not stdout:
         raise RuntimeError(
@@ -406,95 +313,103 @@ def _run_agent_search(
     return merged
 
 
-def create_mcp_server() -> MCPServer:
-    """Create and return the configured agent-walker MCP server."""
-    server = MCPServer(
-        "agent-walker",
-        instructions=(
-            "Search past coding-agent sessions. Use agent_walker_search when the user "
-            "refers to an earlier conversation; it searches Claude Code, Codex, and OpenCode by "
-            "default. Set providers to scope recall to one or more agent harnesses."
-        ),
+def _argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="agent-walker-search",
+        description="Search historical Claude Code, Codex, and OpenCode sessions.",
     )
+    parser.add_argument("--query", required=True, help="substring or RE2 regex")
+    parser.add_argument(
+        "--providers",
+        nargs="+",
+        choices=("claude", "codex", "opencode"),
+        help="providers to search; default is all three",
+    )
+    for flag, help_text in (
+        ("--regex", "treat query as regex"),
+        ("--case-sensitive", "match case exactly"),
+        ("--count-only", "return counts without hits"),
+        ("--include-tool-blocks", "search tool inputs and outputs"),
+        ("--json", "emit the structured search result"),
+    ):
+        parser.add_argument(flag, action="store_true", help=help_text)
+    parser.add_argument("--role", choices=("user", "assistant", "both"), default="both")
+    parser.add_argument(
+        "--since", help="RFC3339 timestamp or relative value such as 7d"
+    )
+    parser.add_argument("--until", help="RFC3339 timestamp or relative upper bound")
+    parser.add_argument("--cwd", help="project identifier or path filter")
+    parser.add_argument("--context-turns", type=int, default=1)
+    parser.add_argument("--limit", type=int, default=50)
+    parser.add_argument("--opencode-db", help="OpenCode database path override")
+    return parser
 
-    session_id = uuid.uuid4().hex[:8]
-    _write_log(session_id, {"event": "session_start"})
 
-    original_tool_decorator = server.tool
-
-    def instrumented_tool(*decorator_args: Any, **decorator_kwargs: Any):
-        register = original_tool_decorator(*decorator_args, **decorator_kwargs)
-
-        def decorator(function: Callable[..., Any]) -> Callable[..., Any]:
-            return register(_instrument_tool(session_id, function))
-
-        return decorator
-
-    server.tool = instrumented_tool  # type: ignore[method-assign]
-
-    @server.tool()
-    def agent_walker_search(
-        pattern: str,
-        providers: list[Literal["claude", "codex", "opencode"]] | None = None,
-        regex: bool = False,
-        case_sensitive: bool = False,
-        role: Literal["user", "assistant", "both"] = "both",
-        since: str | None = None,
-        until: str | None = None,
-        cwd: str | None = None,
-        context_turns: int = 1,
-        limit: int = 50,
-        count_only: bool = False,
-        include_tool_blocks: bool = False,
-        opencode_db: str | None = None,
-    ) -> dict[str, Any]:
-        """Search historical sessions across coding-agent providers.
-
-        Claude Code JSONLs, Codex rollouts, and OpenCode's SQLite store are searched by default.
-        Results carry a `provider` field and retain source-specific provenance.
-        This tool is historical recall only: statusline costs, events, and progress
-        beacons remain isolated to their native agent session source.
-
-        Args:
-            pattern: Required substring or regex.
-            providers: Providers to search; omitted means every supported provider.
-            regex: Treat pattern as an RE2 regular expression. OpenCode is
-                reported unavailable for regex queries until it has a
-                linear-time matcher; Claude search continues normally.
-            case_sensitive: Default is case-insensitive.
-            role: Restrict to user, assistant, or both.
-            since: RFC3339 timestamp or relative value such as 7d or 12h.
-            until: RFC3339 timestamp or relative upper bound.
-            cwd: Project identifier/path filter. Claude expects its project slug;
-                Codex matches an exact rollout cwd; OpenCode matches the stored
-                session directory.
-            context_turns: Messages before and after each hit.
-            limit: Global cap after provider results are merged newest-first.
-            count_only: Return aggregate and per-provider counts without hits.
-            include_tool_blocks: Search tool inputs and outputs as well as prose.
-            opencode_db: Optional OpenCode database override. The environment
-                variable AGENT_WALKER_OPENCODE_DB provides a persistent override.
-        """
-        return _run_agent_search(
-            SearchOptions(
-                pattern=pattern,
-                regex=regex,
-                case_sensitive=case_sensitive,
-                role=role,
-                since=since,
-                until=until,
-                cwd=cwd,
-                context_turns=context_turns,
-                limit=limit,
-                count_only=count_only,
-                include_tool_blocks=include_tool_blocks,
-                db_path=opencode_db,
-            ),
-            providers,
+def _format_human(result: dict[str, Any]) -> str:
+    lines: list[str] = []
+    for hit in result["hits"]:
+        lines.append(
+            " ".join(
+                str(hit.get(field, ""))
+                for field in ("provider", "session_id", "timestamp")
+            ).rstrip()
         )
+        if hit.get("snippet"):
+            lines.append(str(hit["snippet"]))
+    summary = result["summary"]
+    lines.append(f"hits: {summary.get('hits', 0)}")
+    lines.append(f"sessions_matched: {summary.get('sessions_matched', 0)}")
+    if summary.get("truncated"):
+        lines.append("truncated: true")
+    if result.get("note"):
+        lines.append(f"note: {result['note']}")
+    return "\n".join(lines)
 
-    return server
+
+def _write_utf8(text: str) -> None:
+    """Write text plus a newline as UTF-8 regardless of the stdout encoding.
+
+    A legacy console codec (for example cp1252) cannot encode CJK or emoji, and
+    JSON output must stay lossless for a UTF-8 consumer.
+    """
+    stream = sys.stdout
+    buffer = getattr(stream, "buffer", None)
+    if buffer is None:
+        stream.write(text + "\n")
+        return
+    stream.flush()
+    buffer.write((text + "\n").encode("utf-8"))
+    buffer.flush()
+
+
+def main(arguments: list[str] | None = None) -> int:
+    parser = _argument_parser()
+    namespace = parser.parse_args(arguments)
+    options = SearchOptions(
+        pattern=namespace.query,
+        regex=namespace.regex,
+        case_sensitive=namespace.case_sensitive,
+        role=namespace.role,
+        since=namespace.since,
+        until=namespace.until,
+        cwd=namespace.cwd,
+        context_turns=namespace.context_turns,
+        limit=namespace.limit,
+        count_only=namespace.count_only,
+        include_tool_blocks=namespace.include_tool_blocks,
+        db_path=namespace.opencode_db,
+    )
+    try:
+        result = _run_agent_search(options, namespace.providers)
+    except (RuntimeError, ValueError) as error:
+        print(f"{parser.prog}: error: {error}", file=sys.stderr)
+        return 1
+    if namespace.json:
+        _write_utf8(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        _write_utf8(_format_human(result))
+    return 0
 
 
 if __name__ == "__main__":
-    create_mcp_server().run(transport="stdio")
+    sys.exit(main())

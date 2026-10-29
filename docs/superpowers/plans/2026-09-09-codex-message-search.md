@@ -14,21 +14,21 @@ Tech stack: Existing Rust reference and C++/Go/Zig conformance implementations, 
 - [x] Independent review, fix important findings, and smoke a real current rollout query with the resulting native binary.
 - [x] Document supported schema and update verification evidence. Preserve the unrelated compressed-archive design branch and its untracked plan.
 
-## MCP provenance follow-up
+## Session-search provenance follow-up
 
-Native search now returns current Codex messages, but the existing MCP wrapper
+Native search now returns current Codex messages, but the session-search CLI
 labels all native hits Claude. Correct source selection before native limits.
 
 - [x] Add search-only `--transcript-format claude-code|codex` in all four ports, default both. Filter resolved roots before discovery, scanning, counts and limits; do not filter already truncated hits.
 - [x] Honor CODEX_HOME for the default implicit Codex sessions root, retaining existing home fallback and tagged extra-root behavior.
-- [x] Add the Codex MCP provider and select each native format explicitly, preserving existing OpenCode behavior and global result merging/caps. No duplicate Python rollout parser or temporary HOME/config tricks.
-- [ ] Cover provider isolation, count-only, per-provider/global limits, unknown filter values and CODEX_HOME in shared conformance and MCP tests; review and deploy native and MCP sides together.
+- [x] Add the Codex provider and select each native format explicitly, preserving existing OpenCode behavior and global result merging/caps. No duplicate Python rollout parser or temporary HOME/config tricks.
+- [ ] Cover provider isolation, count-only, per-provider/global limits, unknown filter values and CODEX_HOME in shared conformance and session-search tests; review and deploy native and CLI sides together.
 - [x] Keep compressed/archived-session support and usage analytics explicitly separate.
 
 ## Windows verification (2026-10-11)
 
 All four release builds passed. The shared conformance suite passed 1,156 checks
-(289 per implementation), and the MCP tests passed 42 cases. Rust unit tests and
+(289 per implementation), and the session-search tests passed 42 cases. Rust unit tests and
 Clippy, C++ unit tests, Go tests and vet, and Zig formatting passed. A real current
 rollout query using the worktree C++ binary found its canonical user message.
 New malformed-block and null-text fixtures failed in Go before the parser fixes.
@@ -41,9 +41,9 @@ Archive/provider isolation also has generated regression cases.
 The build/coverage item remains open until the Linux coverage gate is verified.
 Local Go coverage measures the changed parser and format handling at 100%; the
 full Windows measurement retains pre-existing filesystem error-path gaps.
-The provider-test/deployment item has passing conformance and MCP coverage and
+The provider-test/deployment item has passing conformance and session-search coverage and
 an internal review, but deployment is intentionally pending owner integration.
-No native binary or MCP registration was installed or changed.
+No native binary or harness registration was installed or changed.
 
 ## Bounds
 

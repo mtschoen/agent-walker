@@ -14,7 +14,11 @@ so urllib's default verification validates it with no custom CA handling.
 
 On any read/parse failure it posts state=error and exits 0 so an
 `if: always()` step does not double-fail the job. A POST/network failure
-DOES raise. Outside CI (no GITHUB_* env), it prints and skips cleanly.
+DOES raise, with one exception: HTTP 403 on a pull_request run. Gitea gives
+fork and AGit pull requests a read-only job token, so the status cannot be
+written; the script prints a notice that the percent is not posted and exits
+0. A 403 on any other event still raises. Outside CI (no GITHUB_* env), it
+prints and skips cleanly.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import argparse
 import json
 import os
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -30,7 +35,8 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SUMMARY = ROOT / "coverage" / "summary.json"
 
 
-def _post(state: str, description: str) -> None:
+def _post(state: str, description: str) -> bool:
+    """POST the status; return False when a read-only PR token forbids it."""
     server = os.environ["GITHUB_SERVER_URL"]
     repository = os.environ["GITHUB_REPOSITORY"]
     sha = os.environ["GITHUB_SHA"]
@@ -57,7 +63,17 @@ def _post(state: str, description: str) -> None:
             "Content-Type": "application/json",
         },
     )
-    urllib.request.urlopen(request).read()
+    try:
+        urllib.request.urlopen(request).read()
+    except urllib.error.HTTPError as error:
+        if error.code == 403 and os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
+            print(
+                "post-coverage-status: the job token is read-only for fork and "
+                "AGit pull requests (HTTP 403); coverage percent not posted"
+            )
+            return False
+        raise
+    return True
 
 
 def _description(summary: dict) -> str:
@@ -88,8 +104,8 @@ def main(argv: list[str]) -> int:
         _post("error", "coverage summary unreadable")
         return 0
 
-    _post("success", description)
-    print(f"posted pr-crew/coverage success: {description}")
+    if _post("success", description):
+        print(f"posted pr-crew/coverage success: {description}")
     return 0
 
 

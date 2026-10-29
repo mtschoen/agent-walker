@@ -14,7 +14,7 @@ Recommended linting setup for claude-walker — fleet survey 2026-05-29.
 | `rust/src/` | Rust | `*.rs` (main, beacons, content, events, search, transcript, walker_roots) |
 | `cpp/` | C++ | `*.cpp` / `*.hpp` (main, beacons, events, search, walker_roots, common, json_writer, pricing) |
 | `zig/src/` | Zig | `*.zig` (main, beacons, events, search, walker_roots) |
-| `shared/`, `mcp/`, `ci/` | Python | conformance, coverage, bench, corpus generators, MCP server, CI post-status |
+| `shared/`, `search/`, `ci/` | Python | conformance, coverage, bench, corpus generators, session-search CLI, CI post-status |
 
 **Existing linter/formatter config:** `ruff.toml` and `.aislop/config.yml`.
 There is no `.golangci.yml`, `.clang-format`, `.clang-tidy`, `Cargo.toml
@@ -111,7 +111,7 @@ Note: `clang-tidy` needs `compile_commands.json` — the CI already builds with 
 
 ### Python
 
-The Python surface here is tooling (conformance harness, coverage scripts, MCP server, corpus generators, CI status poster) — not a library or application. That makes linting high-value: bugs in these scripts silently break CI or measurements.
+The Python surface here is tooling (conformance harness, coverage scripts, session-search CLI, corpus generators, CI status poster), not a library or application. That makes linting high-value: bugs in these scripts silently break CI or measurements.
 
 | Tier | Tool | Command | Why |
 |---|---|---|---|
@@ -244,7 +244,7 @@ Add a `lint` job to `.gitea/workflows/ci.yml`. It can run in parallel with the e
         run: ruff format --check .
 
       - name: Python — pyright
-        run: pyright shared/ mcp/ ci/
+        run: pyright shared/ search/ ci/
 ```
 
 ---

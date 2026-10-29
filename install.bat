@@ -1,39 +1,17 @@
 @echo off
-REM Build the walker and install as agent-walker.exe at %USERPROFILE%\.local\bin
-REM (with a claude-walker.exe copy kept as a back-compat alias for existing
-REM callers), then register the search MCP server.
+REM Install the native walker, its claude-walker.exe alias, and the stdlib-only
+REM session-search CLI at %USERPROFILE%\.local\bin.
 REM
-REM Usage: install.bat [--project [DIR]]
-REM   (no flag)        register the MCP server at `user` scope (global, every project)
-REM   --project        register at `local` scope for the directory you invoke from
-REM   --project DIR    register at `local` scope for DIR
-setlocal enabledelayedexpansion
+REM Usage: install.bat
+setlocal
 
-REM Capture the invocation directory BEFORE pushd so --project can default to
-REM "the project the user ran the installer from".
-set "INVOCATION_DIR=%CD%"
 set "SCRIPT_DIR=%~dp0"
-set "MCP_SCOPE=user"
-set "PROJECT_DIR="
-
-:parse_args
-if "%~1"=="" goto args_done
-if /I "%~1"=="--project" (
-    set "MCP_SCOPE=local"
-    set "NEXT=%~2"
-    if defined NEXT if not "!NEXT:~0,2!"=="--" (
-        set "PROJECT_DIR=%~2"
-        shift
-    )
-    shift
-    goto parse_args
+if not "%~1"=="" (
+    echo install.bat: unknown argument: %~1
+    echo Usage: install.bat
+    endlocal
+    exit /b 2
 )
-echo install.bat: unknown argument: %~1
-echo Usage: install.bat [--project [DIR]]
-endlocal
-exit /b 2
-:args_done
-if /I "%MCP_SCOPE%"=="local" if not defined PROJECT_DIR set "PROJECT_DIR=%INVOCATION_DIR%"
 
 pushd "%~dp0"
 
@@ -67,123 +45,25 @@ REM Smoke test: bare-flag invocation routes to cost mode.
 "%INSTALL_DIR%\agent-walker.exe" --period 86400 --win-start 0 >nul || goto :smoke_failed
 echo smoke test ok
 
+copy /Y "%SCRIPT_DIR%search\session_search.py" "%INSTALL_DIR%\agent-walker-search.py" >nul || goto :error
+copy /Y "%SCRIPT_DIR%search\opencode_search.py" "%INSTALL_DIR%\opencode_search.py" >nul || goto :error
+copy /Y "%SCRIPT_DIR%shared\process_safe.py" "%INSTALL_DIR%\process_safe.py" >nul || goto :error
+copy /Y "%SCRIPT_DIR%search\agent-walker-search.bat" "%INSTALL_DIR%\agent-walker-search.bat" >nul || goto :error
+echo installed session-search CLI -^> %INSTALL_DIR%\agent-walker-search.bat
+call "%INSTALL_DIR%\agent-walker-search.bat" --help >nul || goto :smoke_failed
+echo session-search smoke test ok
+
 REM Warn only if INSTALL_DIR isn't on the PERSISTED PATH (User or Machine).
 REM Deliberately NOT a grep of this session's %PATH%: after the user adds the
 REM dir (via :path_note or the GUI), this cmd session's %PATH% stays stale until
 REM a new terminal opens, so a %PATH% check would warn on every re-run even
 REM though the dir is permanently installed. The persisted PATH is also exactly
-REM what fresh processes -- the recency-nudge hook, the status line -- will see.
+REM what fresh processes, including the session-search skill, will see.
 powershell -NoProfile -Command "$d=('%INSTALL_DIR%').TrimEnd([char]92); $raw=(@([Environment]::GetEnvironmentVariable('Path','User'),[Environment]::GetEnvironmentVariable('Path','Machine')) -join ';'); if ((($raw -split ';' | ForEach-Object { $_.Trim().TrimEnd([char]92) }) -icontains $d)) { exit 0 } else { exit 1 }"
 if errorlevel 1 call :path_note
 
-call :register_mcp
-
 popd
 endlocal
-exit /b 0
-
-:register_mcp
-REM Additive: a registration failure warns but does not fail the binary install.
-REM The server runs out of a dedicated venv at mcp\.venv to host the `mcp` SDK,
-REM so the registration doesn't depend on whatever `python` happens to be on PATH.
-set "SERVER_PATH=%SCRIPT_DIR%mcp\server.py"
-set "VENV_DIR=%SCRIPT_DIR%mcp\.venv"
-set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
-
-where claude >nul 2>&1
-if errorlevel 1 (
-    echo.
-    echo Note: 'claude' CLI not on PATH; skipped MCP server registration.
-    echo Register later with:
-    echo   claude mcp add agent-walker -s user -- "%VENV_PY%" "%SERVER_PATH%"
-    goto :eof
-)
-
-call :ensure_venv
-set "VENV_READY=!errorlevel!"
-if "!VENV_READY!"=="0" (
-    REM Idempotent: pip install is fast when the wheel is already cached.
-    REM Pinned to the 2.x line on purpose. server.py targets the v2 API
-    REM (`mcp.server.MCPServer`); an unpinned --upgrade silently crossed the
-    REM 1.x -> 2.x boundary, which removed `mcp.server.fastmcp` and left the
-    REM server failing at import with no signal until the next connect attempt.
-    REM `~=2.0` (rather than >=2,<3) also keeps the spec free of cmd's
-    REM redirection characters. Bump deliberately when porting to 3.x.
-    "%VENV_PY%" -m pip install --quiet --upgrade "mcp~=2.0"
-    if errorlevel 1 (
-        echo warning: failed to install 'mcp' SDK into %VENV_DIR%
-        set "VENV_READY=1"
-    )
-)
-if not "!VENV_READY!"=="0" (
-    echo.
-    echo Note: MCP server venv isn't ready. Registration will still land, but the
-    echo server won't start until the venv exists and has the 'mcp' SDK installed.
-)
-
-if /I "%MCP_SCOPE%"=="local" (
-    pushd "%PROJECT_DIR%"
-    claude mcp remove claude-walker -s local >nul 2>&1
-    claude mcp remove agent-walker -s local >nul 2>&1
-    claude mcp add agent-walker -s local -- "%VENV_PY%" "%SERVER_PATH%"
-    set "MCP_RC=!errorlevel!"
-    popd
-    if not "!MCP_RC!"=="0" (
-        echo warning: MCP registration ^(local scope^) failed for %PROJECT_DIR%
-    ) else (
-        echo registered agent-walker MCP server ^(local scope^) for %PROJECT_DIR%
-    )
-) else (
-    claude mcp remove claude-walker -s user >nul 2>&1
-    claude mcp remove agent-walker -s user >nul 2>&1
-    claude mcp add agent-walker -s user -- "%VENV_PY%" "%SERVER_PATH%"
-    if errorlevel 1 (
-        echo warning: MCP registration ^(user scope^) failed
-    ) else (
-        echo registered agent-walker MCP server ^(user/global scope^)
-    )
-)
-goto :eof
-
-:ensure_venv
-REM A venv is reusable only if its interpreter actually RUNS. `if exist` alone is
-REM not enough: a venv whose base Python was uninstalled or relocated still has
-REM Scripts\python.exe, but that stub resolves `home` out of pyvenv.cfg and dies
-REM with "did not find executable at ...". Re-running `-m venv` over the existing
-REM directory rewrites pyvenv.cfg and the launcher stubs while leaving
-REM site-packages intact, so falling through to the create step repairs in place.
-REM `if errorlevel` (unlike %ERRORLEVEL%) reads the live code inside a block.
-if exist "%VENV_PY%" (
-    "%VENV_PY%" -c "pass" >nul 2>&1
-    if not errorlevel 1 exit /b 0
-    echo venv at %VENV_DIR% has a dead base interpreter; repairing in place
-)
-REM Find Python >=3.10 (the `mcp` SDK's floor). The `py` launcher (PEP 397) is
-REM the canonical Windows tool for picking a specific version. Try newest first.
-set "PY_LAUNCHER="
-for %%v in (3.13 3.12 3.11 3.10) do (
-    if not defined PY_LAUNCHER (
-        py -%%v --version >nul 2>&1
-        if not errorlevel 1 set "PY_LAUNCHER=py -%%v"
-    )
-)
-REM Fall back to bare `python` if the launcher isn't installed -- then verify
-REM the version meets the floor before using it.
-if not defined PY_LAUNCHER (
-    where python >nul 2>&1
-    if not errorlevel 1 (
-        python -c "import sys; sys.exit(0 if sys.version_info>=(3,10) else 1)" >nul 2>&1
-        if not errorlevel 1 set "PY_LAUNCHER=python"
-    )
-)
-if not defined PY_LAUNCHER (
-    echo warning: no Python ^>=3.10 found on PATH; can't create %VENV_DIR%
-    echo          install Python 3.10+ ^(see https://www.python.org/downloads/^) and re-run.
-    exit /b 1
-)
-echo creating MCP server venv at %VENV_DIR% (using %PY_LAUNCHER%)
-%PY_LAUNCHER% -m venv "%VENV_DIR%"
-if errorlevel 1 exit /b 1
 exit /b 0
 
 :path_note
@@ -194,8 +74,8 @@ REM chars, dropping the tail. The PowerShell user-scope SetEnvironmentVariable
 REM below reads only the user PATH and has no length cap.
 echo.
 echo Note: %INSTALL_DIR% is not on PATH. Add it before the recency-nudge
-echo hook or status line can find agent-walker (or its claude-walker alias)
-echo by name. To add it to your
+echo hook, status line, or session-search skill can find their commands by name.
+echo To add it to your
 echo User PATH safely (no setx 1024-char truncation, no system/user merge):
 echo   powershell -NoProfile -Command "$p=[Environment]::GetEnvironmentVariable('Path','User'); if(-not $p){$p=''}; if(($p -split ';') -notcontains '%INSTALL_DIR%'){[Environment]::SetEnvironmentVariable('Path',($p.TrimEnd(';')+';%INSTALL_DIR%').TrimStart(';'),'User')}"
 echo Or edit it via the GUI: rundll32 sysdm.cpl,EditEnvironmentVariables

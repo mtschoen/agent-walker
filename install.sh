@@ -1,41 +1,14 @@
 #!/usr/bin/env bash
-# Build the C++ walker (production impl) and install it as `agent-walker`
-# at ~/.local/bin (with a `claude-walker` copy kept as a back-compat alias
-# for existing callers), then register the search MCP server. Smoke test
-# before reporting success.
+# Install the native walker, its claude-walker alias, and the stdlib-only
+# session-search CLI at ~/.local/bin. Smoke test before reporting success.
 #
-# Usage: install.sh [--project [DIR]]
-#   (no flag)        register the MCP server at `user` scope (global, every project)
-#   --project        register at `local` scope for the directory you invoke from
-#   --project DIR    register at `local` scope for DIR
+# Usage: install.sh
 set -euo pipefail
 
-# Capture the invocation directory BEFORE cd-ing into the repo so --project can
-# default to "the project the user ran the installer from".
-INVOCATION_DIR="$PWD"
-
-MCP_SCOPE="user"
-PROJECT_DIR=""
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --project)
-            MCP_SCOPE="local"
-            # Optional path argument (anything not starting with --).
-            if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
-                PROJECT_DIR="$2"
-                shift
-            fi
-            ;;
-        *)
-            echo "install.sh: unknown argument: $1" >&2
-            echo "Usage: install.sh [--project [DIR]]" >&2
-            exit 2
-            ;;
-    esac
-    shift
-done
-if [[ "$MCP_SCOPE" == "local" && -z "$PROJECT_DIR" ]]; then
-    PROJECT_DIR="$INVOCATION_DIR"
+if [[ $# -gt 0 ]]; then
+    echo "install.sh: unknown argument: $1" >&2
+    echo "Usage: install.sh" >&2
+    exit 2
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -120,107 +93,67 @@ else
     exit 1
 fi
 
-if ! command -v agent-walker >/dev/null 2>&1; then
-    echo
-    echo "Note: $HOME/.local/bin is not on PATH. Add it before the recency-nudge"
-    echo "hook or status line can find agent-walker (or its claude-walker alias) by name."
-fi
-
-# --- Register the search MCP server -----------------------------------------
-# Additive: a registration failure warns but does not fail the binary install.
-# The server runs out of a dedicated venv at mcp/.venv to host the `mcp` SDK,
-# so the registration doesn't depend on whatever `python` happens to be on PATH
-# (PEP 668 blocks system-wide pip on modern macOS/Linux distros anyway).
-server_path="$SCRIPT_DIR/mcp/server.py"
-venv_dir="$SCRIPT_DIR/mcp/.venv"
-# Venv layout differs between POSIX (bin/) and Windows-under-git-bash (Scripts/).
-case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*) venv_py="$venv_dir/Scripts/python.exe" ;;
-    *)                    venv_py="$venv_dir/bin/python" ;;
-esac
-
-# Find a Python >=3.10 (the `mcp` SDK's floor). Tries newest first.
-pick_python() {
-    local candidate ver_major ver_minor
-    for candidate in python3.13 python3.12 python3.11 python3.10 python3 python; do
-        command -v "$candidate" >/dev/null 2>&1 || continue
-        # Single-shot version probe: prints "MAJOR MINOR" or nothing on failure.
-        read -r ver_major ver_minor < <("$candidate" -c \
-            'import sys; print(sys.version_info[0], sys.version_info[1])' 2>/dev/null) || continue
-        if [[ "$ver_major" -gt 3 || ( "$ver_major" -eq 3 && "$ver_minor" -ge 10 ) ]]; then
-            echo "$candidate"
+# The session-search CLI needs Python 3.10+. Hosts expose it as python3,
+# python, or only a versioned python3.N, so probe each candidate and bake the
+# first usable one into the installed launcher.
+find_python() {
+    local candidate
+    for candidate in python3 python \
+            python3.20 python3.19 python3.18 python3.17 python3.16 python3.15 \
+            python3.14 python3.13 python3.12 python3.11 python3.10; do
+        if command -v "$candidate" >/dev/null 2>&1 \
+                && "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
+                    >/dev/null 2>&1; then
+            absolute_path "$(command -v "$candidate")"
             return 0
         fi
     done
     return 1
 }
 
-ensure_venv() {
-    # A venv is reusable only if its interpreter actually RUNS. Testing for the
-    # file alone is not enough: a venv whose base Python was uninstalled or
-    # relocated still has bin/python, but it resolves `home` out of pyvenv.cfg
-    # and dies at startup. Re-running `-m venv` over the existing directory
-    # rewrites pyvenv.cfg and the launcher while leaving site-packages intact,
-    # so falling through to the create step repairs in place.
-    if [[ -x "$venv_py" ]] && "$venv_py" -c 'pass' >/dev/null 2>&1; then
-        return 0
-    fi
-    if [[ -e "$venv_py" ]]; then
-        echo "venv at $venv_dir has a dead base interpreter; repairing in place"
-    fi
-    local py
-    if ! py=$(pick_python); then
-        echo "warning: no Python >=3.10 found on PATH; can't create $venv_dir" >&2
-        echo "         install Python 3.10+ (e.g. 'brew install python@3.13') and re-run." >&2
-        return 1
-    fi
-    echo "creating MCP server venv at $venv_dir (using $py)"
-    "$py" -m venv "$venv_dir" || return 1
+# command -v can answer with a PATH-relative name; the launcher runs from any
+# directory, so persist an absolute path.
+absolute_path() {
+    local directory
+    directory="$(cd "$(dirname "$1")" && pwd -P)" || return 1
+    printf '%s/%s\n' "$directory" "$(basename "$1")"
 }
 
-if ! command -v claude >/dev/null 2>&1; then
-    echo
-    echo "Note: 'claude' CLI not on PATH; skipped MCP server registration."
-    echo "Register later with:"
-    echo "  claude mcp add agent-walker -s user -- \"$venv_py\" \"$server_path\""
+# Quote a value as one literal POSIX-shell word for the generated launcher, so
+# metacharacters in HOME or an interpreter directory are never executed.
+shell_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# write_search_launcher <launcher> <python> <script>
+write_search_launcher() {
+    printf '#!/bin/sh\nexec %s %s "$@"\n' "$(shell_quote "$2")" "$(shell_quote "$3")" > "$1"
+    chmod +x "$1"
+}
+
+if ! python_bin="$(find_python)"; then
+    echo "install.sh: no Python 3.10+ found (tried python3, python, python3.N)." >&2
+    exit 1
+fi
+
+search_target="$HOME/.local/bin/agent-walker-search"
+search_script="$HOME/.local/bin/agent-walker-search.py"
+cp "$SCRIPT_DIR/search/session_search.py" "$search_script"
+cp "$SCRIPT_DIR/search/opencode_search.py" "$HOME/.local/bin/opencode_search.py"
+cp "$SCRIPT_DIR/shared/process_safe.py" "$HOME/.local/bin/process_safe.py"
+write_search_launcher "$search_target" "$python_bin" "$search_script"
+echo "installed session-search CLI -> $search_target (python: $python_bin)"
+
+if "$search_target" --help >/dev/null; then
+    echo "session-search smoke test ok"
 else
-    venv_ready=0
-    if ensure_venv; then
-        # Idempotent: pip install is fast when the wheel is already cached.
-        # Pinned to the 2.x line on purpose. server.py targets the v2 API
-        # (`mcp.server.MCPServer`); an unpinned --upgrade silently crossed the
-        # 1.x -> 2.x boundary, which removed `mcp.server.fastmcp` and left the
-        # server failing at import with no signal until the next connect
-        # attempt. Bump deliberately when porting to 3.x.
-        if "$venv_py" -m pip install --quiet --upgrade 'mcp~=2.0'; then
-            venv_ready=1
-        else
-            echo "warning: failed to install 'mcp' SDK into $venv_dir" >&2
-        fi
-    fi
+    echo "session-search smoke test FAILED" >&2
+    exit 1
+fi
 
-    if (( venv_ready == 0 )); then
-        echo
-        echo "Note: MCP server venv isn't ready. Registration will still land, but the"
-        echo "server won't start until the venv exists and has the 'mcp' SDK installed."
-    fi
-
-    if [[ "$MCP_SCOPE" == "local" ]]; then
-        if ( cd "$PROJECT_DIR" \
-                && { claude mcp remove claude-walker -s local >/dev/null 2>&1 || true; } \
-                && { claude mcp remove agent-walker -s local >/dev/null 2>&1 || true; } \
-                && claude mcp add agent-walker -s local -- "$venv_py" "$server_path" ); then
-            echo "registered agent-walker MCP server (local scope) for $PROJECT_DIR"
-        else
-            echo "warning: MCP registration (local scope) failed for $PROJECT_DIR" >&2
-        fi
-    else
-        { claude mcp remove claude-walker -s user >/dev/null 2>&1 || true; }
-        { claude mcp remove agent-walker -s user >/dev/null 2>&1 || true; }
-        if claude mcp add agent-walker -s user -- "$venv_py" "$server_path"; then
-            echo "registered agent-walker MCP server (user/global scope)"
-        else
-            echo "warning: MCP registration (user scope) failed" >&2
-        fi
-    fi
+if ! command -v agent-walker >/dev/null 2>&1 \
+        || ! command -v agent-walker-search >/dev/null 2>&1; then
+    echo
+    echo "Note: $HOME/.local/bin is not on PATH. Add it before the recency-nudge"
+    echo "hook, status line, or session-search skill can find their commands by name."
 fi

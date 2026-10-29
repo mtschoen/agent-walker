@@ -1,4 +1,4 @@
-# Minimal ruff config for agent-walker's Python surface (mcp/, shared/).
+# Minimal ruff config for agent-walker's Python surface (search/, shared/).
 # This repo has no pre-existing lint baseline (it's primarily Rust/C++/Go/Zig
 # with a thin Python layer; AGENTS.md says "No lint gate in CI yet"). This
 # file adds ONLY the TID251 raw-subprocess ban.

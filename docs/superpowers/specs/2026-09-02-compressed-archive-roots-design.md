@@ -179,8 +179,8 @@ Follows the agent-walker AGENTS.md procedure:
 5. `--no-ff` merges, full conformance on the merged tree, coverage back to
    100 percent per impl via `shared/coverage.py`.
 
-The MCP server (`mcp/server.py`) needs no change: it shells out to
-`walker search` without `--projects-root`, so the implicit archive root
+The session-search CLI (`search/session_search.py`) needs no change: it delegates
+to `walker search` without `--projects-root`, so the implicit archive root
 applies. Its 30 second subprocess timeout is the budget to check in the
 smoke test against the real 784 MB archive.
 

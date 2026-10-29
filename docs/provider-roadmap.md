@@ -4,7 +4,7 @@ agent-walker has two deliberately separate jobs:
 
 1. Native Claude Code walking for latency-sensitive statusline costs, events,
    and progress beacons.
-2. Provider-neutral historical recall through the MCP server.
+2. Provider-neutral historical recall through the `agent-walker-search` CLI.
 
 Only the second job aggregates agents. A provider must never enter another
 agent's cost, active-session, event, or beacon calculation merely because it
@@ -30,8 +30,8 @@ the main database file.
 
 ### 1. Claude Code and OpenCode
 
-Claude remains the native baseline. The generic `agent_walker_search` MCP tool
-merges native Claude JSONL results with OpenCode's
+Claude remains the native baseline. The `agent-walker-search` CLI merges native
+Claude JSONL results with OpenCode's
 `~/.local/share/opencode/opencode.db` by default. OpenCode support reads
 legacy `session`, `message`, and `part` tables and V2 `session_v2` and
 `session_message` tables. V2 user messages contain `data.text`; assistant
@@ -46,7 +46,7 @@ The OpenCode MVP supports literal matching. Regex requests continue through
 Claude's native RE2 implementation and expose an unavailable OpenCode provider
 summary; a future OpenCode regex implementation must also be linear-time.
 
-Claude-only recall uses `agent_walker_search` with `providers=["claude"]`.
+Claude-only recall uses `agent-walker-search --query "..." --providers claude --json`.
 No native cost/event/beacon command changes in this phase.
 
 ### 2. Pi
@@ -61,10 +61,10 @@ provenance so results are not mistaken for one linear conversation.
 Native `walker search` discovers `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`
 and reads searchable legacy user and agent events plus current canonical message
 items directly from the rollout stream.
-`CODEX_HOME` relocates that default root to `$CODEX_HOME/sessions`; MCP runs
+`CODEX_HOME` relocates that default root to `$CODEX_HOME/sessions`; the CLI runs
 the native Claude Code and Codex sources separately so result provenance and
 global limits remain accurate.
-This phase tracks MCP-level Codex aggregation, honoring `$CODEX_HOME` and
+This phase tracks CLI Codex aggregation, honoring `$CODEX_HOME` and
 including `archived_sessions` on request. Use SQLite/index files only to enrich
 metadata; rollout files remain discoverable when indexes drift.
 

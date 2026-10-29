@@ -49,7 +49,7 @@ class SelectLanguagesTests(unittest.TestCase):
             ("rust", "cpp", "go", "zig"),
         )
         self.assertEqual(
-            select_languages(["mcp/server.py"]),
+            select_languages(["search/session_search.py"]),
             ("rust", "cpp", "go", "zig"),
         )
         self.assertEqual(

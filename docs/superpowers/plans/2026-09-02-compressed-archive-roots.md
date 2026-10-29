@@ -3939,12 +3939,12 @@ git commit -m "test: restore 100 percent coverage across all four impls after ar
 
 ---
 
-### Task 13: MCP smoke test against the real archive
+### Task 13: Session-search smoke test against the real archive
 
 **Files:**
 - Modify: none. This is a verification task; it produces a measurement, not a diff.
 
-The MCP server shells out to `walker search` without `--projects-root`, so the implicit `~/claude-archive` root now applies to every MCP query. Its subprocess timeout is 30 seconds (`SPEC.md` MCP shim section). That budget is what this task measures.
+The session-search CLI delegates to `walker search` without `--projects-root`, so the implicit `~/claude-archive` root now applies to every CLI query. Its subprocess timeout is 30 seconds (`SPEC.md` Session-search CLI section). That budget is what this task measures.
 
 - [ ] **Step 1: Confirm the real archive is present and sized**
 
@@ -3964,7 +3964,7 @@ Because `--projects-root` is omitted, this now walks the live tree plus every ar
 time "$WALKER" --period 86400 --win-start 0
 ```
 
-`WALKER` is the installed binary, resolved the same way `mcp/server.py` does: `$AGENT_WALKER_BINARY`, then `~/.claude/walker[.exe]`, then `~/.local/bin/agent-walker[.exe]`. Run each binary five times and take the median `elapsed_ms`.
+`WALKER` is the installed binary, resolved the same way `search/session_search.py` does: `$AGENT_WALKER_BINARY`, then `~/.claude/walker[.exe]`, then `~/.local/bin/agent-walker[.exe]`. Run each binary five times and take the median `elapsed_ms`.
 
 Expected: the new binary's median stays within 1.25x of the old binary's median on the same tree. This is a hard budget, not a number to record: cost mode runs on every statusline tick in every open session, and a regression here multiplies across the fleet. With the current 365-day cull almost no archived session survives the mtime prune, so the added work is directory enumeration, not inflation. If the new median exceeds 1.25x the old, stop and report the two medians and the file counts; do not proceed to Task 14. The likely cause is the archive expansion walking host directories that the prune should have emptied, or a suffix classification that opens files before the prune.
 
@@ -3996,21 +3996,17 @@ Then:
 
 Expected: at least one hit whose `file_path` ends in `.jsonl.zst` and whose `host_root` is a `~/claude-archive/<hostname>` path.
 
-- [ ] **Step 4: Drive the same query through the MCP server and time it**
+- [ ] **Step 4: Drive the same query through the session-search CLI and time it**
 
 ```bash
-time python mcp/server.py <<'JSON'
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"agent_walker_search","arguments":{"pattern":"<same phrase>","providers":["claude"],"limit":5,"format":"jsonl"}}}
-JSON
+time agent-walker-search --query "<same phrase>" --providers claude --limit 5 --json
 ```
-
-If driving the stdio server by hand is awkward, the equivalent is to invoke the tool from a Claude Code session that has the `agent-walker` MCP server registered and confirm it returns rather than raising the 30 second timeout error.
 
 Expected: a result within the 30 second budget, with at least one hit whose `file_path` ends in `.jsonl.zst`. If the call times out, the fix is not to raise the timeout: report the measured wall clock and the file count so the owner can decide, since the archive grows monotonically.
 
 - [ ] **Step 5: Record the measurement**
 
-Write the three numbers into the Task 14 documentation commit body: cost-mode `elapsed_ms` before and after, and the MCP call's wall clock. Do not add a new dated report file under `docs/`; the plan header and the commit message carry it.
+Write the three numbers into the Task 14 documentation commit body: cost-mode `elapsed_ms` before and after, and the session-search call's wall clock. Do not add a new dated report file under `docs/`; the plan header and the commit message carry it.
 
 ---
 
@@ -4020,7 +4016,7 @@ Write the three numbers into the Task 14 documentation commit body: cost-mode `e
 - Modify: `AGENTS.md` (the intro paragraph and the "When adding a new feature across all impls" checklist)
 - Modify: `README.md:29-60` (the roots and multi-host sections)
 - Modify: `SPEC.md` (verify Task 1's edits still match the shipped behavior)
-- Modify: `mcp/server.py:1-13` (module docstring)
+- Modify: `search/session_search.py:1-13` (module docstring)
 - Not modified: `docs/provider-roadmap.md` (verified 2026-09-02: it contains no mention of roots, so it cannot have drifted)
 
 - [ ] **Step 1: Run the docs-update check**
@@ -4072,9 +4068,9 @@ Extend the config example at `README.md:51-62` with the `claude-archive` tagged 
 repeatable and available on every subcommand.
 ```
 
-- [ ] **Step 4: Update the `mcp/server.py` docstring**
+- [ ] **Step 4: Update the `search/session_search.py` docstring**
 
-Replace the second paragraph of the module docstring (`mcp/server.py:3-7`):
+Replace the second paragraph of the module docstring (`search/session_search.py:3-7`):
 
 ```python
 Claude Code search remains delegated to the native agent-walker binary
@@ -4089,12 +4085,12 @@ and beacon modes remain Claude-only.
 - [ ] **Step 5: Verify no doc still contradicts the shipped behavior**
 
 ```bash
-grep -rn "only the local live tree\|\.jsonl only\|codex roots\b" README.md AGENTS.md SPEC.md mcp/server.py
+grep -rn "only the local live tree\|\.jsonl only\|codex roots\b" README.md AGENTS.md SPEC.md search/session_search.py
 ```
 Expected: no hit that asserts transcripts are exclusively uncompressed or that roots are exclusively live.
 
 ```bash
-python -c "import pathlib,sys; bad=[p for p in ['README.md','AGENTS.md','SPEC.md','mcp/server.py'] if '\u2014' in pathlib.Path(p).read_text(encoding='utf-8')]; print(bad); sys.exit(1 if bad else 0)"
+python -c "import pathlib,sys; bad=[p for p in ['README.md','AGENTS.md','SPEC.md','search/session_search.py'] if '\u2014' in pathlib.Path(p).read_text(encoding='utf-8')]; print(bad); sys.exit(1 if bad else 0)"
 ```
 Expected: `[]` and exit 0. The escape is deliberate, as in Task 1 Step 7.
 
@@ -4109,14 +4105,14 @@ Expected: all three green, exit 0 each.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add AGENTS.md README.md SPEC.md mcp/server.py
+git add AGENTS.md README.md SPEC.md search/session_search.py
 git commit -F - <<'EOF'
-docs: document compressed archive roots across README, AGENTS, and the MCP shim
+docs: document compressed archive roots across README, AGENTS, and the session-search CLI
 
 Records the Task 13 smoke measurement:
   cost-mode elapsed_ms before: <N>
   cost-mode elapsed_ms after:  <N>
-  MCP agent_walker_search wall clock: <N>s against <N> .jsonl.zst files
+  agent-walker-search wall clock: <N>s against <N> .jsonl.zst files
 EOF
 ```
 

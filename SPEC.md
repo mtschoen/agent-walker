@@ -710,14 +710,13 @@ across all four impls; substring matching treats newlines as whitespace and
 regex honors an explicit `(?m)` in the pattern. No on-disk index, no semantic
 search, no mutation.
 
-## MCP shim
+## Session-search CLI
 
-`mcp/server.py` is a FastMCP stdio server exposing provider-neutral historical
-recall. `agent_walker_search` searches Claude Code, Codex, and OpenCode by default,
-normalizes each hit with a `provider` field, sorts the merged result
-newest-first, and returns `{hits, summary, note}`. Per-provider summaries live
-under `summary.providers`. It is the only MCP search tool; callers scope it with
-`providers` when they want one or more specific agent harnesses.
+`search/session_search.py` is a stdlib-only Python 3.10+ CLI exposing
+provider-neutral historical recall. The installed `agent-walker-search` command
+searches Claude Code, Codex, and OpenCode by default, normalizes each hit with a
+`provider` field, and sorts the merged result newest-first. Callers scope it
+with `--providers` followed by one or more of `claude`, `codex`, or `opencode`.
 
 This aggregation boundary is search-only. Cost, events, beacons, active-session
 tracking, and every native bare-flag invocation remain Claude-specific.
@@ -741,24 +740,31 @@ tracking, and every native bare-flag invocation remain Claude-specific.
   uses the message rowid and block ID, or `message_id:block_index` when no block
   ID exists. Incomplete schemas and unsupported V2 message shapes raise a
   compatibility error rather than returning incomplete history. Non-chat rows,
-  reasoning, and non-text attachments are not searched. Override
-  discovery with `AGENT_WALKER_OPENCODE_DB` or the `opencode_db` parameter.
-  Literal matching is supported. Regex queries report this provider unavailable
-  until a linear-time RE2-compatible matcher is available; they never fall back
-  to Python's backtracking regex engine.
-- **Generic tool parameters:** `pattern` (required), optional `providers`,
-  `regex`, `case_sensitive`, `role`, `since`, `until`, `cwd`, `context_turns`,
-  `limit`, `count_only`, `include_tool_blocks`, and `opencode_db`.
-- **Errors:** a non-zero walker exit (bad input) or a 30 s subprocess timeout
-  raises an MCP tool error carrying the walker's stderr; the truncation hint
-  from a successful run is passed through as `note`.
-- **Logging:** one JSONL event per call (`session_start`/`call`/`return`/
-  `error`) at `~/.claude-walker-mcp.log`, mirroring projdash — tail it to trace
-  a hang.
-- **Registration:** user-scope via
-  `claude mcp add --scope user agent-walker -- python <repo>/mcp/server.py`,
-  so it's available from every cwd. Launched by absolute script path, not
-  `python -m mcp`, to avoid colliding with the `mcp` SDK package name.
+  reasoning, and non-text attachments are not searched. Override discovery with
+  `AGENT_WALKER_OPENCODE_DB` or `--opencode-db`. Literal matching is supported.
+  Regex queries report this provider unavailable until a linear-time
+  RE2-compatible matcher is available; they never fall back to Python's
+  backtracking regex engine.
+- **Flags:** `--query` (required), `--providers`, `--regex`,
+  `--case-sensitive`, `--role`, `--since`, `--until`, `--cwd`,
+  `--context-turns`, `--limit`, `--count-only`, `--include-tool-blocks`,
+  `--opencode-db`, and `--json`. Defaults match the provider `SearchOptions`:
+  role `both`, one context turn, limit 50, and all providers.
+- **Output:** `--json` emits `{hits, summary, note}` with per-provider summaries
+  under `summary.providers`. Without `--json`, the CLI prints each hit's
+  provider, session, timestamp, and snippet, followed by hit and session counts,
+  truncation state when true, and any note.
+- **Errors:** argument parsing failures exit 2. If every selected provider
+  fails, the CLI prints the combined error to stderr and exits 1. A non-zero
+  walker exit or 30 s subprocess timeout contributes the walker's stderr to
+  that provider error. If another provider succeeds, the failed provider is
+  marked unavailable in `summary.providers` and its error is included in `note`.
+  A successful walker's truncation hint is also passed through as `note`.
+- **Installation:** `install.sh` and `install.bat` copy the CLI, its OpenCode
+  provider, and its process wrapper into `~/.local/bin`. POSIX installs an
+  executable `agent-walker-search`; Windows installs `agent-walker-search.py`
+  and an `agent-walker-search.bat` launcher. The agent-facing skill lives at
+  `skills/session-search/SKILL.md`.
 
 ## Conformance fixtures
 

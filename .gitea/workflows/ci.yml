@@ -414,6 +414,8 @@ jobs:
         # ci/post-coverage-status.py. `if: always()` so the percent posts
         # even when the gate fails (state then reflects the read, not the
         # gate verdict — the gate's own status line still goes red).
+        # Fork and AGit pull requests get a read-only job token; the script
+        # skips the post with a notice on HTTP 403 for pull_request events.
         #
         # The llamabox Gitea instance serves a publicly-trusted Let's Encrypt
         # cert, so urllib's default verification validates it natively — no

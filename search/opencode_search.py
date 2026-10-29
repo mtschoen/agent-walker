@@ -431,7 +431,7 @@ def _build_hits(
 
 
 def search(options: SearchOptions) -> dict[str, Any]:
-    """Search OpenCode sessions and return the MCP provider result shape."""
+    """Search OpenCode sessions and return the CLI provider result shape."""
     if options.limit < 1:
         raise OpenCodeSearchError("limit must be at least 1")
     if options.context_turns < 0:

@@ -11,21 +11,28 @@ Walks `~/.claude/projects/**/*.jsonl` (parent transcripts + their
 assistant turns by `message.id`, and prices each turn against the canonical
 Anthropic per-MTok rate table. Emits two dollar totals on stdout.
 
-The `agent-walker` MCP server is broader: `agent_walker_search` searches Claude
-Code JSONLs, Codex rollouts, and OpenCode's SQLite session store by default, labels every hit by
+The `agent-walker-search` CLI is broader: it searches Claude Code JSONLs, Codex
+rollouts, and OpenCode's SQLite session store by default, labels every hit by
 provider, and merges results newest-first. This aggregation is intentionally
 limited to historical recall. OpenCode sessions do not enter Claude statusline
 costs, events, progress beacons, or active-session calculations.
 
+```bash
+agent-walker-search --query "cache decision" --providers claude codex --limit 10 --json
+```
+
+The structured result contains `hits`, `summary`, and `note`. See
+[`SPEC.md`](SPEC.md) for every flag and the output contract.
+
 OpenCode discovery uses `~/.local/share/opencode/opencode.db`. Override it with
-the tool's `opencode_db` parameter or `AGENT_WALKER_OPENCODE_DB`. The provider
+the CLI's `--opencode-db` flag or `AGENT_WALKER_OPENCODE_DB`. The provider
 opens SQLite read-only and validates legacy `session` / `message` / `part`
 and V2 `session_v2` / `session_message` columns. Both schemas are searched when
 present, preferring V2 for duplicate session IDs. See [`docs/provider-roadmap.md`](docs/provider-roadmap.md)
 for the Pi, Hermes, and Agy aggregation phases.
 
-OpenCode search currently supports literal substring matching. For `regex=true`,
-the generic tool still searches Claude and Codex with the native engine and reports
+OpenCode search currently supports literal substring matching. With `--regex`,
+the CLI still searches Claude and Codex with the native engine and reports
 OpenCode as unavailable rather than substituting Python's potentially
 backtracking regex engine.
 
@@ -40,7 +47,7 @@ be aggregated by the host that has filesystem access to all of them. See
 Native search accepts `--transcript-format claude-code|codex` to select a provider
 before discovery, counts, and limits. Codex search supports current
 `response_item` messages and legacy `event_msg` conversation records; system and
-developer messages and `item_completed` mirrors are ignored. The MCP wrapper
+developer messages and `item_completed` mirrors are ignored. The search CLI
 selects each native format explicitly so its provider labels match the source.
 
 Drop-in optional speedup for [schoen-claude-status](https://github.com/mtschoen/schoen-claude-status)
@@ -109,6 +116,6 @@ honor and the correctness rules they all share.
 
 The C++ walker is the installed production binary; Rust, Go, and Zig remain
 conformance-tested comparison implementations. Native cost, event, beacon, and
-search modes are implemented across all four. The MCP server adds
-provider-neutral historical recall for Claude Code and OpenCode; remaining
-providers are tracked in [`docs/provider-roadmap.md`](docs/provider-roadmap.md).
+search modes are implemented across all four. The search CLI adds
+provider-neutral historical recall for Claude Code, Codex, and OpenCode;
+remaining providers are tracked in [`docs/provider-roadmap.md`](docs/provider-roadmap.md).

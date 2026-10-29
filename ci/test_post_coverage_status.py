@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -134,6 +135,53 @@ class PostCoverageStatusTests(unittest.TestCase):
                     request.full_url,
                     "https://gitea.fleet.sticktoitive.net/api/v1/repos/schoen/agent-walker/statuses/abc1234567890",
                 )
+
+    def _run_with_post_failure(self, status: int, event: str) -> tuple[int, str]:
+        env = {
+            "GITHUB_SERVER_URL": "https://gitea.fleet.sticktoitive.net",
+            "GITHUB_REPOSITORY": "schoen/agent-walker",
+            "GITHUB_SHA": "abc1234567890",
+            "GITHUB_RUN_ID": "42",
+            "GITHUB_TOKEN": "secret-token",
+            "GITHUB_EVENT_NAME": event,
+        }
+        failure = urllib.error.HTTPError(
+            "https://example.invalid", status, "x", {}, None
+        )
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            summary_path = Path(tmpdir) / "summary.json"
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "cumulative_percent": 99.0,
+                        "cumulative_covered": 99,
+                        "cumulative_total": 100,
+                        "measured_impls": 1,
+                    }
+                )
+            )
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("urllib.request.urlopen", side_effect=failure),
+                patch("sys.stdout", stdout),
+            ):
+                code = post_coverage_status.main(
+                    ["post-coverage-status.py", "--summary", str(summary_path)]
+                )
+        return code, stdout.getvalue()
+
+    def test_forbidden_on_pull_request_is_skipped_with_notice(self) -> None:
+        code, output = self._run_with_post_failure(403, "pull_request")
+        self.assertEqual(code, 0)
+        self.assertIn("read-only", output)
+        self.assertIn("not posted", output)
+
+    def test_forbidden_on_push_raises(self) -> None:
+        for status, event in ((403, "push"), (500, "pull_request")):
+            with self.subTest(status=status, event=event):
+                with self.assertRaises(urllib.error.HTTPError):
+                    self._run_with_post_failure(status, event)
 
 
 if __name__ == "__main__":

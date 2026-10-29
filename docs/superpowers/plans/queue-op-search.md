@@ -45,8 +45,8 @@ Behavior:
   they count as `role: user` (so `--role user` includes them with the
   flag on, `--role assistant` excludes them); tool-block-skip is N/A.
 
-MCP shim gets a matching `include_queue_ops: bool = False` parameter (see
-"MCP shim" step below).
+The session-search CLI gets a matching `--include-queue-ops` flag (see the
+"Session-search CLI" step below).
 
 ## Findings (corpus-verified — trust these, don't re-derive)
 
@@ -202,10 +202,10 @@ Commits: `search: --include-queue-ops (go impl)`, etc.
 Merge each with `--no-ff`; rerun `python shared/conformance.py rust cpp go
 zig` against the merged tree. All green before proceeding.
 
-### 8. Rebuild + reinstall the C++ binary; update the MCP shim
+### 8. Rebuild + reinstall the C++ binary; update the session-search CLI
 
-**The MCP shim subprocesses the installed binary** (`~/.local/bin/
-claude-walker.exe`), so the feature isn't live for the MCP tool until the
+**The session-search CLI subprocesses the installed binary** (`~/.local/bin/
+claude-walker.exe`), so the feature isn't live for the CLI until the
 production C++ binary is rebuilt and reinstalled:
 
 ```bash
@@ -213,13 +213,11 @@ bash install.sh        # or install.bat — rebuilds cpp + copies to ~/.local/bi
 ~/.local/bin/claude-walker.exe --version   # confirm rebuilt
 ```
 
-Then in `mcp/server.py`: add `include_queue_ops: bool = False` to the
-`agent_walker_search` tool signature + docstring, and map it to the Claude
-provider's `--include-queue-ops` argument (mirror `include_tool_blocks`).
-Update the `## MCP shim` section's parameter list in `SPEC.md`. Smoke-test
-the shim (the previous session's pattern: instantiate `create_mcp_server`,
-`list_tools`, call with `include_queue_ops=True` against a known queued
-message, confirm a `role: user` hit comes back).
+Then in `search/session_search.py`: add an `--include-queue-ops` flag and map
+it to the Claude provider's `--include-queue-ops` argument (mirroring
+`include_tool_blocks`). Update the `## Session-search CLI` section's flag list
+in `SPEC.md`. Smoke-test the CLI with `--include-queue-ops --json` against a
+known queued message and confirm a `role: user` hit comes back.
 
 ### 9. Commit + push
 
@@ -239,17 +237,17 @@ before deleting those; they're not part of this feature.
       corpus (end-to-end, not just fixtures). Good test query: search a
       session known to have plain-text enqueues with and without the flag;
       the flag should add the queued message as a `role: user` hit.
-- [ ] C++ binary rebuilt + reinstalled; MCP shim smoke-passes with
-      `include_queue_ops=True`.
+- [ ] C++ binary rebuilt + reinstalled; session-search CLI smoke-passes with
+      `--include-queue-ops`.
 
 ## File index
 
-- Contract home: `SPEC.md` → `### search` + `## MCP shim`.
+- Contract home: `SPEC.md` → `### search` + `## Session-search CLI`.
 - Search logic: `rust/src/search.rs`, `rust/src/content.rs` (reference);
   `cpp/search.{cpp,hpp}`, `go/search.go`, `zig/src/search.zig`.
 - Fixtures: `shared/corpus/search/` + `shared/generate_search_corpus.py`.
 - Conformance: `shared/conformance.py`.
-- MCP shim: `mcp/server.py`.
+- Session-search CLI: `search/session_search.py`.
 - Install (rebuilds cpp): `install.sh` / `install.bat`.
 
 ## First message to send the new session

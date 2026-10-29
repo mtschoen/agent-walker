@@ -22,7 +22,7 @@ questions fast:
 Two auxiliary subcommands round out the native tool (not used by the status
 line): `events` (one NDJSON line per assistant turn, feeds the `/spend`
 dashboard) and `search` (Claude Code and Codex full-text transcript search). The
-`agent-walker` MCP server aggregates that native search with provider modules
+`agent-walker-search` CLI aggregates that native search with provider modules
 such as OpenCode SQLite. Provider aggregation is historical-search-only; it
 must not enter cost, event, beacon, or active-session calculations.
 
@@ -262,44 +262,17 @@ conformance-equal fallbacks for hosts with no C++ toolchain. A host needs
 exactly one of cmake + a C++ compiler, `go`, or `cargo` + a linker; when
 none is present the script reports that and exits non-zero.
 
-It also registers the `search` MCP server (`mcp/server.py`) via
-`claude mcp add`:
+Both scripts also install the stdlib-only Python 3.10+ session-search CLI.
+POSIX installs `search/session_search.py` as the executable
+`~/.local/bin/agent-walker-search`. Windows installs it as
+`agent-walker-search.py` with an `agent-walker-search.bat` launcher. The
+OpenCode provider and process wrapper are copied beside the command, and the
+installer smoke-tests `agent-walker-search --help`.
 
-- **no flag** -> `user` scope (global; lands in `~/.claude.json`'s
-  top-level `mcpServers`, available in every project).
-- **`--project [DIR]`** -> `local` scope for `DIR` (or the directory you
-  invoked the installer from if `DIR` is omitted). `local` over `project`
-  scope is deliberate: the registration points at an absolute
-  machine-specific `server.py` path that has no business in a committed
-  `.mcp.json`.
-
-Registration is additive: a failure (or a missing `claude` CLI) warns
-but does not fail the binary install. The installer manages a dedicated
-venv at `mcp/.venv` (gitignored) to host the `mcp` SDK: it picks the
-newest Python ≥3.10 available (`python3.13` → `3.12` → `3.11` → `3.10`,
-falling back to `python3`/`python`; on Windows uses the `py` launcher),
-creates the venv if missing, runs `pip install --upgrade "mcp~=2.0"` into
-it (idempotent), and registers the server with the venv's interpreter as
-an absolute path. This sidesteps both PEP 668 (modern macOS/Linux pythons
-refuse system-wide pip) and the trap that bare `python` may not exist on
-PATH for processes Claude Code spawns (shell aliases don't propagate).
-Re-running is idempotent: the prior registration in that scope is
-removed first, and an existing venv is reused.
-
-The SDK spec is **pinned to the 2.x line**, and the reuse check probes
-whether the venv's interpreter actually *runs* rather than merely existing.
-Both guard failure modes that took the server down silently:
-
-- `server.py` targets the v2 API (`mcp.server.MCPServer`). An unpinned
-  `--upgrade` crosses the 1.x -> 2.x boundary on its own, and 2.0 removed
-  `mcp.server.fastmcp` outright, so the server starts failing at import
-  with no signal until the next connect attempt.
-- A venv whose base Python was uninstalled or relocated still has its
-  `python` stub on disk, but that stub resolves `home` out of `pyvenv.cfg`
-  and dies at startup. An `exists`-only check treats it as healthy and
-  skips the repair forever. Re-running `-m venv` over the directory
-  rewrites `pyvenv.cfg` and the launcher while leaving `site-packages`
-  intact, so the repair is cheap and non-destructive.
+The agent-facing skill at `skills/session-search/SKILL.md` teaches historical
+recall through the CLI, including provider filters, limits, and `--json`
+output. It uses the same native binary discovery and OpenCode search module as
+the source entry point.
 
 ## Remotes
 
